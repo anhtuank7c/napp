@@ -54,11 +54,30 @@ fi
 info "Đang tải napp từ: $NAPP_CJS_URL"
 TMP_FILE="$(mktemp)"
 trap 'rm -f "$TMP_FILE"' EXIT
-curl --proto '=https' --tlsv1.2 -fsSL "$NAPP_CJS_URL" -o "$TMP_FILE" \
-  || die "Tải thất bại — kiểm tra URL hoặc kết nối mạng."
 
-node --check "$TMP_FILE" 2>/dev/null || die "File tải về lỗi cú pháp — có thể tải dở/hỏng. Hãy thử lại."
-grep -q '__NAPP_MARKER__' "$TMP_FILE" || die "File tải về không giống napp.cjs hợp lệ — huỷ cài đặt."
+# Gist raw đôi khi trả về bản cache cũ/dở hoặc trang lỗi HTML (rate-limit) ngay
+# sau khi cập nhật, nên ta thử tải + kiểm tra lại vài lần trước khi bỏ cuộc.
+ATTEMPTS="${NAPP_DL_ATTEMPTS:-3}"
+attempt=1
+while :; do
+  # --retry: tự thử lại khi lỗi mạng tạm thời; header no-cache: hạn chế nhận bản cache cũ.
+  curl --proto '=https' --tlsv1.2 -fsSL \
+       --retry 3 --retry-delay 2 --retry-all-errors \
+       -H 'Cache-Control: no-cache' \
+       "$NAPP_CJS_URL" -o "$TMP_FILE" \
+    && node --check "$TMP_FILE" 2>/dev/null \
+    && grep -q '__NAPP_MARKER__' "$TMP_FILE" \
+    && break
+
+  # Thất bại: in chẩn đoán để dễ biết nguyên nhân (tải dở, trang HTML, sai URL...).
+  warn "Lần $attempt/$ATTEMPTS thất bại. File tải về: $(wc -c < "$TMP_FILE" 2>/dev/null || echo 0) byte."
+  warn "  Dòng đầu: $(head -1 "$TMP_FILE" 2>/dev/null | cut -c1-80)"
+  if [[ $attempt -ge $ATTEMPTS ]]; then
+    die "Không tải được napp.cjs hợp lệ sau $ATTEMPTS lần. Có thể gist cache chưa đồng bộ — đợi 1-2 phút rồi chạy lại, hoặc kiểm tra URL: $NAPP_CJS_URL"
+  fi
+  attempt=$((attempt + 1))
+  sleep 2
+done
 
 install -m 0755 "$TMP_FILE" "$INSTALL_PATH"
 ok "Đã cài napp vào $INSTALL_PATH"
