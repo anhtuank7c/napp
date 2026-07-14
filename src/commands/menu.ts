@@ -192,7 +192,7 @@ async function menuBackup(): Promise<void> {
 async function menuInfra(): Promise<void> {
   while (true) {
     printMenu("Hạ tầng (Firewall / fail2ban / Cloudflare / Tối ưu)", [
-      "Đồng bộ UFW (SSH + Cloudflare-only 80/443)",
+      "Đồng bộ UFW (SSH + mở 80/443 công khai)",
       "Trạng thái UFW",
       "Áp cấu hình fail2ban",
       "Trạng thái fail2ban",
@@ -202,7 +202,7 @@ async function menuInfra(): Promise<void> {
     ]);
     const choice = await ask("Chọn: ");
     if (choice === "0" || choice === "") return;
-    if (choice === "1") await guard(() => cmdFirewallSync({ restrictToCloudflare: true, extraPorts: [], yes: false }));
+    if (choice === "1") await guard(() => cmdFirewallSync({ restrictToCloudflare: false, extraPorts: [], yes: false }));
     else if (choice === "2") await guard(() => cmdFirewallStatus());
     else if (choice === "3") await guard(() => cmdFail2banSetup({}));
     else if (choice === "4") await guard(() => cmdFail2banStatus());

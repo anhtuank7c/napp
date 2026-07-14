@@ -25,7 +25,11 @@ function detectSshPort(): number {
 
 export interface FirewallSyncOptions {
   sshPort?: number;
-  restrictToCloudflare: boolean; // true (mặc định): 80/443 chỉ mở cho IP Cloudflare
+  // MẶC ĐỊNH false: mở 80/443 cho mọi IP. Việc lấy IP client thật (khi qua
+  // Cloudflare proxy) do nginx đảm nhiệm qua `napp cloudflare sync` — KHÔNG
+  // liên quan tới tường lửa. Đặt true (opt-in, nâng cao) nếu muốn khoá origin
+  // chỉ nhận traffic từ dải IP Cloudflare (chống bypass thẳng vào origin IP).
+  restrictToCloudflare: boolean;
   extraPorts: number[]; // các cổng bổ sung người dùng muốn mở công khai (hiếm khi cần)
   yes: boolean;
   quiet?: boolean;
@@ -87,14 +91,15 @@ export async function cmdFirewallSync(opts: FirewallSyncOptions): Promise<void> 
     for (const ip of ips) {
       runCmd("ufw", ["allow", "from", ip, "to", "any", "port", "80,443", "proto", "tcp", "comment", "napp: Cloudflare"]);
     }
-    ok(`Đã whitelist ${ips.length} dải IP Cloudflare cho cổng 80/443.`);
+    ok(`(Nâng cao) Đã khoá origin: 80/443 CHỈ nhận từ ${ips.length} dải IP Cloudflare.`);
     warn(
-      "Lưu ý: certbot HTTP-01 vẫn hoạt động bình thường MIỄN LÀ domain đang bật proxy (orange cloud) trên Cloudflare — " +
-        "request của Let's Encrypt sẽ đi qua edge Cloudflare rồi mới tới origin."
+      "Chế độ khoá origin này KHÔNG cần cho việc lấy IP client thật (đó là việc của nginx real-IP qua " +
+        "`napp cloudflare sync`). Chỉ bật nếu muốn chống bypass thẳng vào origin IP, VÀ mọi domain đều bật proxy " +
+        "(orange cloud) trên Cloudflare — domain nào không qua proxy sẽ bị chặn."
     );
   } else {
     runCmd("ufw", ["allow", "80,443/tcp", "comment", "napp: HTTP/HTTPS"]);
-    warn("80/443 đang mở cho MỌI IP (không giới hạn Cloudflare) — chỉ nên dùng nếu một số domain không qua Cloudflare proxy.");
+    log("80/443 mở cho mọi IP. IP client thật do nginx khôi phục qua `napp cloudflare sync` (real-IP từ header CF-Connecting-IP).");
   }
 
   for (const p of opts.extraPorts) {

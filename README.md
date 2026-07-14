@@ -14,7 +14,7 @@ cô lập hoàn toàn giữa các app, nginx chỉ đóng vai trò reverse-proxy
 - 🗄️ Tạo sẵn **database MariaDB** + **Redis DB riêng (0-15)** cho từng app (tùy chọn)
 - 👤 Mỗi app một **user Linux riêng**, systemd service riêng, thư mục riêng (750/640, `.env` 600)
 - 🌐 nginx reverse-proxy tự sinh, hỗ trợ **Cloudflare real-IP** (trích xuất đúng IP client thật)
-- 🧱 **UFW**: mặc định deny, chỉ mở SSH + 80/443 (chỉ từ dải IP Cloudflare)
+- 🧱 **UFW**: mặc định deny, mở SSH + 80/443 công khai (tùy chọn khoá origin theo dải IP Cloudflare với `--restrict-cloudflare`)
 - 🛡️ **fail2ban**: sshd + nginx-botsearch/http-auth/limit-req + jail riêng chống spam 502/504/429
 - 💾 **Backup định kỳ** (database + mã nguồn) qua **systemd timer**, có xoay vòng retention
 - ⚙️ **Tối ưu theo phần cứng thực tế**: `napp tune apply` phát hiện CPU/RAM và điều chỉnh nginx/MariaDB/Redis/sysctl — chạy lại bất cứ khi nào nâng cấp server
@@ -85,7 +85,7 @@ Gõ số rồi Enter, `0` để quay lại/thoát.
 | `napp redis info\|allocations` / `sudo napp redis flush <n>` | Quản lý Redis |
 | `sudo napp backup run [--target db\|files\|all] [--keep n]` | Backup ngay |
 | `sudo napp backup schedule --time 03:00 --keep 7` | Lên lịch backup qua systemd timer |
-| `sudo napp firewall sync [--ssh-port n] [--no-cloudflare-restrict]` | Đồng bộ UFW |
+| `sudo napp firewall sync [--ssh-port n] [--restrict-cloudflare]` | Đồng bộ UFW (mặc định mở 80/443; `--restrict-cloudflare` để khoá origin theo IP Cloudflare) |
 | `sudo napp fail2ban setup` | Áp cấu hình fail2ban |
 | `sudo napp cloudflare sync` | Đồng bộ dải IP Cloudflare vào nginx (real IP) |
 | `sudo napp tune show\|apply` | Xem/áp tối ưu theo phần cứng thực tế |
@@ -139,7 +139,7 @@ sudo napp app deploy api.example.com
 - Mỗi app: user Linux riêng (`nologin`), thư mục `750`, file `640`, `.env` `600`
 - systemd service hardening: `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `ReadWritePaths` giới hạn đúng thư mục app
 - Database: mỗi app một database + user CSDL riêng, quyền chỉ trên database đó (không dùng root)
-- UFW: mặc định deny incoming, chỉ mở SSH + 80/443 — và 80/443 **chỉ nhận từ dải IP Cloudflare** (tùy chọn tắt bằng `--no-cloudflare-restrict` nếu có domain không qua Cloudflare)
+- UFW: mặc định deny incoming, mở SSH + **80/443 công khai**. Việc lấy đúng IP client thật khi qua Cloudflare do nginx real-IP đảm nhiệm (`napp cloudflare sync`), độc lập với tường lửa. Nếu muốn khoá origin chỉ nhận traffic từ dải IP Cloudflare (chống bypass thẳng origin IP) thì thêm `--restrict-cloudflare` — lưu ý mọi domain phải bật proxy Cloudflare
 - fail2ban: chặn brute-force SSH + bot dò nginx + IP spam lỗi 502/504/429
 - Cloudflare real-IP: nginx trích xuất đúng IP client thật (không phải IP edge Cloudflare) để app phía sau nhận `X-Real-IP`/`X-Forwarded-For` chính xác
 

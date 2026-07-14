@@ -16,6 +16,13 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.2.0
+- Tường lửa UFW KHÔNG còn giới hạn 80/443 chỉ cho dải IP Cloudflare theo mặc
+  định — nay mở 80/443 công khai. Việc lấy IP client thật là của nginx real-IP
+  (\`napp cloudflare sync\`), KHÔNG liên quan tới UFW. Muốn khoá origin theo IP
+  Cloudflare (nâng cao) thì thêm cờ \`--restrict-cloudflare\`.
+- Timer đồng bộ Cloudflare chỉ còn refresh nginx real-IP, không đụng UFW nữa.
+
 ## 1.1.0
 - Chọn TRÌNH QUẢN LÝ GÓI (npm/pnpm/yarn/bun) khi tạo app, tách bạch khỏi
   runtime engine (node/bun). Cờ mới: --package-manager. Lệnh cài mặc định

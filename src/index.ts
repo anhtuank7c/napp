@@ -187,15 +187,15 @@ backup.command("list").description("liệt kê các bản backup hiện có").ac
 const firewall = program.command("firewall").description("quản lý tường lửa UFW");
 firewall
   .command("sync")
-  .description("đồng bộ UFW: deny mặc định, allow SSH, allow 80/443 (mặc định chỉ IP Cloudflare)")
+  .description("đồng bộ UFW: deny mặc định, allow SSH, mở 80/443 cho mọi IP")
   .option("--ssh-port <port>", "cổng SSH (mặc định: tự dò từ sshd_config)", (v) => parseInt(v, 10))
-  .option("--no-cloudflare-restrict", "mở 80/443 cho mọi IP thay vì chỉ Cloudflare")
+  .option("--restrict-cloudflare", "(nâng cao) khoá origin: 80/443 CHỈ nhận từ dải IP Cloudflare (không cần cho việc lấy IP client thật)")
   .option("--extra-port <port...>", "cổng công khai bổ sung", (v, prev: number[]) => [...prev, parseInt(v, 10)], [] as number[])
   .option("-y, --yes", "không hỏi xác nhận")
   .action(async (opts) =>
     cmdFirewallSync({
       sshPort: opts.sshPort,
-      restrictToCloudflare: Boolean(opts.cloudflareRestrict),
+      restrictToCloudflare: Boolean(opts.restrictCloudflare),
       extraPorts: opts.extraPort ?? [],
       yes: Boolean(opts.yes),
       quiet: false,

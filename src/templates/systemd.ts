@@ -89,16 +89,18 @@ WantedBy=timers.target
 `;
 }
 
-// --- systemd timer cho đồng bộ dải IP Cloudflare + gia hạn SSL ----------
+// --- systemd timer cho đồng bộ dải IP Cloudflare vào nginx (real-IP) -----
+// CHỈ cập nhật danh sách IP Cloudflare trong nginx để khôi phục IP client
+// thật. KHÔNG đụng tới tường lửa — UFW mở 80/443 công khai, không phụ thuộc
+// dải IP Cloudflare.
 export function renderCloudflareSyncService(binPath: string): string {
-  return `# Managed by napp — đồng bộ định kỳ dải IP Cloudflare vào nginx + UFW
+  return `# Managed by napp — đồng bộ định kỳ dải IP Cloudflare vào nginx (real-IP)
 [Unit]
-Description=napp Cloudflare IP sync
+Description=napp Cloudflare IP sync (nginx real-IP)
 
 [Service]
 Type=oneshot
 ExecStart=${binPath} cloudflare sync --quiet
-ExecStartPost=${binPath} firewall sync --quiet
 `;
 }
 
