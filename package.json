@@ -10,7 +10,9 @@
   "scripts": {
     "build": "node esbuild.config.mjs",
     "typecheck": "tsc --noEmit",
-    "check": "npm run typecheck && npm run build"
+    "check": "npm run typecheck && npm run build",
+    "gist:install": "gh gist edit cc1e8194608e3f5a942d6d1d6669e6a3 -a install.sh",
+    "gist:napp": "npm run build && gh gist edit ef7ac27df205d70cf1f789bb420ec013 -a ./dist/napp.cjs"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
