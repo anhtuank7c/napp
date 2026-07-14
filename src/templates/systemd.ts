@@ -1,9 +1,22 @@
 import type { AppRecord } from "../lib/state";
 
+export interface AppSystemdOptions {
+  // NODE_OPTIONS đặt cho app (ví dụ "--max-old-space-size=768"). Chỉ nên set cho
+  // runtime node (V8); bun dùng JavaScriptCore, KHÔNG hiểu cờ heap của V8.
+  nodeOptions?: string;
+}
+
 // Service systemd cho một app Node.js/Bun — chạy dưới user riêng của site,
 // có hardening (NoNewPrivileges/ProtectSystem/ProtectHome), tự khởi động lại
 // khi crash, và đọc biến môi trường từ file .env qua EnvironmentFile.
-export function renderAppSystemdService(app: AppRecord, execStart: string): string {
+//
+// Thứ tự biến môi trường CÓ CHỦ ĐÍCH:
+//   - NODE_OPTIONS đặt TRƯỚC EnvironmentFile -> chỉ là MẶC ĐỊNH, .env của user
+//     ghi đè được (systemd: directive sau thắng directive trước).
+//   - NODE_ENV/PORT đặt SAU EnvironmentFile -> napp ÉP, .env không ghi đè được
+//     (PORT do napp cấp phát, không cho app tự đổi).
+export function renderAppSystemdService(app: AppRecord, execStart: string, opts: AppSystemdOptions = {}): string {
+  const nodeOptionsLine = opts.nodeOptions ? `Environment=NODE_OPTIONS=${opts.nodeOptions}\n` : "";
   return `# Managed by napp — site: ${app.domain}
 [Unit]
 Description=napp application - ${app.domain}
@@ -17,7 +30,7 @@ Type=simple
 User=${app.user}
 Group=${app.user}
 WorkingDirectory=${app.webRoot}
-EnvironmentFile=-${app.webRoot}/.env
+${nodeOptionsLine}EnvironmentFile=-${app.webRoot}/.env
 Environment=NODE_ENV=production
 Environment=PORT=${app.port}
 ExecStart=${execStart}
@@ -28,7 +41,10 @@ TimeoutStopSec=15
 # --- Hardening ---
 NoNewPrivileges=yes
 ProtectSystem=strict
-ProtectHome=yes
+# tmpfs (thay vì yes): vẫn GIẤU mọi thư mục home thật, nhưng cấp cho service một
+# $HOME rỗng GHI ĐƯỢC (ephemeral) — thân thiện với runtime hay ghi cache vào
+# home (bun ~/.bun, node ~/.npm) mà không lộ dữ liệu người dùng.
+ProtectHome=tmpfs
 PrivateTmp=yes
 ReadWritePaths=${app.webRoot}
 ProtectKernelTunables=yes

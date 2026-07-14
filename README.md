@@ -17,7 +17,7 @@ cô lập hoàn toàn giữa các app, nginx chỉ đóng vai trò reverse-proxy
 - 🧱 **UFW**: mặc định deny, mở SSH + 80/443 công khai (tùy chọn khoá origin theo dải IP Cloudflare với `--restrict-cloudflare`)
 - 🛡️ **fail2ban**: sshd + nginx-botsearch/http-auth/limit-req + jail riêng chống spam 502/504/429
 - 💾 **Backup định kỳ** (database + mã nguồn) qua **systemd timer**, có xoay vòng retention
-- ⚙️ **Tối ưu theo phần cứng thực tế**: `napp tune apply` phát hiện CPU/RAM và điều chỉnh nginx/MariaDB/Redis/sysctl — chạy lại bất cứ khi nào nâng cấp server
+- ⚙️ **Tối ưu theo phần cứng thực tế**: `napp tune apply` phát hiện CPU/RAM và điều chỉnh nginx/MariaDB/Redis/sysctl **và NODE_OPTIONS heap V8 cho từng app node** — chạy lại bất cứ khi nào nâng cấp server
 - 🔍 `napp check --fix`: kiểm tra + tự cài Node.js, nginx, certbot, MariaDB, Redis, fail2ban, UFW nếu thiếu
 - 🔄 Tự cập nhật (`napp update`) qua gist công khai, giống lara
 - 🇻🇳 Toàn bộ output tiếng Việt, menu tương tác dạng số
@@ -155,7 +155,8 @@ cấu hình nhầm, phiên hiện tại có thể bị khoá ngay lập tức.
 
 ```bash
 sudo napp tune show    # xem phần cứng phát hiện được + kế hoạch (chưa áp dụng)
-sudo napp tune apply    # áp dụng: nginx worker/gzip, MariaDB innodb_buffer_pool, Redis maxmemory, sysctl
+sudo napp tune apply    # áp: nginx worker/gzip, MariaDB innodb_buffer_pool, Redis maxmemory, sysctl,
+                        # và NODE_OPTIONS heap cho từng app node (ghi lại unit + restart app)
 ```
 
 Chạy `napp tune apply` **bất cứ khi nào nâng cấp phần cứng server** (thêm

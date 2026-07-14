@@ -25,6 +25,8 @@ import { createDatabase, dropDatabase } from "../lib/mysql";
 import { mergeEnvFile } from "../lib/envfile";
 import { renderAppNginxConf } from "../templates/nginx";
 import { renderAppSystemdService, execStartLine } from "../templates/systemd";
+import { detectHardware } from "../lib/hardware";
+import { nodeMaxOldSpaceMB } from "../templates/tuning";
 import { ipv6Available } from "../lib/network";
 
 export interface CreateAppOptions {
@@ -285,7 +287,11 @@ EOF`,
     };
     const unitPath = `${SYSTEMD_DIR}/${serviceName}.service`;
     const { writeFile } = await import("../lib/exec");
-    writeFile(unitPath, renderAppSystemdService(record, execStartLine(startCmd)), 0o644);
+    // Heap V8 chỉ đặt cho runtime node (bun dùng JSC, không hiểu cờ này). Suy từ
+    // phần cứng thực tế; user có thể ghi đè NODE_OPTIONS trong .env.
+    const nodeOptions = opts.runtime === "node" ? `--max-old-space-size=${nodeMaxOldSpaceMB(detectHardware())}` : undefined;
+    writeFile(unitPath, renderAppSystemdService(record, execStartLine(startCmd), { nodeOptions }), 0o644);
+    if (nodeOptions) info(`NODE_OPTIONS=${nodeOptions} (heap V8 theo phần cứng; đổi trong .env nếu cần)`);
     runCmd("systemctl", ["daemon-reload"]);
     runCmd("systemctl", ["enable", serviceName]);
     runCmd("systemctl", ["restart", serviceName]);

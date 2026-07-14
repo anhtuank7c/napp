@@ -16,6 +16,16 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.5.0
+- NODE_OPTIONS (--max-old-space-size) tự tính theo RAM/tier cho app runtime=node,
+  đặt trong unit systemd (user override được qua .env). bun không set (dùng JSC).
+- systemd unit đổi ProtectHome=yes -> tmpfs: vẫn giấu home thật nhưng cấp \$HOME
+  rỗng ghi được, thân thiện runtime (bun/node) hơn.
+- 'napp tune apply' giờ cũng ghi lại unit mọi app (áp NODE_OPTIONS + hardening
+  mới) và khởi động lại; 'napp tune show' hiển thị heap dự kiến.
+- Redis maxmemory-policy: allkeys-lru -> volatile-lru (an toàn hơn khi nhiều app
+  dùng chung Redis — chỉ trục xuất key có TTL).
+
 ## 1.4.0
 - Banner giới thiệu napp (ASCII, có màu, kèm phiên bản động + gợi ý lệnh) hiển
   thị mỗi khi đăng nhập SSH. Cài bởi 'napp install', gỡ bởi 'napp uninstall'.

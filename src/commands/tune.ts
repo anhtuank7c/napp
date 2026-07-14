@@ -11,6 +11,8 @@ import {
   SYSCTL_TUNING_PATH,
 } from "../templates/tuning";
 import { renderNginxTuningConf, NGINX_TUNING_CONF } from "../templates/nginx";
+import { renderAppSystemdService, execStartLine } from "../templates/systemd";
+import { loadState, serviceNameFor, SYSTEMD_DIR } from "../lib/state";
 import { readFileSync, existsSync } from "node:fs";
 
 export function cmdTuneShow(): void {
@@ -22,8 +24,9 @@ export function cmdTuneShow(): void {
   section("Kế hoạch tối ưu (chưa áp dụng — dùng `napp tune apply`)");
   console.log(`  InnoDB buffer pool : ${plan.innodbBufferPoolMB} MB`);
   console.log(`  MariaDB max_connections : ${plan.maxConnections}`);
-  console.log(`  Redis maxmemory    : ${plan.redisMaxMemoryMB} MB (allkeys-lru)`);
+  console.log(`  Redis maxmemory    : ${plan.redisMaxMemoryMB} MB (volatile-lru)`);
   console.log(`  nginx worker_connections : ${plan.workerConnections}`);
+  console.log(`  Node heap mỗi app  : --max-old-space-size=${plan.nodeMaxOldSpaceMB} (NODE_OPTIONS, chỉ app runtime=node)`);
 }
 
 export interface TuneApplyOptions {
@@ -61,15 +64,20 @@ export async function cmdTuneApply(opts: TuneApplyOptions): Promise<void> {
   section("Tối ưu theo phần cứng thực tế");
   console.log(formatHardware(hw));
   console.log();
+  const appCount = Object.keys(loadState().apps).length;
   console.log(`  InnoDB buffer pool -> ${plan.innodbBufferPoolMB} MB`);
-  console.log(`  Redis maxmemory    -> ${plan.redisMaxMemoryMB} MB`);
+  console.log(`  Redis maxmemory    -> ${plan.redisMaxMemoryMB} MB (volatile-lru)`);
   console.log(`  nginx worker_connections -> ${plan.workerConnections}`);
+  console.log(`  Node heap mỗi app  -> --max-old-space-size=${plan.nodeMaxOldSpaceMB} (áp cho ${appCount} app)`);
+  if (hw.diskFreeGB > 0 && hw.diskFreeGB < 5) {
+    warn(`Ổ đĩa trống chỉ còn ${hw.diskFreeGB} GB — chú ý dung lượng cho log/AOF Redis/backup.`);
+  }
   console.log();
 
   if (!opts.yes) {
     const readline = await import("node:readline/promises");
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    const ans = await rl.question("Áp dụng cấu hình trên và khởi động lại nginx/MariaDB/Redis? [y/N] ");
+    const ans = await rl.question("Áp dụng cấu hình trên và khởi động lại nginx/MariaDB/Redis + các app? [y/N] ");
     rl.close();
     if (!/^y(es)?$/i.test(ans.trim())) {
       info("Đã huỷ. Không thay đổi gì.");
@@ -143,6 +151,26 @@ export async function cmdTuneApply(opts: TuneApplyOptions): Promise<void> {
     }
   } else {
     warn("Redis chưa cài — bỏ qua.");
+  }
+
+  // Các app: ghi lại unit systemd để (1) cập nhật NODE_OPTIONS heap V8 theo phần
+  // cứng cho app node, (2) đồng bộ hardening mới (ProtectHome=tmpfs) sang cả app
+  // cũ. Ghi file luôn (idempotent); chỉ restart khi không --skip-restart.
+  const apps = Object.values(loadState().apps);
+  if (apps.length > 0) {
+    const nodeOpt = `--max-old-space-size=${plan.nodeMaxOldSpaceMB}`;
+    for (const app of apps) {
+      const nodeOptions = app.nodeRuntime === "node" ? nodeOpt : undefined;
+      const unitPath = `${SYSTEMD_DIR}/${serviceNameFor(app.domain)}.service`;
+      writeFile(unitPath, renderAppSystemdService(app, execStartLine(app.startCmd), { nodeOptions }), 0o644);
+    }
+    runCmd("systemctl", ["daemon-reload"]);
+    if (!opts.skipRestart) {
+      for (const app of apps) runCmd("systemctl", ["restart", serviceNameFor(app.domain)], { silentFail: true });
+      ok(`Đã cập nhật unit + NODE_OPTIONS cho ${apps.length} app và khởi động lại (app node: heap ${plan.nodeMaxOldSpaceMB} MB).`);
+    } else {
+      ok(`Đã ghi lại unit cho ${apps.length} app (chưa restart do --skip-restart — chạy 'napp app restart <domain>' để áp).`);
+    }
   }
 
   console.log();
