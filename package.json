@@ -21,7 +21,7 @@
     "commander": "^12.1.0"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=24"
   },
   "license": "MIT",
   "author": "anhtuank7c"

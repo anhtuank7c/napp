@@ -17,12 +17,12 @@
 #
 # Biến môi trường tuỳ chỉnh:
 #   NAPP_CJS_URL   URL raw của napp.cjs (mặc định: gist chính thức bên dưới)
-#   NODE_MAJOR     phiên bản Node.js LTS cài qua NodeSource (mặc định: 22)
+#   NODE_MAJOR     phiên bản Node.js LTS cài qua NodeSource (mặc định: 24)
 # ==============================================================================
 set -euo pipefail
 NAPP_CJS_URL_DEFAULT="https://gist.githubusercontent.com/anhtuank7c/ef7ac27df205d70cf1f789bb420ec013/raw/napp.cjs"
 NAPP_CJS_URL="${NAPP_CJS_URL:-$NAPP_CJS_URL_DEFAULT}"
-NODE_MAJOR="${NODE_MAJOR:-22}"
+NODE_MAJOR="${NODE_MAJOR:-24}"
 INSTALL_PATH="/usr/local/bin/napp"
 
 C_RED='\033[0;31m'; C_GRN='\033[0;32m'; C_YLW='\033[0;33m'; C_BLU='\033[0;34m'; C_RST='\033[0m'
@@ -40,14 +40,27 @@ case "$NAPP_CJS_URL" in
 esac
 
 # --- Node.js -----------------------------------------------------------------
-if command -v node >/dev/null 2>&1; then
-  NODE_VER="$(node --version)"
-  ok "Node.js đã có sẵn: $NODE_VER"
-else
-  info "Node.js chưa được cài — đang cài Node.js ${NODE_MAJOR}.x LTS qua NodeSource..."
+# napp yêu cầu Node.js >= $NODE_MAJOR. Nếu máy chưa có node, hoặc đang chạy bản
+# CŨ HƠN, ta cài/nâng cấp lên Node ${NODE_MAJOR}.x LTS qua NodeSource.
+install_node() {
+  info "Đang cài Node.js ${NODE_MAJOR}.x LTS qua NodeSource..."
   curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash -
   apt-get install -y nodejs
   ok "Đã cài Node.js $(node --version)"
+}
+
+if command -v node >/dev/null 2>&1; then
+  NODE_VER="$(node --version)"                 # ví dụ: v22.23.1
+  NODE_CUR_MAJOR="${NODE_VER#v}"; NODE_CUR_MAJOR="${NODE_CUR_MAJOR%%.*}"
+  if [[ "$NODE_CUR_MAJOR" =~ ^[0-9]+$ ]] && [[ "$NODE_CUR_MAJOR" -ge "$NODE_MAJOR" ]]; then
+    ok "Node.js đã đạt yêu cầu: $NODE_VER (>= ${NODE_MAJOR}.x)"
+  else
+    warn "Node.js hiện tại ($NODE_VER) cũ hơn ${NODE_MAJOR}.x — đang nâng cấp..."
+    install_node
+  fi
+else
+  info "Node.js chưa được cài."
+  install_node
 fi
 
 # --- napp.cjs ------------------------------------------------------------------
