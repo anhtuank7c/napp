@@ -9,7 +9,7 @@ import { cmdBackupRun, cmdBackupSchedule, cmdBackupList } from "./backup";
 import { cmdFirewallSync, cmdFirewallStatus } from "./firewall";
 import { cmdFail2banSetup, cmdFail2banStatus } from "./fail2ban";
 import { cmdTuneApply, cmdTuneShow } from "./tune";
-import { cmdCloudflareSync } from "./cloudflare";
+import { cmdCloudflareSync, cmdCloudflareSchedule, cmdCloudflareUnschedule } from "./cloudflare";
 import { cmdUpdate, cmdVersion } from "./update";
 import { NAPP_VERSION } from "../version";
 import { section, info, warn } from "../lib/log";
@@ -196,7 +196,9 @@ async function menuInfra(): Promise<void> {
       "Trạng thái UFW",
       "Áp cấu hình fail2ban",
       "Trạng thái fail2ban",
-      "Đồng bộ Cloudflare real-IP vào nginx",
+      "Đồng bộ Cloudflare real-IP vào nginx (chạy ngay)",
+      "Lên lịch tự động đồng bộ Cloudflare (systemd timer, hàng ngày)",
+      "Gỡ lịch tự động đồng bộ Cloudflare",
       "Xem đề xuất tối ưu phần cứng",
       "Áp tối ưu phần cứng (nginx/MariaDB/Redis/sysctl)",
     ]);
@@ -207,8 +209,14 @@ async function menuInfra(): Promise<void> {
     else if (choice === "3") await guard(() => cmdFail2banSetup({}));
     else if (choice === "4") await guard(() => cmdFail2banStatus());
     else if (choice === "5") await guard(() => cmdCloudflareSync());
-    else if (choice === "6") await guard(() => cmdTuneShow());
-    else if (choice === "7") await guard(() => cmdTuneApply({ yes: false, skipRestart: false }));
+    else if (choice === "6")
+      await guard(async () => {
+        const time = (await ask("Giờ chạy hàng ngày (HH:MM, mặc định 01:00): ")) || "01:00";
+        cmdCloudflareSchedule({ time });
+      });
+    else if (choice === "7") await guard(() => cmdCloudflareUnschedule());
+    else if (choice === "8") await guard(() => cmdTuneShow());
+    else if (choice === "9") await guard(() => cmdTuneApply({ yes: false, skipRestart: false }));
   }
 }
 

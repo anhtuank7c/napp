@@ -55,3 +55,14 @@ export function validateDbName(name: string): void {
     die(`Tên database không hợp lệ: '${name}' (chỉ chữ, số, gạch dưới, tối đa 64 ký tự)`);
   }
 }
+
+// Chuyển "HH:MM" thành chuỗi OnCalendar của systemd cho lịch chạy HÀNG NGÀY
+// (dùng chung cho các timer: backup, đồng bộ IP Cloudflare, ...).
+export function timeToDailyOnCalendar(time: string): string {
+  const m = time.match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) die(`Định dạng giờ không hợp lệ: '${time}' (ví dụ hợp lệ: 03:30)`);
+  const hh = parseInt(m[1]!, 10);
+  const mm = parseInt(m[2]!, 10);
+  if (hh > 23 || mm > 59) die(`Giờ/phút không hợp lệ: '${time}'`);
+  return `*-*-* ${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:00`;
+}

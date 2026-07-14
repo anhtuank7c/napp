@@ -16,6 +16,11 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.3.0
+- Thêm systemd timer tự động đồng bộ IP Cloudflare vào nginx (real-IP):
+  \`napp cloudflare schedule [--time HH:MM]\` (mặc định 01:00 hàng ngày) và
+  \`napp cloudflare unschedule\`. Cũng có trong menu Hạ tầng.
+
 ## 1.2.0
 - Tường lửa UFW KHÔNG còn giới hạn 80/443 chỉ cho dải IP Cloudflare theo mặc
   định — nay mở 80/443 công khai. Việc lấy IP client thật là của nginx real-IP

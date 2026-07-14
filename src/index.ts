@@ -23,7 +23,7 @@ import { cmdBackupRun, cmdBackupList, cmdBackupSchedule, cmdBackupUnschedule, ty
 import { cmdFirewallSync, cmdFirewallStatus } from "./commands/firewall";
 import { cmdFail2banSetup, cmdFail2banStatus, cmdFail2banUnban } from "./commands/fail2ban";
 import { cmdTuneShow, cmdTuneApply } from "./commands/tune";
-import { cmdCloudflareSync } from "./commands/cloudflare";
+import { cmdCloudflareSync, cmdCloudflareSchedule, cmdCloudflareUnschedule } from "./commands/cloudflare";
 import { cmdUpdate, cmdVersion, cmdChangelog } from "./commands/update";
 import { cmdInstallSelf, cmdUninstallSelf } from "./commands/installSelf";
 import { runMenu } from "./commands/menu";
@@ -231,6 +231,12 @@ cloudflare
   .description("đồng bộ dải IP Cloudflare vào nginx để trích xuất đúng IP client thật")
   .option("--quiet", "giảm log")
   .action((opts) => cmdCloudflareSync({ quiet: Boolean(opts.quiet) }));
+cloudflare
+  .command("schedule")
+  .description("lên lịch tự động đồng bộ IP Cloudflare vào nginx (systemd timer, hàng ngày)")
+  .option("--time <HH:MM>", "giờ chạy hàng ngày", "01:00")
+  .action((opts) => cmdCloudflareSchedule({ time: opts.time }));
+cloudflare.command("unschedule").description("gỡ lịch tự động đồng bộ IP Cloudflare").action(() => cmdCloudflareUnschedule());
 
 // ------------------------------------------------------- update/version ---
 program.command("update").description("tự cập nhật napp lên bản mới nhất (OTA qua gist)").action(() => cmdUpdate());

@@ -87,7 +87,9 @@ Gõ số rồi Enter, `0` để quay lại/thoát.
 | `sudo napp backup schedule --time 03:00 --keep 7` | Lên lịch backup qua systemd timer |
 | `sudo napp firewall sync [--ssh-port n] [--restrict-cloudflare]` | Đồng bộ UFW (mặc định mở 80/443; `--restrict-cloudflare` để khoá origin theo IP Cloudflare) |
 | `sudo napp fail2ban setup` | Áp cấu hình fail2ban |
-| `sudo napp cloudflare sync` | Đồng bộ dải IP Cloudflare vào nginx (real IP) |
+| `sudo napp cloudflare sync` | Đồng bộ dải IP Cloudflare vào nginx (real IP) ngay |
+| `sudo napp cloudflare schedule [--time 01:00]` | Lên lịch tự động đồng bộ IP Cloudflare (systemd timer, hàng ngày) |
+| `sudo napp cloudflare unschedule` | Gỡ lịch tự động đồng bộ IP Cloudflare |
 | `sudo napp tune show\|apply` | Xem/áp tối ưu theo phần cứng thực tế |
 | `sudo napp update` | Tự cập nhật napp lên bản mới nhất |
 | `napp version` / `changelog` | Phiên bản / lịch sử thay đổi |

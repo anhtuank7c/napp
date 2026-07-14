@@ -104,13 +104,14 @@ ExecStart=${binPath} cloudflare sync --quiet
 `;
 }
 
-export function renderCloudflareSyncTimer(): string {
-  return `# Managed by napp — chạy hàng tuần (thứ 2, 03:00)
+// onCalendar: chuỗi OnCalendar của systemd (ví dụ "*-*-* 01:00:00" = 01:00 mỗi ngày).
+export function renderCloudflareSyncTimer(onCalendar: string): string {
+  return `# Managed by napp — lịch đồng bộ IP Cloudflare vào nginx (real-IP)
 [Unit]
 Description=napp Cloudflare IP sync timer
 
 [Timer]
-OnCalendar=Mon *-*-* 03:00:00
+OnCalendar=${onCalendar}
 Persistent=true
 RandomizedDelaySec=300
 

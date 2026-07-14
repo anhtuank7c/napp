@@ -2,6 +2,12 @@ import { execCapture, runCmd, requireRoot, commandExists, writeFile } from "../l
 import { info, ok, die } from "../lib/log";
 import { fetchCloudflareIpRanges } from "../lib/cloudflare";
 import { renderCloudflareRealIpSnippet, CLOUDFLARE_REALIP_CONF } from "../templates/nginx";
+import { renderCloudflareSyncService, renderCloudflareSyncTimer } from "../templates/systemd";
+import { timeToDailyOnCalendar } from "../lib/validate";
+import { SYSTEMD_DIR } from "../lib/state";
+
+const NAPP_BIN_PATH = "/usr/local/bin/napp";
+const CF_TIMER_NAME = "napp-cloudflare-sync";
 
 export async function cmdCloudflareSync(opts: { quiet?: boolean } = {}): Promise<void> {
   requireRoot();
@@ -26,4 +32,28 @@ export async function cmdCloudflareSync(opts: { quiet?: boolean } = {}): Promise
   if (test.code !== 0) die(`Kiểm tra cấu hình nginx thất bại:\n${test.stderr}`);
   runCmd("systemctl", ["reload", "nginx"]);
   ok(`Đã đồng bộ ${ranges.ipv4.length + ranges.ipv6.length} dải IP Cloudflare vào ${CLOUDFLARE_REALIP_CONF} và reload nginx.`);
+}
+
+// Lên lịch tự động đồng bộ IP Cloudflare vào nginx (real-IP) qua systemd timer.
+// Mặc định chạy hàng ngày lúc 01:00. Đây CHỈ là refresh danh sách IP cho nginx,
+// KHÔNG đụng tới tường lửa.
+export function cmdCloudflareSchedule(opts: { time: string }): void {
+  requireRoot();
+  if (!commandExists("nginx")) die("nginx chưa được cài. Chạy 'napp check --fix' trước.");
+  const onCalendar = timeToDailyOnCalendar(opts.time);
+
+  writeFile(`${SYSTEMD_DIR}/${CF_TIMER_NAME}.service`, renderCloudflareSyncService(NAPP_BIN_PATH), 0o644);
+  writeFile(`${SYSTEMD_DIR}/${CF_TIMER_NAME}.timer`, renderCloudflareSyncTimer(onCalendar), 0o644);
+  runCmd("systemctl", ["daemon-reload"]);
+  runCmd("systemctl", ["enable", "--now", `${CF_TIMER_NAME}.timer`]);
+  ok(`Đã lên lịch tự động đồng bộ IP Cloudflare hàng ngày lúc ${opts.time} vào nginx real-IP.`);
+  info(`Kiểm tra lịch chạy: systemctl list-timers ${CF_TIMER_NAME}.timer`);
+}
+
+export function cmdCloudflareUnschedule(): void {
+  requireRoot();
+  runCmd("systemctl", ["disable", "--now", `${CF_TIMER_NAME}.timer`], { silentFail: true });
+  runCmd("rm", ["-f", `${SYSTEMD_DIR}/${CF_TIMER_NAME}.service`, `${SYSTEMD_DIR}/${CF_TIMER_NAME}.timer`], { silentFail: true });
+  runCmd("systemctl", ["daemon-reload"]);
+  ok("Đã gỡ lịch tự động đồng bộ IP Cloudflare.");
 }

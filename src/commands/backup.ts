@@ -1,9 +1,10 @@
 import { readdirSync, statSync, unlinkSync, existsSync } from "node:fs";
 import { runCmd, requireRoot, ensureDir, writeFile, commandExists } from "../lib/exec";
-import { info, ok, warn, die, section } from "../lib/log";
+import { info, ok, warn, section } from "../lib/log";
 import { dumpAllDatabases, dumpDatabase, dbServiceRunning } from "../lib/mysql";
 import { loadState, BACKUP_ROOT, SYSTEMD_DIR } from "../lib/state";
 import { renderBackupService, renderBackupTimer } from "../templates/systemd";
+import { timeToDailyOnCalendar } from "../lib/validate";
 
 const NAPP_BIN_PATH = "/usr/local/bin/napp";
 const BACKUP_TIMER_NAME = "napp-backup";
@@ -94,18 +95,9 @@ export interface BackupScheduleOptions {
   target: BackupTarget;
 }
 
-function timeToOnCalendar(time: string): string {
-  const m = time.match(/^(\d{1,2}):(\d{2})$/);
-  if (!m) die(`Định dạng --time không hợp lệ: '${time}' (ví dụ hợp lệ: 03:30)`);
-  const hh = parseInt(m[1]!, 10);
-  const mm = parseInt(m[2]!, 10);
-  if (hh > 23 || mm > 59) die(`Giờ/phút không hợp lệ: '${time}'`);
-  return `*-*-* ${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:00`;
-}
-
 export function cmdBackupSchedule(opts: BackupScheduleOptions): void {
   requireRoot();
-  const onCalendar = timeToOnCalendar(opts.time);
+  const onCalendar = timeToDailyOnCalendar(opts.time);
   const scriptCmd = `${NAPP_BIN_PATH} backup run --target ${opts.target} --keep ${opts.keep} --quiet`;
 
   writeFile(`${SYSTEMD_DIR}/${BACKUP_TIMER_NAME}.service`, renderBackupService(`/bin/bash -lc ${JSON.stringify(scriptCmd)}`), 0o644);
