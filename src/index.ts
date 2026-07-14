@@ -60,7 +60,8 @@ app
   .option("--repo <url>", "git repo để clone (bỏ trống để tạo app mẫu rỗng)")
   .option("--branch <branch>", "branch git", "main")
   .addOption(new Option("--runtime <runtime>", "runtime chạy app").choices(["node", "bun"]).default("node"))
-  .option("--install-cmd <cmd>", "lệnh cài dependencies (mặc định theo runtime)")
+  .addOption(new Option("--package-manager <pm>", "trình quản lý gói phụ thuộc (mặc định: bun nếu runtime bun, còn lại npm)").choices(["npm", "pnpm", "yarn", "bun"]))
+  .option("--install-cmd <cmd>", "lệnh cài dependencies (mặc định theo package manager)")
   .option("--build-cmd <cmd>", "lệnh build (vd: 'npm run build')")
   .option("--start-cmd <cmd>", "lệnh khởi động (mặc định theo runtime, vd: 'npm start')")
   .option("--db", "tạo kèm database MariaDB riêng cho app")
@@ -72,6 +73,7 @@ app
       repo: opts.repo,
       branch: opts.branch,
       runtime: opts.runtime,
+      packageManager: opts.packageManager,
       installCmd: opts.installCmd,
       buildCmd: opts.buildCmd,
       startCmd: opts.startCmd,

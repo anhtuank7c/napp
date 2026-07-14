@@ -11,10 +11,20 @@ export const NAPP_VERSION: string =
 // chạy bằng biến môi trường:
 //   sudo NAPP_UPDATE_URL="https://gist.githubusercontent.com/<user>/<id>/raw/napp.cjs" napp update
 export const NAPP_UPDATE_URL_DEFAULT =
-  "https://gist.githubusercontent.com/anhtuank7c/REPLACE_WITH_GIST_ID/raw/napp.cjs";
+  "https://gist.githubusercontent.com/anhtuank7c/ef7ac27df205d70cf1f789bb420ec013/raw/napp.cjs";
 
 export const CHANGELOG = `\
 # Changelog
+
+## 1.1.0
+- Chọn TRÌNH QUẢN LÝ GÓI (npm/pnpm/yarn/bun) khi tạo app, tách bạch khỏi
+  runtime engine (node/bun). Cờ mới: --package-manager. Lệnh cài mặc định
+  của mọi PM đều "lockfile-aware" (chỉ cài theo lock khi có lockfile).
+- Menu tương tác: deploy/restart/xem-log/xoá giờ XỔ DANH SÁCH app để chọn
+  theo số thứ tự, không cần gõ tay domain nữa.
+- Sửa: 'npm ci' chỉ chạy khi có package-lock.json (app mẫu/repo không lock
+  không còn phun lỗi EUSAGE).
+- Wire nguồn tự cập nhật (napp update) tới gist chính thức.
 
 ## 1.0.0
 - Phát hành đầu tiên: quản lý app Node.js/Bun đa người dùng, domain, SSL

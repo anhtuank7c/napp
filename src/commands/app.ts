@@ -4,6 +4,8 @@ import { info, ok, warn, die, section } from "../lib/log";
 import { validateDomain, validatePort, validateRepoUrl, validateBranch, validateEnvKey } from "../lib/validate";
 import {
   AppRecord,
+  Runtime,
+  PackageManager,
   getApp,
   requireApp,
   upsertApp,
@@ -29,7 +31,8 @@ export interface CreateAppOptions {
   port?: number;
   repo?: string;
   branch: string;
-  runtime: "node" | "bun";
+  runtime: Runtime;
+  packageManager?: PackageManager; // không truyền -> suy ra theo runtime (bun->bun, node->npm)
   installCmd?: string;
   buildCmd?: string;
   startCmd?: string;
@@ -38,17 +41,37 @@ export interface CreateAppOptions {
   env: string[]; // "KEY=VALUE"
 }
 
-function defaultInstallCmd(runtime: "node" | "bun"): string {
-  if (runtime === "bun") return "bun install --production";
-  // `npm ci` BẮT BUỘC phải có package-lock.json / npm-shrinkwrap.json — app mẫu
-  // hoặc repo không commit lockfile sẽ không có, khiến `npm ci` lỗi EUSAGE và phun
-  // ra cả bức tường usage. Vì vậy chỉ dùng `npm ci` khi lockfile tồn tại (kèm
-  // fallback `npm install` phòng lock lệch với package.json); còn lại cài thẳng.
-  return "if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then npm ci --omit=dev || npm install --omit=dev; else npm install --omit=dev; fi";
+// Trình quản lý gói mặc định khi người dùng không chỉ định: runtime bun dùng
+// bun, còn lại dùng npm (luôn có sẵn cùng Node).
+export function defaultPackageManager(runtime: Runtime): PackageManager {
+  return runtime === "bun" ? "bun" : "npm";
 }
 
-function defaultStartCmd(runtime: "node" | "bun"): string {
-  return runtime === "bun" ? "bun run start" : "npm start";
+// Lệnh cài dependencies theo từng package manager. TẤT CẢ đều "lockfile-aware":
+// nếu có lockfile thì cài đúng theo lock (nhanh, tất định) và fallback cài
+// thường khi lock lệch; nếu KHÔNG có lockfile (app mẫu / repo chưa commit lock)
+// thì cài thẳng để tránh lỗi kiểu `npm ci` EUSAGE.
+function defaultInstallCmd(pm: PackageManager): string {
+  switch (pm) {
+    case "bun":
+      return "bun install --production";
+    case "pnpm":
+      return "if [ -f pnpm-lock.yaml ]; then pnpm install --prod --frozen-lockfile || pnpm install --prod; else pnpm install --prod; fi";
+    case "yarn":
+      // yarn classic hiểu --frozen-lockfile; yarn berry hiểu --immutable — thử lần lượt cho tương thích cả hai.
+      return "if [ -f yarn.lock ]; then yarn install --production --frozen-lockfile || yarn install --immutable || yarn install; else yarn install --production || yarn install; fi";
+    case "npm":
+    default:
+      return "if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then npm ci --omit=dev || npm install --omit=dev; else npm install --omit=dev; fi";
+  }
+}
+
+// Lệnh khởi động mặc định. Runtime bun luôn chạy bằng `bun run start`. Runtime
+// node chạy script "start" qua chính package manager đã chọn (npm/pnpm/yarn);
+// nếu lỡ ghép node + bun thì dùng npm cho an toàn (npm luôn có cùng Node).
+function defaultStartCmd(runtime: Runtime, pm: PackageManager): string {
+  if (runtime === "bun") return "bun run start";
+  return pm === "bun" ? "npm start" : `${pm} start`;
 }
 
 function assertSiteAbsent(domain: string, user: string, port: number | undefined): void {
@@ -87,11 +110,17 @@ export async function cmdAppCreate(domain: string, opts: CreateAppOptions): Prom
 
   assertSiteAbsent(domain, user, port);
 
+  const pm: PackageManager = opts.packageManager ?? defaultPackageManager(opts.runtime);
+
   if (!commandExists("node") && opts.runtime === "node") {
     die("Node.js chưa được cài. Chạy 'napp check --fix' trước.");
   }
   if (opts.runtime === "bun" && !commandExists("bun")) {
     warn("Không tìm thấy lệnh 'bun' trong PATH của root — hãy đảm bảo bun đã được cài toàn cục (curl -fsSL https://bun.sh/install | bash rồi ln -s vào /usr/local/bin).");
+  }
+  // npm luôn đi kèm Node nên không cần kiểm tra; pnpm/yarn/bun thì phải có sẵn.
+  if (pm !== "npm" && !commandExists(pm)) {
+    warn(`Không tìm thấy '${pm}' trong PATH của root — bước cài dependencies có thể thất bại. Hãy cài '${pm}' toàn cục trước (hoặc chọn npm), rồi 'napp app deploy ${domain}' để cài lại.`);
   }
   if (!commandExists("nginx")) die("nginx chưa được cài. Chạy 'napp check --fix' trước.");
 
@@ -127,7 +156,7 @@ export async function cmdAppCreate(domain: string, opts: CreateAppOptions): Prom
 
   try {
     section(`Tạo app ${domain}`);
-    info(`Runtime ${opts.runtime}, cổng ${port}, user hệ thống ${user}`);
+    info(`Runtime ${opts.runtime}, quản lý gói ${pm}, cổng ${port}, user hệ thống ${user}`);
 
     // --- user hệ thống riêng, cô lập với các app khác ---
     runCmd("useradd", ["--system", "--create-home", "--home-dir", `/home/${user}`, "--shell", "/usr/sbin/nologin", user]);
@@ -164,9 +193,9 @@ EOF`,
       ]);
     }
 
-    const installCmd = opts.installCmd ?? defaultInstallCmd(opts.runtime);
+    const installCmd = opts.installCmd ?? defaultInstallCmd(pm);
     const buildCmd = opts.buildCmd ?? "";
-    const startCmd = opts.startCmd ?? defaultStartCmd(opts.runtime);
+    const startCmd = opts.startCmd ?? defaultStartCmd(opts.runtime, pm);
 
     if (existsSync(`${webRoot}/package.json`) || opts.repo) {
       info("Đang cài dependencies...");
@@ -242,6 +271,7 @@ EOF`,
       webRoot,
       port,
       nodeRuntime: opts.runtime,
+      packageManager: pm,
       installCmd,
       buildCmd,
       startCmd,
@@ -280,6 +310,7 @@ EOF`,
     console.log(`  Tên miền     : http://${domain}`);
     console.log(`  Mã nguồn     : ${webRoot}`);
     console.log(`  Chạy bằng    : ${user} (systemd: ${serviceName})`);
+    console.log(`  Runtime      : ${opts.runtime} · quản lý gói: ${pm}`);
     console.log(`  Cổng nội bộ  : 127.0.0.1:${port} (không public — chỉ nginx proxy vào)`);
     if (dbInfo) {
       console.log(`  Database     : ${dbInfo.name}  (user: ${dbInfo.user}@localhost, mật khẩu trong .env)`);
@@ -392,6 +423,24 @@ export async function cmdAppRemove(domain: string, opts: { yes: boolean; keepDb:
   }
 }
 
+export interface AppSummary {
+  domain: string;
+  port: number;
+  running: boolean;
+}
+
+// Danh sách app kèm trạng thái chạy — dùng cho menu tương tác để người dùng
+// CHỌN app từ danh sách thay vì gõ tay domain.
+export function listAppSummaries(): AppSummary[] {
+  return Object.values(loadState().apps)
+    .map((a) => ({
+      domain: a.domain,
+      port: a.port,
+      running: execCapture("systemctl", ["is-active", "--quiet", serviceNameFor(a.domain)]).code === 0,
+    }))
+    .sort((a, b) => a.domain.localeCompare(b.domain));
+}
+
 export function cmdAppList(): void {
   const s = loadState();
   const apps = Object.values(s.apps);
@@ -403,7 +452,7 @@ export function cmdAppList(): void {
   for (const app of apps) {
     const running = execCapture("systemctl", ["is-active", "--quiet", serviceNameFor(app.domain)]).code === 0;
     console.log(
-      `  ${running ? "●" : "○"} ${app.domain.padEnd(30)} port=${String(app.port).padEnd(6)} user=${app.user.padEnd(18)} ${
+      `  ${running ? "●" : "○"} ${app.domain.padEnd(30)} port=${String(app.port).padEnd(6)} ${`${app.nodeRuntime}/${app.packageManager ?? "npm"}`.padEnd(10)} user=${app.user.padEnd(18)} ${
         app.dbName ? `db=${app.dbName} ` : ""
       }${app.redisDbIndex !== undefined ? `redis=${app.redisDbIndex} ` : ""}${running ? "đang chạy" : "ĐÃ DỪNG"}`
     );

@@ -1,6 +1,7 @@
 import readline from "node:readline/promises";
 import { cmdCheck } from "./check";
-import { cmdAppCreate, cmdAppDeploy, cmdAppRemove, cmdAppList, cmdAppRestart, cmdAppLogs } from "./app";
+import { cmdAppCreate, cmdAppDeploy, cmdAppRemove, cmdAppList, cmdAppRestart, cmdAppLogs, listAppSummaries } from "./app";
+import type { Runtime, PackageManager } from "../lib/state";
 import { cmdCertIssue, cmdCertRenew, cmdCertList } from "./cert";
 import { cmdDbCreate, cmdDbList, cmdDbBackup } from "./db";
 import { cmdRedisAllocations, cmdRedisInfo } from "./redis";
@@ -23,6 +24,49 @@ async function askYesNo(q: string, def = false): Promise<boolean> {
   const ans = await ask(`${q} [${def ? "Y/n" : "y/N"}] `);
   if (!ans) return def;
   return /^y(es)?$/i.test(ans);
+}
+
+// Cho người dùng chọn 1 giá trị từ danh sách bằng số thứ tự (hoặc gõ thẳng tên).
+// Enter trống -> lấy mặc định.
+async function askChoice<T extends string>(label: string, options: readonly T[], defaultValue: T): Promise<T> {
+  console.log(`${label}:`);
+  options.forEach((o, i) => console.log(`  ${i + 1}. ${o}${o === defaultValue ? "  (mặc định)" : ""}`));
+  const ans = await ask(`Chọn [1-${options.length}] (Enter = ${defaultValue}): `);
+  if (!ans) return defaultValue;
+  const n = parseInt(ans, 10);
+  if (Number.isInteger(n) && n >= 1 && n <= options.length) {
+    const picked = options[n - 1];
+    if (picked !== undefined) return picked;
+  }
+  const byName = options.find((o) => o.toLowerCase() === ans.toLowerCase());
+  if (byName) return byName;
+  warn(`Lựa chọn không hợp lệ '${ans}' — dùng mặc định '${defaultValue}'.`);
+  return defaultValue;
+}
+
+// Xổ danh sách app hiện có để người dùng CHỌN thay vì gõ tay domain. Trả về
+// undefined nếu không có app nào, hoặc người dùng huỷ (0/Enter).
+async function askAppDomain(actionLabel: string): Promise<string | undefined> {
+  const apps = listAppSummaries();
+  if (apps.length === 0) {
+    warn("Chưa có app nào được napp quản lý — hãy tạo app trước (mục 'Tạo app mới').");
+    return undefined;
+  }
+  console.log(`Chọn app để ${actionLabel}:`);
+  apps.forEach((a, i) =>
+    console.log(`  ${i + 1}. ${a.domain.padEnd(30)} port=${a.port}  ${a.running ? "● đang chạy" : "○ đã dừng"}`)
+  );
+  const ans = await ask(`Chọn [1-${apps.length}] (0 = huỷ): `);
+  if (!ans || ans === "0") return undefined;
+  const n = parseInt(ans, 10);
+  if (Number.isInteger(n) && n >= 1 && n <= apps.length) {
+    const picked = apps[n - 1];
+    if (picked) return picked.domain;
+  }
+  const byName = apps.find((a) => a.domain === ans.trim());
+  if (byName) return byName.domain;
+  warn(`Lựa chọn không hợp lệ: '${ans}'.`);
+  return undefined;
 }
 
 function printMenu(title: string, items: string[]): void {
@@ -64,27 +108,41 @@ async function menuApp(): Promise<void> {
       await guard(async () => {
         const domain = await ask("Domain (vd: api.example.com): ");
         const repo = await ask("Git repo URL (bỏ trống nếu chưa có): ");
-        const runtime = (await ask("Runtime [node/bun] (mặc định node): ")) || "node";
+        const runtime = await askChoice<Runtime>("Runtime engine", ["node", "bun"], "node");
+        // Mặc định package manager theo runtime: bun -> bun, node -> npm.
+        const pmDefault: PackageManager = runtime === "bun" ? "bun" : "npm";
+        const packageManager = await askChoice<PackageManager>("Trình quản lý gói phụ thuộc", ["npm", "pnpm", "yarn", "bun"], pmDefault);
         const db = await askYesNo("Tạo database MariaDB riêng cho app này?");
         const redis = await askYesNo("Cấp Redis DB riêng cho app này?");
         await cmdAppCreate(domain, {
           repo: repo || undefined,
           branch: "main",
-          runtime: runtime === "bun" ? "bun" : "node",
+          runtime,
+          packageManager,
           db,
           redis,
           env: [],
         });
       });
     } else if (choice === "3") {
-      await guard(async () => cmdAppDeploy(await ask("Domain: ")));
+      await guard(async () => {
+        const domain = await askAppDomain("deploy");
+        if (domain) await cmdAppDeploy(domain);
+      });
     } else if (choice === "4") {
-      await guard(async () => cmdAppRestart(await ask("Domain: ")));
+      await guard(async () => {
+        const domain = await askAppDomain("restart");
+        if (domain) cmdAppRestart(domain);
+      });
     } else if (choice === "5") {
-      await guard(async () => cmdAppLogs(await ask("Domain: "), { follow: false, lines: 100 }));
+      await guard(async () => {
+        const domain = await askAppDomain("xem log");
+        if (domain) cmdAppLogs(domain, { follow: false, lines: 100 });
+      });
     } else if (choice === "6") {
       await guard(async () => {
-        const domain = await ask("Domain cần xoá: ");
+        const domain = await askAppDomain("XOÁ");
+        if (!domain) return;
         const yes = await askYesNo(`Xác nhận xoá '${domain}' (không thể hoàn tác)?`);
         if (yes) await cmdAppRemove(domain, { yes: true, keepDb: false });
       });

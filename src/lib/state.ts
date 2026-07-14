@@ -15,13 +15,17 @@ export const PORT_RANGE_START = 3000;
 export const PORT_RANGE_END = 3999;
 export const REDIS_DB_MAX = 16; // Redis mặc định có 16 database (0-15)
 
+export type Runtime = "node" | "bun";
+export type PackageManager = "npm" | "pnpm" | "yarn" | "bun";
+
 export interface AppRecord {
   domain: string;
   aliasDomains: string[]; // domain phụ trỏ vào cùng app (www, hoặc domain khác)
   user: string;
   webRoot: string;
   port: number;
-  nodeRuntime: "node" | "bun";
+  nodeRuntime: Runtime;
+  packageManager?: PackageManager; // trình quản lý gói phụ thuộc (npm/pnpm/yarn/bun)
   nodeVersion?: string; // ví dụ "22" — dùng khi máy có nhiều bản Node qua nvm
   installCmd: string;
   buildCmd: string;
