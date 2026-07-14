@@ -5,7 +5,8 @@
 # napp được viết bằng TypeScript/Node.js và đóng gói thành MỘT file duy nhất
 # (napp.cjs), nên trước tiên cần đảm bảo Node.js đã có mặt trên máy — script
 # này tự lo việc đó (qua NodeSource) nếu chưa có, rồi tải napp.cjs về và cài
-# vào /usr/local/bin/napp.
+# vào /usr/local/bin/napp. Ngoài ra còn cài sẵn 'bun' (system-wide) để có thể
+# tạo app chạy bằng bun — có thể tắt bằng NAPP_INSTALL_BUN=0.
 #
 # Cách dùng (chạy trên server, cần quyền root/sudo):
 #   curl -fsSL "https://gist.githubusercontent.com/anhtuank7c/REPLACE_WITH_GIST_ID/raw/install.sh" | sudo bash
@@ -16,8 +17,9 @@
 #   sudo bash install.sh
 #
 # Biến môi trường tuỳ chỉnh:
-#   NAPP_CJS_URL   URL raw của napp.cjs (mặc định: gist chính thức bên dưới)
-#   NODE_MAJOR     phiên bản Node.js LTS cài qua NodeSource (mặc định: 24)
+#   NAPP_CJS_URL      URL raw của napp.cjs (mặc định: gist chính thức bên dưới)
+#   NODE_MAJOR        phiên bản Node.js LTS cài qua NodeSource (mặc định: 24)
+#   NAPP_INSTALL_BUN  cài bun runtime system-wide hay không (1=có mặc định, 0=bỏ qua)
 # ==============================================================================
 set -euo pipefail
 NAPP_CJS_URL_DEFAULT="https://gist.githubusercontent.com/anhtuank7c/ef7ac27df205d70cf1f789bb420ec013/raw/napp.cjs"
@@ -76,6 +78,42 @@ case "$NODE_REAL" in
     install_node
     ;;
 esac
+
+# --- bun (runtime tùy chọn cho app) ------------------------------------------
+# Mặc định cài bun để có thể tạo app chạy bằng bun (tắt bằng NAPP_INSTALL_BUN=0).
+# GIỐNG Node: bun PHẢI ở mức hệ thống (/usr/local/bin) để systemd service
+# (ProtectHome=yes) và sudo thấy được — KHÔNG cài vào ~/.bun như mặc định của
+# trình cài chính thức. Cài bun là KHÔNG bắt buộc: lỗi ở đây không chặn cài napp.
+INSTALL_BUN="${NAPP_INSTALL_BUN:-1}"
+install_bun() {
+  info "Đang cài bun (system-wide vào /usr/local/bin)..."
+  # Trình cài bun cần 'unzip'.
+  if ! command -v unzip >/dev/null 2>&1; then
+    apt-get install -y unzip >/dev/null 2>&1 || { apt-get update && apt-get install -y unzip; }
+  fi
+  # BUN_INSTALL=/usr/local -> nhị phân đặt tại /usr/local/bin/bun (systemd/sudo dùng được).
+  export BUN_INSTALL=/usr/local
+  curl -fsSL https://bun.sh/install | bash
+  command -v bun >/dev/null 2>&1 || return 1
+  ok "Đã cài bun $(bun --version) tại $(command -v bun)"
+}
+
+if [[ "$INSTALL_BUN" == "1" ]]; then
+  BUN_BIN="$(command -v bun || true)"
+  BUN_REAL="$(readlink -f "$BUN_BIN" 2>/dev/null || echo "$BUN_BIN")"
+  case "$BUN_REAL" in
+    /usr/*|/opt/*|/bin/*)   # bun hệ thống — systemd & sudo đều dùng được
+      ok "bun hệ thống đã có sẵn: $("$BUN_BIN" --version) ($BUN_BIN)" ;;
+    "")   # chưa có bun nào trên PATH
+      info "bun chưa được cài (system-wide) — đang cài..."
+      install_bun || warn "Cài bun thất bại — bỏ qua (napp vẫn dùng được với Node; tạo app runtime=bun sẽ cần cài bun sau)." ;;
+    *)    # có bun nhưng nằm trong home (~/.bun) — service KHÔNG dùng được
+      warn "Phát hiện bun tại '$BUN_BIN' (kiểu ~/.bun trong home) — systemd/sudo không dùng được; cài thêm bản system-wide..."
+      install_bun || warn "Cài bun thất bại — bỏ qua." ;;
+  esac
+else
+  info "Bỏ qua cài bun (NAPP_INSTALL_BUN=0). Tạo app runtime=bun sẽ cần bun được cài sẵn system-wide."
+fi
 
 # --- napp.cjs ------------------------------------------------------------------
 info "Đang tải napp từ: $NAPP_CJS_URL"
