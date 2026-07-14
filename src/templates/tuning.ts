@@ -1,0 +1,140 @@
+import type { HardwareProfile } from "../lib/hardware";
+
+export const MARIADB_TUNING_PATH = "/etc/mysql/conf.d/napp-tuning.cnf";
+export const REDIS_TUNING_PATH = "/etc/redis/conf.d/napp-tuning.conf";
+export const SYSCTL_TUNING_PATH = "/etc/sysctl.d/99-napp-tuning.conf";
+
+// Bảng tỷ lệ phân bổ RAM theo tier — vì server còn chạy Node apps + Redis +
+// nginx + OS song song với MariaDB, KHÔNG dành 70-80% RAM cho DB như một máy
+// chủ DB chuyên dụng. Tỷ lệ dưới đây thận trọng hơn, để lại chỗ cho các dịch
+// vụ khác. Người dùng có thể ghi đè bằng --db-ram-percent khi chạy tune apply.
+const DB_RAM_PERCENT: Record<HardwareProfile["tier"], number> = {
+  micro: 25, // máy rất nhỏ: ưu tiên OS + 1-2 app node sống sót trước
+  small: 35,
+  medium: 40,
+  large: 45,
+  xlarge: 50,
+};
+
+const REDIS_RAM_PERCENT: Record<HardwareProfile["tier"], number> = {
+  micro: 5,
+  small: 8,
+  medium: 10,
+  large: 12,
+  xlarge: 15,
+};
+
+function mb(n: number): string {
+  return `${Math.max(16, Math.round(n))}M`;
+}
+
+export interface TuningPlan {
+  innodbBufferPoolMB: number;
+  maxConnections: number;
+  tmpTableMB: number;
+  tableOpenCache: number;
+  redisMaxMemoryMB: number;
+  workerConnections: number;
+}
+
+export function computeTuningPlan(hw: HardwareProfile, dbRamPercentOverride?: number): TuningPlan {
+  const dbPercent = dbRamPercentOverride ?? DB_RAM_PERCENT[hw.tier];
+  const redisPercent = REDIS_RAM_PERCENT[hw.tier];
+  const innodbBufferPoolMB = Math.round((hw.totalMemMB * dbPercent) / 100);
+  const redisMaxMemoryMB = Math.round((hw.totalMemMB * redisPercent) / 100);
+
+  const maxConnections = hw.tier === "micro" ? 50 : hw.tier === "small" ? 100 : hw.tier === "medium" ? 150 : hw.tier === "large" ? 250 : 400;
+  const tmpTableMB = hw.tier === "micro" ? 16 : hw.tier === "small" ? 32 : 64;
+  const tableOpenCache = hw.tier === "micro" ? 200 : hw.tier === "small" ? 400 : 800;
+  const workerConnections = hw.tier === "micro" ? 1024 : hw.tier === "small" ? 2048 : 4096;
+
+  return { innodbBufferPoolMB, maxConnections, tmpTableMB, tableOpenCache, redisMaxMemoryMB, workerConnections };
+}
+
+export function renderMariadbTuning(hw: HardwareProfile, plan: TuningPlan): string {
+  return `# Managed by napp — TỰ ĐỘNG SINH RA bởi \`napp tune apply\`
+# Phần cứng phát hiện: ${hw.cpuCores} lõi CPU, ${(hw.totalMemMB / 1024).toFixed(1)} GB RAM, tier=${hw.tier}
+# Tỷ lệ RAM dành cho InnoDB buffer pool được tính TOÁN THẬN TRỌNG vì server
+# còn chạy song song Node.js apps + Redis + nginx.
+[mysqld]
+innodb_buffer_pool_size = ${mb(plan.innodbBufferPoolMB)}
+innodb_buffer_pool_instances = ${Math.max(1, Math.min(8, Math.floor(plan.innodbBufferPoolMB / 1024) || 1))}
+innodb_log_file_size = ${mb(Math.max(64, plan.innodbBufferPoolMB * 0.25))}
+innodb_flush_log_at_trx_commit = 2
+innodb_flush_method = O_DIRECT
+innodb_io_capacity = ${hw.tier === "micro" ? 100 : hw.tier === "small" ? 200 : 400}
+
+max_connections = ${plan.maxConnections}
+wait_timeout = 300
+interactive_timeout = 300
+
+tmp_table_size = ${mb(plan.tmpTableMB)}
+max_heap_table_size = ${mb(plan.tmpTableMB)}
+
+table_open_cache = ${plan.tableOpenCache}
+table_definition_cache = ${plan.tableOpenCache}
+
+thread_cache_size = ${Math.max(8, hw.cpuCores * 4)}
+
+slow_query_log = 1
+slow_query_log_file = /var/log/mysql/slow.log
+long_query_time = 2
+`;
+}
+
+export function renderRedisTuning(hw: HardwareProfile, plan: TuningPlan): string {
+  return `# Managed by napp — TỰ ĐỘNG SINH RA bởi \`napp tune apply\`
+# Phần cứng phát hiện: ${(hw.totalMemMB / 1024).toFixed(1)} GB RAM, tier=${hw.tier}
+maxmemory ${plan.redisMaxMemoryMB}mb
+maxmemory-policy allkeys-lru
+
+# Bền vững nhẹ (AOF everysec) — cân bằng giữa an toàn dữ liệu (session/cache
+# của các app node) và hiệu năng. Nếu Redis chỉ dùng làm cache thuần tuý, có
+# thể tắt appendonly để giảm I/O.
+appendonly yes
+appendfsync everysec
+auto-aof-rewrite-percentage 100
+auto-aof-rewrite-min-size 64mb
+
+# Redis là đơn luồng cho phần xử lý lệnh — hạn chế client chậm chiếm giữ.
+timeout 300
+tcp-keepalive 300
+`;
+}
+
+export function renderSysctlTuning(): string {
+  return `# Managed by napp — TỰ ĐỘNG SINH RA bởi \`napp tune apply\`
+# ---- Network ----
+net.core.somaxconn = 65535
+net.core.netdev_max_backlog = 65535
+net.ipv4.tcp_keepalive_time = 600
+net.ipv4.tcp_keepalive_intvl = 60
+net.ipv4.tcp_keepalive_probes = 5
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.ip_local_port_range = 10000 65535
+fs.file-max = 2097152
+fs.nr_open = 2097152
+
+# ---- Security ----
+net.ipv4.icmp_echo_ignore_broadcasts = 1
+net.ipv4.icmp_ignore_bogus_error_responses = 1
+net.ipv4.tcp_syncookies = 1
+net.ipv4.tcp_max_syn_backlog = 65535
+net.ipv4.conf.all.accept_source_route = 0
+net.ipv4.conf.default.accept_source_route = 0
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.conf.default.rp_filter = 1
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.default.accept_redirects = 0
+net.ipv4.conf.all.send_redirects = 0
+net.ipv6.conf.all.accept_redirects = 0
+net.ipv6.conf.default.accept_redirects = 0
+
+# ---- Memory ----
+vm.swappiness = 10
+vm.vfs_cache_pressure = 50
+vm.dirty_ratio = 15
+vm.dirty_background_ratio = 5
+`;
+}

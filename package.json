@@ -1,0 +1,28 @@
+{
+  "name": "napp",
+  "version": "1.0.0",
+  "description": "napp — Node.js multi-app server manager (domains, SSL, systemd, MariaDB, Redis, nginx, fail2ban, UFW, Cloudflare, backups, hardware tuning, OTA update)",
+  "private": true,
+  "type": "commonjs",
+  "bin": {
+    "napp": "dist/napp.cjs"
+  },
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.7.2"
+  },
+  "dependencies": {
+    "commander": "^12.1.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "author": "anhtuank7c"
+}
