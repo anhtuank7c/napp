@@ -16,6 +16,11 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.4.0
+- Banner giới thiệu napp (ASCII, có màu, kèm phiên bản động + gợi ý lệnh) hiển
+  thị mỗi khi đăng nhập SSH. Cài bởi 'napp install', gỡ bởi 'napp uninstall'.
+  'napp update' tự làm mới banner nếu đang bật.
+
 ## 1.3.0
 - Thêm systemd timer tự động đồng bộ IP Cloudflare vào nginx (real-IP):
   \`napp cloudflare schedule [--time HH:MM]\` (mặc định 01:00 hàng ngày) và

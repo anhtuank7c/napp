@@ -1,9 +1,10 @@
-import { writeFileSync, chmodSync, unlinkSync, readFileSync, mkdtempSync, renameSync } from "node:fs";
+import { writeFileSync, chmodSync, unlinkSync, readFileSync, mkdtempSync, renameSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execCapture, runCmd, requireRoot } from "../lib/exec";
 import { info, ok, warn, die } from "../lib/log";
 import { NAPP_VERSION, NAPP_UPDATE_URL_DEFAULT, CHANGELOG } from "../version";
+import { MOTD_PATH, writeMotdBanner } from "./installSelf";
 
 const INSTALL_PATH = "/usr/local/bin/napp";
 
@@ -67,4 +68,11 @@ export async function cmdUpdate(): Promise<void> {
   runCmd("install", ["-m", "0755", tmpPath, INSTALL_PATH]);
   unlinkSync(tmpPath);
   ok(`Đã cập nhật napp: ${NAPP_VERSION} -> ${newVersion}  (${INSTALL_PATH})`);
+
+  // Làm mới banner giới thiệu SSH theo bản mới (chỉ khi banner đang tồn tại —
+  // không tự tạo lại nếu người dùng đã cố tình gỡ bằng 'napp uninstall').
+  if (existsSync(MOTD_PATH)) {
+    writeMotdBanner();
+    info("Đã làm mới banner giới thiệu SSH.");
+  }
 }
