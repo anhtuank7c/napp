@@ -40,28 +40,42 @@ case "$NAPP_CJS_URL" in
 esac
 
 # --- Node.js -----------------------------------------------------------------
-# napp yêu cầu Node.js >= $NODE_MAJOR. Nếu máy chưa có node, hoặc đang chạy bản
-# CŨ HƠN, ta cài/nâng cấp lên Node ${NODE_MAJOR}.x LTS qua NodeSource.
+# napp cần Node.js >= $NODE_MAJOR cài Ở MỨC HỆ THỐNG (/usr hoặc /opt), KHÔNG
+# phải node kiểu nvm/n/asdf nằm trong thư mục home. Lý do:
+#   - `sudo napp` chạy dưới secure_path của sudo -> không thấy ~/.nvm
+#   - app chạy bằng systemd có ProtectHome=yes -> không truy cập được home
+#     -> node trong ~/.nvm là VÔ HÌNH với service.
+# Vì vậy ta cố tình bỏ qua node kiểu home và luôn đảm bảo có node system-wide.
 install_node() {
-  info "Đang cài Node.js ${NODE_MAJOR}.x LTS qua NodeSource..."
+  info "Đang cài Node.js ${NODE_MAJOR}.x LTS qua NodeSource (system-wide)..."
   curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash -
   apt-get install -y nodejs
-  ok "Đã cài Node.js $(node --version)"
+  ok "Đã cài Node.js $(node --version) tại $(command -v node)"
 }
 
-if command -v node >/dev/null 2>&1; then
-  NODE_VER="$(node --version)"                 # ví dụ: v22.23.1
-  NODE_CUR_MAJOR="${NODE_VER#v}"; NODE_CUR_MAJOR="${NODE_CUR_MAJOR%%.*}"
-  if [[ "$NODE_CUR_MAJOR" =~ ^[0-9]+$ ]] && [[ "$NODE_CUR_MAJOR" -ge "$NODE_MAJOR" ]]; then
-    ok "Node.js đã đạt yêu cầu: $NODE_VER (>= ${NODE_MAJOR}.x)"
-  else
-    warn "Node.js hiện tại ($NODE_VER) cũ hơn ${NODE_MAJOR}.x — đang nâng cấp..."
+NODE_BIN="$(command -v node || true)"
+NODE_REAL="$(readlink -f "$NODE_BIN" 2>/dev/null || echo "$NODE_BIN")"
+case "$NODE_REAL" in
+  /usr/*|/opt/*|/bin/*)   # node hệ thống — systemd & sudo đều dùng được
+    NODE_VER="$("$NODE_BIN" --version)"         # ví dụ: v24.18.0
+    NODE_CUR_MAJOR="${NODE_VER#v}"; NODE_CUR_MAJOR="${NODE_CUR_MAJOR%%.*}"
+    if [[ "$NODE_CUR_MAJOR" =~ ^[0-9]+$ ]] && [[ "$NODE_CUR_MAJOR" -ge "$NODE_MAJOR" ]]; then
+      ok "Node.js hệ thống đã đạt yêu cầu: $NODE_VER ($NODE_BIN)"
+    else
+      warn "Node.js hệ thống ($NODE_VER) cũ hơn ${NODE_MAJOR}.x — đang nâng cấp..."
+      install_node
+    fi
+    ;;
+  "")   # chưa có node nào trên PATH
+    info "Node.js chưa được cài (system-wide)."
     install_node
-  fi
-else
-  info "Node.js chưa được cài."
-  install_node
-fi
+    ;;
+  *)    # có node nhưng nằm trong home (nvm/n/asdf) — service KHÔNG dùng được
+    warn "Phát hiện Node.js tại '$NODE_BIN' (kiểu nvm/home). napp cần node system-wide"
+    warn "nên sẽ cài thêm bản NodeSource — KHÔNG đụng tới nvm của bạn."
+    install_node
+    ;;
+esac
 
 # --- napp.cjs ------------------------------------------------------------------
 info "Đang tải napp từ: $NAPP_CJS_URL"
