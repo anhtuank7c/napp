@@ -65,28 +65,37 @@ fi
 
 # --- napp.cjs ------------------------------------------------------------------
 info "Đang tải napp từ: $NAPP_CJS_URL"
-TMP_FILE="$(mktemp)"
-trap 'rm -f "$TMP_FILE"' EXIT
+# QUAN TRỌNG: file tạm PHẢI có đuôi .cjs. Node >= 20 dựa vào đuôi file để xác
+# định CommonJS/ESM; `node --check` trên file không đuôi (như mktemp mặc định)
+# sẽ ném ERR_UNKNOWN_FILE_EXTENSION và fail dù nội dung hoàn toàn hợp lệ.
+TMP_DIR="$(mktemp -d)"
+TMP_FILE="$TMP_DIR/napp.cjs"
+trap 'rm -rf "$TMP_DIR"' EXIT
 
-# Gist raw đôi khi trả về bản cache cũ/dở hoặc trang lỗi HTML (rate-limit) ngay
-# sau khi cập nhật, nên ta thử tải + kiểm tra lại vài lần trước khi bỏ cuộc.
+# Vẫn thử lại vài lần để phòng lỗi mạng tạm thời / gist cache chưa đồng bộ.
 ATTEMPTS="${NAPP_DL_ATTEMPTS:-3}"
 attempt=1
 while :; do
+  reason=""
   # --retry: tự thử lại khi lỗi mạng tạm thời; header no-cache: hạn chế nhận bản cache cũ.
-  curl --proto '=https' --tlsv1.2 -fsSL \
-       --retry 3 --retry-delay 2 --retry-all-errors \
-       -H 'Cache-Control: no-cache' \
-       "$NAPP_CJS_URL" -o "$TMP_FILE" \
-    && node --check "$TMP_FILE" 2>/dev/null \
-    && grep -q '__NAPP_MARKER__' "$TMP_FILE" \
-    && break
+  if ! curl --proto '=https' --tlsv1.2 -fsSL \
+            --retry 3 --retry-delay 2 --retry-all-errors \
+            -H 'Cache-Control: no-cache' \
+            "$NAPP_CJS_URL" -o "$TMP_FILE"; then
+    reason="curl tải thất bại — kiểm tra URL hoặc kết nối mạng"
+  elif ! check_err="$(node --check "$TMP_FILE" 2>&1)"; then
+    reason="node --check báo lỗi (file tải dở/hỏng?): ${check_err##*$'\n'}"
+  elif ! grep -q '__NAPP_MARKER__' "$TMP_FILE"; then
+    reason="thiếu marker __NAPP_MARKER__ — không giống napp.cjs hợp lệ (trang lỗi HTML?)"
+  else
+    break   # tải + kiểm tra đều OK
+  fi
 
-  # Thất bại: in chẩn đoán để dễ biết nguyên nhân (tải dở, trang HTML, sai URL...).
-  warn "Lần $attempt/$ATTEMPTS thất bại. File tải về: $(wc -c < "$TMP_FILE" 2>/dev/null || echo 0) byte."
-  warn "  Dòng đầu: $(head -1 "$TMP_FILE" 2>/dev/null | cut -c1-80)"
+  # Thất bại: in lý do THẬT + chẩn đoán để không phải đoán mò.
+  warn "Lần $attempt/$ATTEMPTS thất bại: $reason"
+  warn "  File tải về: $(wc -c < "$TMP_FILE" 2>/dev/null || echo 0) byte, dòng đầu: $(head -1 "$TMP_FILE" 2>/dev/null | cut -c1-60)"
   if [[ $attempt -ge $ATTEMPTS ]]; then
-    die "Không tải được napp.cjs hợp lệ sau $ATTEMPTS lần. Có thể gist cache chưa đồng bộ — đợi 1-2 phút rồi chạy lại, hoặc kiểm tra URL: $NAPP_CJS_URL"
+    die "Không cài được napp sau $ATTEMPTS lần. Lý do gần nhất: $reason"
   fi
   attempt=$((attempt + 1))
   sleep 2
