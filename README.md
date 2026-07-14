@@ -30,7 +30,7 @@ cô lập hoàn toàn giữa các app, nginx chỉ đóng vai trò reverse-proxy
 Chạy trên server mới (cần quyền sudo/root):
 
 ```bash
-curl -fsSL "https://gist.githubusercontent.com/anhtuank7c/<GIST_ID>/raw/install.sh" | sudo bash
+curl -fsSL "https://gist.githubusercontent.com/anhtuank7c/cc1e8194608e3f5a942d6d1d6669e6a3/raw/install.sh" | sudo bash
 ```
 
 Script sẽ tự cài Node.js (qua NodeSource) nếu máy chưa có, rồi cài `napp` vào

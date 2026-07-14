@@ -20,8 +20,7 @@
 #   NODE_MAJOR     phiên bản Node.js LTS cài qua NodeSource (mặc định: 22)
 # ==============================================================================
 set -euo pipefail
-
-NAPP_CJS_URL_DEFAULT="https://gist.githubusercontent.com/anhtuank7c/REPLACE_WITH_GIST_ID/raw/napp.cjs"
+NAPP_CJS_URL_DEFAULT="https://gist.githubusercontent.com/anhtuank7c/ef7ac27df205d70cf1f789bb420ec013/raw/napp.cjs"
 NAPP_CJS_URL="${NAPP_CJS_URL:-$NAPP_CJS_URL_DEFAULT}"
 NODE_MAJOR="${NODE_MAJOR:-22}"
 INSTALL_PATH="/usr/local/bin/napp"
