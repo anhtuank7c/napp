@@ -39,7 +39,12 @@ export interface CreateAppOptions {
 }
 
 function defaultInstallCmd(runtime: "node" | "bun"): string {
-  return runtime === "bun" ? "bun install --production" : "npm ci --omit=dev || npm install --omit=dev";
+  if (runtime === "bun") return "bun install --production";
+  // `npm ci` BẮT BUỘC phải có package-lock.json / npm-shrinkwrap.json — app mẫu
+  // hoặc repo không commit lockfile sẽ không có, khiến `npm ci` lỗi EUSAGE và phun
+  // ra cả bức tường usage. Vì vậy chỉ dùng `npm ci` khi lockfile tồn tại (kèm
+  // fallback `npm install` phòng lock lệch với package.json); còn lại cài thẳng.
+  return "if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then npm ci --omit=dev || npm install --omit=dev; else npm install --omit=dev; fi";
 }
 
 function defaultStartCmd(runtime: "node" | "bun"): string {
