@@ -11,22 +11,23 @@ import {
   SYSCTL_TUNING_PATH,
 } from "../templates/tuning";
 import { renderNginxTuningConf, NGINX_TUNING_CONF } from "../templates/nginx";
-import { renderAppSystemdService, execStartLine } from "../templates/systemd";
-import { loadState, serviceNameFor, SYSTEMD_DIR } from "../lib/state";
+import { loadState } from "../lib/state";
+import { applyNodeHeaps } from "./app";
 import { readFileSync, existsSync } from "node:fs";
 
 export function cmdTuneShow(): void {
   const hw = detectHardware();
+  const appCount = Object.keys(loadState().apps).length;
   section("Phần cứng phát hiện được");
   console.log(formatHardware(hw));
-  const plan = computeTuningPlan(hw);
+  const plan = computeTuningPlan(hw, undefined, appCount);
   console.log();
   section("Kế hoạch tối ưu (chưa áp dụng — dùng `napp tune apply`)");
   console.log(`  InnoDB buffer pool : ${plan.innodbBufferPoolMB} MB`);
   console.log(`  MariaDB max_connections : ${plan.maxConnections}`);
   console.log(`  Redis maxmemory    : ${plan.redisMaxMemoryMB} MB (volatile-lru)`);
   console.log(`  nginx worker_connections : ${plan.workerConnections}`);
-  console.log(`  Node heap mỗi app  : --max-old-space-size=${plan.nodeMaxOldSpaceMB} (NODE_OPTIONS, chỉ app runtime=node)`);
+  console.log(`  Node heap mỗi app  : --max-old-space-size=${plan.nodeMaxOldSpaceMB} (chia cho ${Math.max(1, appCount)} app; chỉ app runtime=node)`);
 }
 
 export interface TuneApplyOptions {
@@ -59,16 +60,16 @@ function patchNginxMainConf(workerConnections: number): void {
 export async function cmdTuneApply(opts: TuneApplyOptions): Promise<void> {
   requireRoot();
   const hw = detectHardware();
-  const plan = computeTuningPlan(hw, opts.dbRamPercent);
+  const appCount = Object.keys(loadState().apps).length;
+  const plan = computeTuningPlan(hw, opts.dbRamPercent, appCount);
 
   section("Tối ưu theo phần cứng thực tế");
   console.log(formatHardware(hw));
   console.log();
-  const appCount = Object.keys(loadState().apps).length;
   console.log(`  InnoDB buffer pool -> ${plan.innodbBufferPoolMB} MB`);
   console.log(`  Redis maxmemory    -> ${plan.redisMaxMemoryMB} MB (volatile-lru)`);
   console.log(`  nginx worker_connections -> ${plan.workerConnections}`);
-  console.log(`  Node heap mỗi app  -> --max-old-space-size=${plan.nodeMaxOldSpaceMB} (áp cho ${appCount} app)`);
+  console.log(`  Node heap mỗi app  -> --max-old-space-size=${plan.nodeMaxOldSpaceMB} (chia cho ${Math.max(1, appCount)} app)`);
   if (hw.diskFreeGB > 0 && hw.diskFreeGB < 5) {
     warn(`Ổ đĩa trống chỉ còn ${hw.diskFreeGB} GB — chú ý dung lượng cho log/AOF Redis/backup.`);
   }
@@ -153,23 +154,15 @@ export async function cmdTuneApply(opts: TuneApplyOptions): Promise<void> {
     warn("Redis chưa cài — bỏ qua.");
   }
 
-  // Các app: ghi lại unit systemd để (1) cập nhật NODE_OPTIONS heap V8 theo phần
-  // cứng cho app node, (2) đồng bộ hardening mới (ProtectHome=tmpfs) sang cả app
-  // cũ. Ghi file luôn (idempotent); chỉ restart khi không --skip-restart.
-  const apps = Object.values(loadState().apps);
-  if (apps.length > 0) {
-    const nodeOpt = `--max-old-space-size=${plan.nodeMaxOldSpaceMB}`;
-    for (const app of apps) {
-      const nodeOptions = app.nodeRuntime === "node" ? nodeOpt : undefined;
-      const unitPath = `${SYSTEMD_DIR}/${serviceNameFor(app.domain)}.service`;
-      writeFile(unitPath, renderAppSystemdService(app, execStartLine(app.startCmd), { nodeOptions }), 0o644);
-    }
-    runCmd("systemctl", ["daemon-reload"]);
+  // Các app: ghi lại unit systemd để (1) cập nhật NODE_OPTIONS heap V8 (chia theo
+  // số app) cho app node, (2) đồng bộ hardening mới (ProtectHome=tmpfs) sang cả
+  // app cũ. Ghi file luôn (idempotent); chỉ restart khi không --skip-restart.
+  if (appCount > 0) {
+    const heapMB = applyNodeHeaps({ restart: !opts.skipRestart });
     if (!opts.skipRestart) {
-      for (const app of apps) runCmd("systemctl", ["restart", serviceNameFor(app.domain)], { silentFail: true });
-      ok(`Đã cập nhật unit + NODE_OPTIONS cho ${apps.length} app và khởi động lại (app node: heap ${plan.nodeMaxOldSpaceMB} MB).`);
+      ok(`Đã cập nhật unit + NODE_OPTIONS cho ${appCount} app và khởi động lại (app node: heap ${heapMB} MB/app).`);
     } else {
-      ok(`Đã ghi lại unit cho ${apps.length} app (chưa restart do --skip-restart — chạy 'napp app restart <domain>' để áp).`);
+      ok(`Đã ghi lại unit cho ${appCount} app (chưa restart do --skip-restart — chạy 'napp app restart <domain>' để áp).`);
     }
   }
 

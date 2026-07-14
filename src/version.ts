@@ -16,6 +16,13 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.6.0
+- Heap V8 (--max-old-space-size) giờ CHIA THEO SỐ APP: ngân sách RAM cho app
+  (RAM − MariaDB/Redis/OS) chia đều cho số app, để tổng heap vừa với RAM (quan
+  trọng trên máy 1GB chạy nhiều app). Tự cân đối lại khi TẠO/XOÁ app (ghi lại
+  unit + restart các app khác) và khi 'napp tune apply'. Ví dụ 1GB: 1 app=384MB,
+  2 app=230MB, 3 app=153MB mỗi app.
+
 ## 1.5.0
 - NODE_OPTIONS (--max-old-space-size) tự tính theo RAM/tier cho app runtime=node,
   đặt trong unit systemd (user override được qua .env). bun không set (dùng JSC).

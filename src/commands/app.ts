@@ -1,5 +1,5 @@
 import { existsSync, rmSync } from "node:fs";
-import { execCapture, runCmd, runAs, ensureDir, requireRoot, commandExists } from "../lib/exec";
+import { execCapture, runCmd, runAs, ensureDir, requireRoot, commandExists, writeFile } from "../lib/exec";
 import { info, ok, warn, die, section } from "../lib/log";
 import { validateDomain, validatePort, validateRepoUrl, validateBranch, validateEnvKey } from "../lib/validate";
 import {
@@ -74,6 +74,29 @@ function defaultInstallCmd(pm: PackageManager): string {
 function defaultStartCmd(runtime: Runtime, pm: PackageManager): string {
   if (runtime === "bun") return "bun run start";
   return pm === "bun" ? "npm start" : `${pm} start`;
+}
+
+// Cân đối heap V8 giữa TẤT CẢ app trên máy: heap mỗi app node = ngân sách RAM
+// cho app / tổng số app (xem nodeMaxOldSpaceMB). Ghi lại unit systemd cho mọi
+// app (đồng thời đồng bộ hardening mới), daemon-reload, và tùy chọn restart để
+// áp ngay. Gọi khi số app thay đổi (tạo/xoá) và khi `napp tune apply`.
+// Trả về số MB heap/app đã áp (0 nếu không có app nào).
+export function applyNodeHeaps(opts: { restart: boolean; skipRestartFor?: string } = { restart: false }): number {
+  const apps = Object.values(loadState().apps);
+  if (apps.length === 0) return 0;
+  const heapMB = nodeMaxOldSpaceMB(detectHardware(), apps.length);
+  for (const app of apps) {
+    const nodeOptions = app.nodeRuntime === "node" ? `--max-old-space-size=${heapMB}` : undefined;
+    writeFile(`${SYSTEMD_DIR}/${serviceNameFor(app.domain)}.service`, renderAppSystemdService(app, execStartLine(app.startCmd), { nodeOptions }), 0o644);
+  }
+  runCmd("systemctl", ["daemon-reload"]);
+  if (opts.restart) {
+    for (const app of apps) {
+      if (app.domain === opts.skipRestartFor) continue;
+      runCmd("systemctl", ["restart", serviceNameFor(app.domain)], { silentFail: true });
+    }
+  }
+  return heapMB;
 }
 
 function assertSiteAbsent(domain: string, user: string, port: number | undefined): void {
@@ -286,12 +309,13 @@ EOF`,
       updatedAt: new Date().toISOString(),
     };
     const unitPath = `${SYSTEMD_DIR}/${serviceName}.service`;
-    const { writeFile } = await import("../lib/exec");
-    // Heap V8 chỉ đặt cho runtime node (bun dùng JSC, không hiểu cờ này). Suy từ
-    // phần cứng thực tế; user có thể ghi đè NODE_OPTIONS trong .env.
-    const nodeOptions = opts.runtime === "node" ? `--max-old-space-size=${nodeMaxOldSpaceMB(detectHardware())}` : undefined;
+    // Heap V8 chỉ đặt cho runtime node (bun dùng JSC, không hiểu cờ này). Chia
+    // theo TỔNG số app SAU khi thêm app này (hiện có + 1) để cân đối RAM; user
+    // có thể ghi đè NODE_OPTIONS trong .env.
+    const totalAppsAfter = Object.keys(loadState().apps).length + 1;
+    const nodeOptions = opts.runtime === "node" ? `--max-old-space-size=${nodeMaxOldSpaceMB(detectHardware(), totalAppsAfter)}` : undefined;
     writeFile(unitPath, renderAppSystemdService(record, execStartLine(startCmd), { nodeOptions }), 0o644);
-    if (nodeOptions) info(`NODE_OPTIONS=${nodeOptions} (heap V8 theo phần cứng; đổi trong .env nếu cần)`);
+    if (nodeOptions) info(`NODE_OPTIONS=${nodeOptions} (heap V8 chia cho ${totalAppsAfter} app; đổi trong .env nếu cần)`);
     runCmd("systemctl", ["daemon-reload"]);
     runCmd("systemctl", ["enable", serviceName]);
     runCmd("systemctl", ["restart", serviceName]);
@@ -309,6 +333,15 @@ EOF`,
     upsertApp(record);
     rollbackActive = false;
     release();
+
+    // Cân đối lại heap V8 giữa các app để chia sẻ RAM. App vừa tạo đã chạy với
+    // heap đúng rồi nên bỏ qua restart nó; chỉ ghi lại + restart các app CŨ để
+    // chúng nhường bớt heap cho app mới (quan trọng trên máy RAM nhỏ).
+    const totalApps = Object.keys(loadState().apps).length;
+    if (totalApps > 1) {
+      const heapMB = applyNodeHeaps({ restart: true, skipRestartFor: domain });
+      info(`Đã cân đối heap V8 còn ${heapMB} MB/app cho ${totalApps} app (đã restart các app cũ để áp).`);
+    }
 
     console.log();
     console.log("===============================================================");
@@ -424,6 +457,13 @@ export async function cmdAppRemove(domain: string, opts: { yes: boolean; keepDb:
 
     removeAppFromState(domain);
     ok(`Đã xoá app '${domain}'.`);
+
+    // Cân đối lại heap V8 cho các app còn lại — nay được chia phần RAM lớn hơn.
+    const remaining = Object.keys(loadState().apps).length;
+    if (remaining > 0) {
+      const heapMB = applyNodeHeaps({ restart: true });
+      info(`Đã cân đối lại heap V8 lên ${heapMB} MB/app cho ${remaining} app còn lại.`);
+    }
   } finally {
     release();
   }
