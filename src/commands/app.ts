@@ -76,6 +76,37 @@ function defaultStartCmd(runtime: Runtime, pm: PackageManager): string {
   return pm === "bun" ? "npm start" : `${pm} start`;
 }
 
+// Kiểm tra một lệnh có sẵn Ở MỨC HỆ THỐNG không (/usr, /opt, /bin) — tức MỌI user
+// (kể cả app user chạy qua systemd / login shell) đều gọi được. Khác commandExists
+// (chỉ dò PATH của root): pnpm/bun cài trong home của root sẽ KHÔNG tính là hệ
+// thống, và đó chính là bẫy khiến bước cài deps của app user báo 'command not found'.
+function commandExistsSystemWide(cmd: string): boolean {
+  const res = execCapture("bash", ["-lc", `p="$(command -v ${cmd} 2>/dev/null)" && readlink -f "$p"`]);
+  if (res.code !== 0) return false;
+  return /^\/(usr|opt|bin|sbin)\//.test(res.stdout.trim());
+}
+
+// Đảm bảo trình quản lý gói dùng được ở mức hệ thống trước khi tạo app. npm đi
+// kèm Node. pnpm/yarn thiếu thì cài global qua npm (-> /usr/bin, mọi user thấy).
+// bun phải được cài sẵn system-wide (do install.sh) — thiếu thì báo lỗi rõ ràng.
+function ensurePackageManager(pm: PackageManager): void {
+  if (pm === "npm") return;
+  if (commandExistsSystemWide(pm)) return;
+  if (pm === "bun") {
+    die(
+      "bun chưa được cài ở mức hệ thống. Cài lại bằng install.sh (mặc định có cài bun), hoặc:\n" +
+        "  sudo bash -c 'export BUN_INSTALL=/usr/local; curl -fsSL https://bun.sh/install | bash'\n" +
+        "rồi thử lại — hoặc chọn package manager khác."
+    );
+  }
+  info(`'${pm}' chưa có ở mức hệ thống — đang cài global bằng 'npm install -g ${pm}'...`);
+  runCmd("npm", ["install", "-g", pm]);
+  if (!commandExistsSystemWide(pm)) {
+    die(`Đã chạy 'npm install -g ${pm}' nhưng '${pm}' vẫn chưa dùng được ở mức hệ thống. Hãy cài '${pm}' thủ công rồi thử lại.`);
+  }
+  ok(`Đã cài '${pm}' ở mức hệ thống.`);
+}
+
 // Cân đối heap V8 giữa TẤT CẢ app trên máy: heap mỗi app node = ngân sách RAM
 // cho app / tổng số app (xem nodeMaxOldSpaceMB). Ghi lại unit systemd cho mọi
 // app (đồng thời đồng bộ hardening mới), daemon-reload, và tùy chọn restart để
@@ -137,16 +168,21 @@ export async function cmdAppCreate(domain: string, opts: CreateAppOptions): Prom
 
   const pm: PackageManager = opts.packageManager ?? defaultPackageManager(opts.runtime);
 
-  if (!commandExists("node") && opts.runtime === "node") {
+  // Runtime engine phải chạy được (app node chạy bằng node; app bun chạy bằng bun).
+  if (opts.runtime === "node" && !commandExists("node")) {
     die("Node.js chưa được cài. Chạy 'napp check --fix' trước.");
   }
-  if (opts.runtime === "bun" && !commandExists("bun")) {
-    warn("Không tìm thấy lệnh 'bun' trong PATH của root — hãy đảm bảo bun đã được cài toàn cục (curl -fsSL https://bun.sh/install | bash rồi ln -s vào /usr/local/bin).");
+  if (opts.runtime === "bun" && !commandExistsSystemWide("bun")) {
+    die(
+      "bun chưa được cài ở mức hệ thống (runtime=bun cần bun để chạy). Cài lại bằng install.sh\n" +
+        "  (mặc định có cài bun), hoặc: sudo bash -c 'export BUN_INSTALL=/usr/local; curl -fsSL https://bun.sh/install | bash'\n" +
+        "rồi thử lại — hoặc chọn runtime node."
+    );
   }
-  // npm luôn đi kèm Node nên không cần kiểm tra; pnpm/yarn/bun thì phải có sẵn.
-  if (pm !== "npm" && !commandExists(pm)) {
-    warn(`Không tìm thấy '${pm}' trong PATH của root — bước cài dependencies có thể thất bại. Hãy cài '${pm}' toàn cục trước (hoặc chọn npm), rồi 'napp app deploy ${domain}' để cài lại.`);
-  }
+  // Trình quản lý gói phải dùng được Ở MỨC HỆ THỐNG (app user + systemd đều thấy).
+  // Tự cài pnpm/yarn qua npm nếu thiếu. Làm TRƯỚC khi tạo tài nguyên để fail sớm,
+  // không phải tạo rồi rollback.
+  ensurePackageManager(pm);
   if (!commandExists("nginx")) die("nginx chưa được cài. Chạy 'napp check --fix' trước.");
 
   const release = acquireLock(domain);
@@ -379,6 +415,10 @@ export async function cmdAppDeploy(domain: string): Promise<void> {
     info(`Đang git pull (${app.branch})...`);
     runAs(app.user, "git", ["fetch", "origin", app.branch], { cwd: app.webRoot });
     runAs(app.user, "git", ["reset", "--hard", `origin/${app.branch}`], { cwd: app.webRoot });
+
+    // Đảm bảo trình quản lý gói của app dùng được ở mức hệ thống (tự cài pnpm/yarn
+    // nếu thiếu) — tránh 'command not found' khi chạy installCmd dưới app user.
+    if (app.packageManager) ensurePackageManager(app.packageManager);
 
     info("Đang cài dependencies...");
     runAs(app.user, "bash", ["-lc", app.installCmd], { cwd: app.webRoot });

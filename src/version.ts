@@ -16,6 +16,13 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.6.1
+- Sửa lỗi tạo app thất bại + rollback khi chọn pnpm/yarn chưa cài (báo
+  'command not found' dưới app user). Nay napp kiểm tra pm có ở MỨC HỆ THỐNG
+  (/usr, /opt) không — nếu chưa, tự 'npm install -g pnpm|yarn' để app user và
+  systemd đều dùng được, và fail SỚM (trước khi tạo tài nguyên) nếu bun thiếu.
+  Deploy cũng tự đảm bảo pm trước khi cài deps.
+
 ## 1.6.0
 - Heap V8 (--max-old-space-size) giờ CHIA THEO SỐ APP: ngân sách RAM cho app
   (RAM − MariaDB/Redis/OS) chia đều cho số app, để tổng heap vừa với RAM (quan
