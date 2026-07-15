@@ -169,7 +169,7 @@ async function menuCert(): Promise<void> {
         if (!domain) return;
         const saved = getAcmeEmail();
         const email = (await ask(`Email Let's Encrypt${saved ? ` (Enter = ${saved})` : " (Enter = đăng ký KHÔNG email)"}: `)).trim() || saved || "";
-        cmdCertIssue(domain, { noWww: false, extra: [], email: email || undefined, registerWithoutEmail: !email, redirect: true });
+        await cmdCertIssue(domain, { noWww: false, extra: [], email: email || undefined, registerWithoutEmail: !email, redirect: true });
       });
     else if (choice === "3")
       await guard(async () => {

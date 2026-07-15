@@ -16,6 +16,12 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.7.1
+- 'napp cert issue' tiền kiểm DNS: certbot cấp MỘT chứng chỉ cho mọi -d, chỉ
+  cần một domain chưa có DNS (ví dụ www chưa trỏ) là hỏng cả. Nay napp bỏ các
+  domain chưa phân giải (A/AAAA) kèm cảnh báo, để phần còn lại vẫn cấp được;
+  nếu domain CHÍNH chưa phân giải thì báo lỗi rõ ràng.
+
 ## 1.7.0
 - Sửa 'napp cert issue' bị TREO ở prompt nhập email của certbot: nay chạy
   --non-interactive --agree-tos --email (nhớ email trong state cho lần sau) và

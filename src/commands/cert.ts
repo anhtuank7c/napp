@@ -1,6 +1,6 @@
 import { execCapture, runCmd, requireRoot, commandExists } from "../lib/exec";
 import { validateDomain } from "../lib/validate";
-import { info, ok, die } from "../lib/log";
+import { info, ok, warn, die } from "../lib/log";
 import { requireApp, getAcmeEmail, setAcmeEmail } from "../lib/state";
 
 function requireCertbot(): void {
@@ -36,18 +36,52 @@ function looksLikeEmail(s: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
 }
 
-export function cmdCertIssue(domain: string, opts: CertIssueOptions): void {
+// Domain có bản ghi A hoặc AAAA công khai không? (NXDOMAIN/ENODATA -> false).
+// Ta CHỈ kiểm tra "có phân giải" chứ KHÔNG so IP với server: domain bật proxy
+// Cloudflare sẽ phân giải ra IP của Cloudflare mà vẫn cấp SSL được (HTTP-01 đi
+// qua edge về origin).
+async function domainResolves(domain: string): Promise<boolean> {
+  const { resolve4, resolve6 } = await import("node:dns/promises");
+  const has4 = await resolve4(domain).then((a) => a.length > 0).catch(() => false);
+  if (has4) return true;
+  return await resolve6(domain).then((a) => a.length > 0).catch(() => false);
+}
+
+export async function cmdCertIssue(domain: string, opts: CertIssueOptions): Promise<void> {
   requireRoot();
   validateDomain(domain);
   requireApp(domain); // đảm bảo nginx vhost đã tồn tại (certbot cần sửa nó)
   requireCertbot();
 
-  const args = ["--nginx", "-d", domain];
-  if (!opts.noWww) args.push("-d", `www.${domain}`);
+  // Ứng viên domain cho chứng chỉ.
+  const candidates = [domain];
+  if (!opts.noWww) candidates.push(`www.${domain}`);
   for (const e of opts.extra) {
     validateDomain(e);
-    args.push("-d", e);
+    candidates.push(e);
   }
+
+  // TIỀN KIỂM DNS: certbot cấp MỘT chứng chỉ cho tất cả -d; chỉ một domain chưa
+  // có DNS (ví dụ www chưa trỏ) là HỎNG CẢ chứng chỉ. Nên ta loại domain chưa
+  // phân giải (kèm cảnh báo) để phần còn lại vẫn cấp được.
+  info("Đang kiểm tra DNS của các domain...");
+  const resolvable: string[] = [];
+  for (const d of candidates) {
+    if (await domainResolves(d)) {
+      resolvable.push(d);
+    } else {
+      warn(`'${d}' chưa có bản ghi DNS (A/AAAA) — BỎ khỏi chứng chỉ lần này. Trỏ DNS cho nó rồi chạy lại để bao gồm.`);
+    }
+  }
+  if (!resolvable.includes(domain)) {
+    die(
+      `Domain chính '${domain}' chưa phân giải DNS — không thể phát hành chứng chỉ.\n` +
+        `  Hãy trỏ bản ghi A của '${domain}' về server này (hoặc bật proxy Cloudflare), đợi DNS lan truyền, rồi chạy lại.`
+    );
+  }
+
+  const args = ["--nginx"];
+  for (const d of resolvable) args.push("-d", d);
 
   // CHẠY KHÔNG TƯƠNG TÁC để không bị treo ở prompt email/agree-tos của certbot.
   args.push("--non-interactive", "--agree-tos");
