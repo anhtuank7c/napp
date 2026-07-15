@@ -19,7 +19,7 @@ import { cmdDomainAdd, cmdDomainRemove, cmdDomainList } from "./commands/domain"
 import { cmdCertIssue, cmdCertRenew, cmdCertRevoke, cmdCertList, cmdCertStatus } from "./commands/cert";
 import { cmdDbCreate, cmdDbDrop, cmdDbList, cmdDbBackup } from "./commands/db";
 import { cmdRedisInfo, cmdRedisAllocations, cmdRedisFlush } from "./commands/redis";
-import { cmdBackupRun, cmdBackupList, cmdBackupSchedule, cmdBackupUnschedule, type BackupTarget } from "./commands/backup";
+import { cmdBackupRun, cmdBackupList, cmdBackupSchedule, cmdBackupUnschedule, DEFAULT_RETENTION_DAYS, type BackupTarget } from "./commands/backup";
 import { cmdFirewallSync, cmdFirewallStatus } from "./commands/firewall";
 import { cmdFail2banSetup, cmdFail2banStatus, cmdFail2banUnban } from "./commands/fail2ban";
 import { cmdTuneShow, cmdTuneApply } from "./commands/tune";
@@ -180,18 +180,28 @@ redis
 const backup = program.command("backup").description("sao lưu database + mã nguồn định kỳ");
 backup
   .command("run")
-  .description("chạy backup ngay")
+  .description("chạy backup ngay (file nén gzip)")
   .addOption(new Option("--target <target>", "phạm vi backup").choices(["db", "files", "all"]).default("all"))
-  .option("--keep <n>", "số bản gần nhất giữ lại", (v) => parseInt(v, 10), 7)
+  .option("--database <name>", "chỉ backup một database cụ thể (mặc định: tất cả)")
+  .option("--keep-days <n>", "retention: giữ backup trong N ngày", (v) => parseInt(v, 10), DEFAULT_RETENTION_DAYS)
+  .option("--keep <n>", "(tuỳ chọn) giữ tối đa N bản gần nhất bất kể ngày", (v) => parseInt(v, 10))
   .option("--quiet", "giảm log (dùng khi chạy từ systemd timer)")
-  .action((opts) => cmdBackupRun({ target: opts.target as BackupTarget, keep: opts.keep, quiet: Boolean(opts.quiet) }));
+  .action((opts) =>
+    cmdBackupRun({
+      target: opts.target as BackupTarget,
+      database: opts.database,
+      keepDays: opts.keepDays,
+      keepCount: opts.keep,
+      quiet: Boolean(opts.quiet),
+    })
+  );
 backup
   .command("schedule")
   .description("lên lịch backup hàng ngày qua systemd timer")
   .option("--time <HH:MM>", "giờ chạy hàng ngày", "03:00")
-  .option("--keep <n>", "số bản gần nhất giữ lại", (v) => parseInt(v, 10), 7)
+  .option("--keep-days <n>", "retention: giữ backup trong N ngày", (v) => parseInt(v, 10), DEFAULT_RETENTION_DAYS)
   .addOption(new Option("--target <target>", "phạm vi backup").choices(["db", "files", "all"]).default("all"))
-  .action((opts) => cmdBackupSchedule({ time: opts.time, keep: opts.keep, target: opts.target as BackupTarget }));
+  .action((opts) => cmdBackupSchedule({ time: opts.time, keepDays: opts.keepDays, target: opts.target as BackupTarget }));
 backup.command("unschedule").description("gỡ lịch backup tự động").action(() => cmdBackupUnschedule());
 backup.command("list").description("liệt kê các bản backup hiện có").action(() => cmdBackupList());
 

@@ -84,8 +84,9 @@ Gõ số rồi Enter, `0` để quay lại/thoát.
 | `sudo napp cert revoke <domain>` / `list` / `status` | Thu hồi / liệt kê / trạng thái SSL |
 | `sudo napp db create\|drop\|backup <name>` / `list` | Database độc lập (ngoài `--db` của app) |
 | `napp redis info\|allocations` / `sudo napp redis flush <n>` | Quản lý Redis |
-| `sudo napp backup run [--target db\|files\|all] [--keep n]` | Backup ngay |
-| `sudo napp backup schedule --time 03:00 --keep 7` | Lên lịch backup qua systemd timer |
+| `sudo napp backup run [--target db\|files\|all] [--database <name>] [--keep-days n]` | Backup ngay (nén gzip; chọn 1 DB hoặc tất cả) |
+| `sudo napp backup schedule --time 03:00 --keep-days 14` | Lên lịch backup hàng ngày (retention theo ngày) qua systemd timer |
+| `sudo napp backup list` / `unschedule` | Danh sách backup (kèm dung lượng) / gỡ lịch |
 | `sudo napp firewall sync [--ssh-port n] [--restrict-cloudflare]` | Đồng bộ UFW (mặc định mở 80/443; `--restrict-cloudflare` để khoá origin theo IP Cloudflare) |
 | `sudo napp fail2ban setup` | Áp cấu hình fail2ban |
 | `sudo napp nginx harden` / `unharden` | Chặn truy cập IP/Host lạ (default_server 444) + ẩn version / gỡ |

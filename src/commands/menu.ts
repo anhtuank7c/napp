@@ -6,7 +6,8 @@ import { cmdCertIssue, cmdCertRenew, cmdCertList, cmdCertRevoke } from "./cert";
 import { getAcmeEmail } from "../lib/state";
 import { cmdDbCreate, cmdDbList, cmdDbBackup } from "./db";
 import { cmdRedisAllocations, cmdRedisInfo } from "./redis";
-import { cmdBackupRun, cmdBackupSchedule, cmdBackupList } from "./backup";
+import { cmdBackupRun, cmdBackupSchedule, cmdBackupList, cmdBackupUnschedule, DEFAULT_RETENTION_DAYS } from "./backup";
+import { listDatabases } from "../lib/mysql";
 import { cmdFirewallSync, cmdFirewallStatus } from "./firewall";
 import { cmdFail2banSetup, cmdFail2banStatus } from "./fail2ban";
 import { cmdTuneApply, cmdTuneShow } from "./tune";
@@ -69,6 +70,35 @@ async function askAppDomain(actionLabel: string): Promise<string | undefined> {
   if (byName) return byName.domain;
   warn(`Lựa chọn không hợp lệ: '${ans}'.`);
   return undefined;
+}
+
+// Xổ danh sách database để chọn. Trả về tên DB, "__ALL__" nếu chọn tất cả, hoặc
+// undefined nếu huỷ / không có DB nào.
+async function askDatabase(actionLabel: string): Promise<string | "__ALL__" | undefined> {
+  const dbs = listDatabases();
+  if (dbs.length === 0) {
+    warn("Không tìm thấy database nào (hoặc MariaDB chưa chạy / chưa kết nối được).");
+    return undefined;
+  }
+  console.log(`Chọn database để ${actionLabel}:`);
+  dbs.forEach((d, i) => console.log(`  ${i + 1}. ${d}`));
+  console.log(`  a. TẤT CẢ database`);
+  const ans = (await ask(`Chọn [1-${dbs.length} / a = tất cả] (0 = huỷ): `)).trim();
+  if (!ans || ans === "0") return undefined;
+  if (ans.toLowerCase() === "a") return "__ALL__";
+  const n = parseInt(ans, 10);
+  if (Number.isInteger(n) && n >= 1 && n <= dbs.length) return dbs[n - 1];
+  const byName = dbs.find((d) => d === ans);
+  if (byName) return byName;
+  warn(`Lựa chọn không hợp lệ: '${ans}'.`);
+  return undefined;
+}
+
+// Hỏi số ngày retention, mặc định DEFAULT_RETENTION_DAYS.
+async function askRetentionDays(): Promise<number> {
+  const ans = (await ask(`Giữ backup trong bao nhiêu NGÀY (retention, mặc định ${DEFAULT_RETENTION_DAYS}): `)).trim();
+  const n = parseInt(ans, 10);
+  return Number.isInteger(n) && n > 0 ? n : DEFAULT_RETENTION_DAYS;
 }
 
 function printMenu(title: string, items: string[]): void {
@@ -201,17 +231,41 @@ async function menuDb(): Promise<void> {
 
 async function menuBackup(): Promise<void> {
   while (true) {
-    printMenu("Sao lưu định kỳ", ["Chạy backup ngay (db + files)", "Lên lịch backup hàng ngày", "Danh sách bản backup"]);
+    printMenu("Sao lưu (nén gzip)", [
+      "Backup DATABASE ngay (chọn database)",
+      "Backup mã nguồn (files) ngay",
+      "Backup TẤT CẢ ngay (database + files)",
+      "Lên lịch tự động backup hàng ngày",
+      "Gỡ lịch backup tự động",
+      "Danh sách các bản backup",
+    ]);
     const choice = await ask("Chọn: ");
     if (choice === "0" || choice === "") return;
-    if (choice === "1") await guard(() => cmdBackupRun({ target: "all", keep: 7 }));
+    if (choice === "1")
+      await guard(async () => {
+        const db = await askDatabase("backup");
+        if (!db) return;
+        const keepDays = await askRetentionDays();
+        cmdBackupRun({ target: "db", database: db === "__ALL__" ? undefined : db, keepDays });
+      });
     else if (choice === "2")
       await guard(async () => {
-        const time = (await ask("Giờ chạy hàng ngày (HH:MM, mặc định 03:00): ")) || "03:00";
-        const keepStr = (await ask("Số bản giữ lại (mặc định 7): ")) || "7";
-        cmdBackupSchedule({ time, keep: parseInt(keepStr, 10) || 7, target: "all" });
+        const keepDays = await askRetentionDays();
+        cmdBackupRun({ target: "files", keepDays });
       });
-    else if (choice === "3") await guard(() => cmdBackupList());
+    else if (choice === "3")
+      await guard(async () => {
+        const keepDays = await askRetentionDays();
+        cmdBackupRun({ target: "all", keepDays });
+      });
+    else if (choice === "4")
+      await guard(async () => {
+        const time = (await ask("Giờ chạy hàng ngày (HH:MM, mặc định 03:00): ")).trim() || "03:00";
+        const keepDays = await askRetentionDays();
+        cmdBackupSchedule({ time, keepDays, target: "all" });
+      });
+    else if (choice === "5") await guard(() => cmdBackupUnschedule());
+    else if (choice === "6") await guard(() => cmdBackupList());
   }
 }
 

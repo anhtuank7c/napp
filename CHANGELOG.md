@@ -2,6 +2,14 @@
 
 Tất cả thay đổi đáng chú ý của `napp` được ghi lại ở đây.
 
+## 1.9.0
+
+- **Backup chọn database + retention theo ngày**:
+  - Menu backup **tự liệt kê database** để chọn — backup **một DB cụ thể** hoặc **tất cả**. CLI: `napp backup run --database <name>`.
+  - **Retention theo NGÀY**: `--keep-days <n>` (mặc định 14) xoá các bản cũ hơn N ngày, cho cả `backup run` và `backup schedule`. Tuỳ chọn `--keep <n>` giới hạn thêm theo số bản gần nhất.
+  - File backup **nén gzip** (`.sql.gz` cho DB, `.tar.gz` cho mã nguồn) — tiết kiệm dung lượng.
+  - `backup list` hiển thị **kích thước từng file + tổng dung lượng**. Menu backup tách rõ: DB / files / tất cả / lên lịch / gỡ lịch / danh sách.
+
 ## 1.8.0
 
 - **`napp nginx harden` — chặn truy cập IP/Host lạ + hardening**. Tạo một **server mặc định** (`default_server`) trả **HTTP 444** (đóng kết nối, không lộ thông tin) cho mọi request **không khớp** `server_name` của app nào — chặn truy cập thẳng vào IP máy chủ, Host giả mạo, bot quét cổng. **Chỉ domain đã tạo app mới truy cập được.** Chặn cả **80 và 443** (dùng `ssl_reject_handshake` trên nginx ≥ 1.19.4, hoặc chứng chỉ tự ký trên bản cũ hơn). Ẩn phiên bản nginx (`server_tokens off`). Tự gỡ site `default` của Ubuntu để tránh trùng `default_server`. Kèm `napp nginx unharden` để gỡ. Có trong menu Hạ tầng.

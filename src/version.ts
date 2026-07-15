@@ -16,6 +16,14 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.9.0
+- Backup: menu tự LIỆT KÊ database để chọn (một DB cụ thể hoặc tất cả). Cờ mới
+  'backup run --database <name>'. File backup vẫn nén gzip (.sql.gz / .tar.gz).
+- Retention theo NGÀY: 'backup run/schedule --keep-days <n>' (mặc định 14) xoá
+  bản cũ hơn N ngày; tuỳ chọn '--keep <n>' giới hạn thêm số bản gần nhất.
+- 'backup list' hiển thị kích thước từng file + tổng dung lượng. Menu backup
+  tách rõ: backup DB / files / tất cả / lên lịch / gỡ lịch / danh sách.
+
 ## 1.8.0
 - 'napp nginx harden': tạo server MẶC ĐỊNH (default_server) trả 444 cho mọi
   request KHÔNG khớp domain đã cấu hình — chặn truy cập thẳng IP, Host giả mạo,

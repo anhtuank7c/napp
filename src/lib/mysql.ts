@@ -20,6 +20,24 @@ export function dbServiceRunning(): boolean {
   return viaProcess;
 }
 
+// Database hệ thống — không đưa vào danh sách chọn để backup.
+const SYSTEM_DBS = new Set(["information_schema", "performance_schema", "mysql", "sys"]);
+
+// Liệt kê các database do người dùng tạo (bỏ DB hệ thống). Trả [] nếu không có
+// client hoặc không kết nối được — để caller xử lý mềm mại thay vì die.
+export function listDatabases(): string[] {
+  if (!commandExists("mysql") && !commandExists("mariadb")) return [];
+  const bin = mysqlBin();
+  const res = execCapture(bin, ["-N", "-e", "SHOW DATABASES"]);
+  if (res.code !== 0) return [];
+  return res.stdout
+    .trim()
+    .split("\n")
+    .map((s) => s.trim())
+    .filter((d) => d && !SYSTEM_DBS.has(d))
+    .sort();
+}
+
 export function dbExists(name: string): boolean {
   const bin = mysqlBin();
   const res = execCapture(bin, [
