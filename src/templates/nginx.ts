@@ -2,6 +2,63 @@ import type { AppRecord } from "../lib/state";
 
 export const CLOUDFLARE_REALIP_CONF = "/etc/nginx/conf.d/cloudflare-realip.conf";
 export const NGINX_TUNING_CONF = "/etc/nginx/conf.d/napp-tuning.conf";
+// Tiền tố 00- để load sớm; đây là server mặc định BẮT các request không khớp domain.
+export const NGINX_DEFAULT_SERVER_CONF = "/etc/nginx/conf.d/00-napp-default-server.conf";
+export const NGINX_HARDENING_CONF = "/etc/nginx/conf.d/napp-hardening.conf";
+
+// Cấu hình hardening ở mức http (áp cho toàn nginx).
+export function renderNginxHardeningConf(): string {
+  return `# Managed by napp — hardening nginx (chạy \`napp nginx harden\`).
+# Ẩn phiên bản nginx trong header/response lỗi để đỡ lộ thông tin cho kẻ dò quét.
+server_tokens off;
+`;
+}
+
+export interface DefaultServerOptions {
+  ipv6: boolean;
+  // "reject": dùng ssl_reject_handshake (nginx >= 1.19.4) — từ chối bắt tay TLS,
+  //           không cần chứng chỉ. "selfsigned": nginx cũ -> dùng cert tự ký rồi 444.
+  sslMode: "reject" | "selfsigned";
+  certPath?: string;
+  keyPath?: string;
+}
+
+// Server MẶC ĐỊNH bắt mọi request KHÔNG khớp server_name của app nào (truy cập
+// thẳng IP, Host giả mạo, bot quét cổng...). Trả 444 = đóng kết nối, không phản
+// hồi gì (không lộ thông tin). Chỉ domain đã cấu hình đúng mới vào được app.
+export function renderDefaultServerConf(opts: DefaultServerOptions): string {
+  const v6_80 = opts.ipv6 ? "\n    listen [::]:80 default_server;" : "";
+  const v6_443 = opts.ipv6 ? "\n    listen [::]:443 ssl default_server;" : "";
+
+  const block443 =
+    opts.sslMode === "reject"
+      ? `server {
+    listen 443 ssl default_server;${v6_443}
+    server_name _;
+    # Từ chối ngay ở bước bắt tay TLS nếu SNI không khớp domain thật nào.
+    ssl_reject_handshake on;
+}`
+      : `server {
+    listen 443 ssl default_server;${v6_443}
+    server_name _;
+    # nginx cũ chưa hỗ trợ ssl_reject_handshake — dùng cert tự ký rồi đóng 444.
+    ssl_certificate ${opts.certPath};
+    ssl_certificate_key ${opts.keyPath};
+    ssl_protocols TLSv1.2 TLSv1.3;
+    return 444;
+}`;
+
+  return `# Managed by napp — CHẶN request không khớp domain (truy cập thẳng IP, Host lạ).
+# TỰ SINH bởi \`napp nginx harden\`; gỡ bằng \`napp nginx unharden\`. ĐỪNG sửa tay.
+server {
+    listen 80 default_server;${v6_80}
+    server_name _;
+    return 444;
+}
+
+${block443}
+`;
+}
 
 // Snippet dùng chung cho MỌI site được napp quản lý: khôi phục IP client
 // thật khi traffic đi qua Cloudflare proxy. Không có snippet này thì

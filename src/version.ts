@@ -16,6 +16,14 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.8.0
+- 'napp nginx harden': tạo server MẶC ĐỊNH (default_server) trả 444 cho mọi
+  request KHÔNG khớp domain đã cấu hình — chặn truy cập thẳng IP, Host giả mạo,
+  bot quét cổng; chỉ domain có app (server_name khớp) mới vào được. Chặn cả 80
+  và 443 (ssl_reject_handshake trên nginx >= 1.19.4, hoặc cert tự ký trên bản
+  cũ). Ẩn phiên bản nginx (server_tokens off). 'napp nginx unharden' để gỡ.
+  Có sẵn trong menu Hạ tầng.
+
 ## 1.7.1
 - 'napp cert issue' tiền kiểm DNS: certbot cấp MỘT chứng chỉ cho mọi -d, chỉ
   cần một domain chưa có DNS (ví dụ www chưa trỏ) là hỏng cả. Nay napp bỏ các

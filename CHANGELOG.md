@@ -2,6 +2,10 @@
 
 Tất cả thay đổi đáng chú ý của `napp` được ghi lại ở đây.
 
+## 1.8.0
+
+- **`napp nginx harden` — chặn truy cập IP/Host lạ + hardening**. Tạo một **server mặc định** (`default_server`) trả **HTTP 444** (đóng kết nối, không lộ thông tin) cho mọi request **không khớp** `server_name` của app nào — chặn truy cập thẳng vào IP máy chủ, Host giả mạo, bot quét cổng. **Chỉ domain đã tạo app mới truy cập được.** Chặn cả **80 và 443** (dùng `ssl_reject_handshake` trên nginx ≥ 1.19.4, hoặc chứng chỉ tự ký trên bản cũ hơn). Ẩn phiên bản nginx (`server_tokens off`). Tự gỡ site `default` của Ubuntu để tránh trùng `default_server`. Kèm `napp nginx unharden` để gỡ. Có trong menu Hạ tầng.
+
 ## 1.7.1
 
 - **`napp cert issue` tiền kiểm DNS**: certbot cấp **một** chứng chỉ cho tất cả `-d`, nên chỉ một domain chưa có DNS (điển hình là `www` chưa trỏ) là **hỏng cả chứng chỉ**. Nay napp kiểm tra A/AAAA từng domain trước, **bỏ domain chưa phân giải** kèm cảnh báo (để phần còn lại vẫn cấp được), và **báo lỗi rõ ràng** nếu domain chính chưa phân giải. Chỉ kiểm tra "có phân giải" chứ không so IP với server, nên domain bật proxy Cloudflare vẫn cấp bình thường.

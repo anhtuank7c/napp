@@ -24,6 +24,7 @@ import { cmdFirewallSync, cmdFirewallStatus } from "./commands/firewall";
 import { cmdFail2banSetup, cmdFail2banStatus, cmdFail2banUnban } from "./commands/fail2ban";
 import { cmdTuneShow, cmdTuneApply } from "./commands/tune";
 import { cmdCloudflareSync, cmdCloudflareSchedule, cmdCloudflareUnschedule } from "./commands/cloudflare";
+import { cmdNginxHarden, cmdNginxUnharden } from "./commands/nginx";
 import { cmdUpdate, cmdVersion, cmdChangelog } from "./commands/update";
 import { cmdInstallSelf, cmdUninstallSelf } from "./commands/installSelf";
 import { runMenu } from "./commands/menu";
@@ -248,6 +249,14 @@ cloudflare
   .option("--time <HH:MM>", "giờ chạy hàng ngày", "01:00")
   .action((opts) => cmdCloudflareSchedule({ time: opts.time }));
 cloudflare.command("unschedule").description("gỡ lịch tự động đồng bộ IP Cloudflare").action(() => cmdCloudflareUnschedule());
+
+// ---------------------------------------------------------------- nginx ---
+const nginx = program.command("nginx").description("bảo vệ / hardening nginx");
+nginx
+  .command("harden")
+  .description("chặn truy cập thẳng IP / Host lạ (default_server trả 444) + ẩn phiên bản nginx")
+  .action(() => cmdNginxHarden());
+nginx.command("unharden").description("gỡ cấu hình hardening nginx (khôi phục hành vi mặc định)").action(() => cmdNginxUnharden());
 
 // ------------------------------------------------------- update/version ---
 program.command("update").description("tự cập nhật napp lên bản mới nhất (OTA qua gist)").action(() => cmdUpdate());

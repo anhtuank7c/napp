@@ -15,6 +15,7 @@ cô lập hoàn toàn giữa các app, nginx chỉ đóng vai trò reverse-proxy
 - 👤 Mỗi app một **user Linux riêng**, systemd service riêng, thư mục riêng (750/640, `.env` 600)
 - 🌐 nginx reverse-proxy tự sinh, hỗ trợ **Cloudflare real-IP** (trích xuất đúng IP client thật)
 - 🧱 **UFW**: mặc định deny, mở SSH + 80/443 công khai (tùy chọn khoá origin theo dải IP Cloudflare với `--restrict-cloudflare`)
+- 🛑 **Hardening nginx** (`napp nginx harden`): chặn truy cập thẳng IP / Host lạ (trả 444), chỉ domain đã cấu hình mới vào được; ẩn phiên bản nginx
 - 🛡️ **fail2ban**: sshd + nginx-botsearch/http-auth/limit-req + jail riêng chống spam 502/504/429
 - 💾 **Backup định kỳ** (database + mã nguồn) qua **systemd timer**, có xoay vòng retention
 - ⚙️ **Tối ưu theo phần cứng thực tế**: `napp tune apply` phát hiện CPU/RAM và điều chỉnh nginx/MariaDB/Redis/sysctl **và NODE_OPTIONS heap V8 cho từng app node** — chạy lại bất cứ khi nào nâng cấp server
@@ -87,6 +88,7 @@ Gõ số rồi Enter, `0` để quay lại/thoát.
 | `sudo napp backup schedule --time 03:00 --keep 7` | Lên lịch backup qua systemd timer |
 | `sudo napp firewall sync [--ssh-port n] [--restrict-cloudflare]` | Đồng bộ UFW (mặc định mở 80/443; `--restrict-cloudflare` để khoá origin theo IP Cloudflare) |
 | `sudo napp fail2ban setup` | Áp cấu hình fail2ban |
+| `sudo napp nginx harden` / `unharden` | Chặn truy cập IP/Host lạ (default_server 444) + ẩn version / gỡ |
 | `sudo napp cloudflare sync` | Đồng bộ dải IP Cloudflare vào nginx (real IP) ngay |
 | `sudo napp cloudflare schedule [--time 01:00]` | Lên lịch tự động đồng bộ IP Cloudflare (systemd timer, hàng ngày) |
 | `sudo napp cloudflare unschedule` | Gỡ lịch tự động đồng bộ IP Cloudflare |
