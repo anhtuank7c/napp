@@ -44,6 +44,7 @@ export interface NappState {
   apps: Record<string, AppRecord>; // key = domain chính
   usedPorts: number[];
   usedRedisDb: number[];
+  acmeEmail?: string; // email đã dùng đăng ký Let's Encrypt — nhớ để đỡ nhập lại
 }
 
 function emptyState(): NappState {
@@ -79,6 +80,16 @@ export function saveState(s: NappState): void {
   // lệnh readonly chạy sau trong cùng tiến trình (không xảy ra thực tế vì
   // mỗi lần gọi napp là một process riêng, nhưng an toàn hơn).
   if (execState.dryRun) cache = null;
+}
+
+export function getAcmeEmail(): string | undefined {
+  return loadState().acmeEmail;
+}
+
+export function setAcmeEmail(email: string): void {
+  const s = loadState();
+  s.acmeEmail = email;
+  saveState(s);
 }
 
 export function getApp(domain: string): AppRecord | undefined {

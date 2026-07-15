@@ -78,7 +78,7 @@ Gõ số rồi Enter, `0` để quay lại/thoát.
 | `sudo napp app env-set <domain> KEY=VALUE...` | Cập nhật `.env` |
 | `sudo napp app remove <domain> [--keep-db] [-y]` | Xoá app |
 | `sudo napp domain add\|remove <domain> <alias>` | Domain phụ trỏ vào app |
-| `sudo napp cert issue <domain> [--no-www] [--extra <d>]` | Phát hành SSL |
+| `sudo napp cert issue <domain> --email <email> [--no-www] [--no-redirect] [--extra <d>]` | Phát hành SSL (không tương tác; nhớ email cho lần sau) |
 | `sudo napp cert renew [<domain>] [--force]` | Gia hạn SSL |
 | `sudo napp cert revoke <domain>` / `list` / `status` | Thu hồi / liệt kê / trạng thái SSL |
 | `sudo napp db create\|drop\|backup <name>` / `list` | Database độc lập (ngoài `--db` của app) |
@@ -119,7 +119,7 @@ sudo napp app create api.example.com \
 Trỏ bản ghi DNS A của domain về server (bật proxy Cloudflare nếu dùng), rồi bật HTTPS:
 
 ```bash
-sudo napp cert issue api.example.com
+sudo napp cert issue api.example.com --email ban@example.com
 ```
 
 Xem log:

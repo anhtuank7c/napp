@@ -16,6 +16,14 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.7.0
+- Sửa 'napp cert issue' bị TREO ở prompt nhập email của certbot: nay chạy
+  --non-interactive --agree-tos --email (nhớ email trong state cho lần sau) và
+  --redirect (tự thêm chuyển HTTP->HTTPS). Cờ mới: --email, --register-without-email,
+  --no-redirect. Thiếu email thì báo lỗi rõ ràng thay vì treo.
+- Menu SSL: phát hành / gia hạn / thu hồi giờ CHỌN domain từ danh sách app; thêm
+  mục 'Thu hồi / gỡ chứng chỉ' và 'Gia hạn một domain'.
+
 ## 1.6.1
 - Sửa lỗi tạo app thất bại + rollback khi chọn pnpm/yarn chưa cài (báo
   'command not found' dưới app user). Nay napp kiểm tra pm có ở MỨC HỆ THỐNG

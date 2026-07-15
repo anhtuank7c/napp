@@ -127,10 +127,21 @@ cert
   .action((domain) => cmdCertStatus(domain));
 cert
   .command("issue <domain>")
-  .description("phát hành chứng chỉ SSL mới")
+  .description("phát hành chứng chỉ SSL mới (chạy không tương tác)")
   .option("--no-www", "không bao gồm www.<domain>")
+  .option("--email <email>", "email đăng ký Let's Encrypt (nhận cảnh báo hết hạn; nhớ cho lần sau)")
+  .option("--register-without-email", "đăng ký KHÔNG email (không khuyến nghị)")
+  .option("--no-redirect", "không tự thêm chuyển hướng HTTP -> HTTPS")
   .option("--extra <domain...>", "domain phụ khác cần đưa vào cùng chứng chỉ", (v, prev: string[]) => [...prev, v], [] as string[])
-  .action((domain, opts) => cmdCertIssue(domain, { noWww: !opts.www, extra: opts.extra ?? [] }));
+  .action((domain, opts) =>
+    cmdCertIssue(domain, {
+      noWww: !opts.www,
+      extra: opts.extra ?? [],
+      email: opts.email,
+      registerWithoutEmail: Boolean(opts.registerWithoutEmail),
+      redirect: opts.redirect,
+    })
+  );
 cert
   .command("renew [domain]")
   .description("gia hạn chứng chỉ (bỏ trống domain để gia hạn tất cả)")

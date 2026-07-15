@@ -2,7 +2,8 @@ import readline from "node:readline/promises";
 import { cmdCheck } from "./check";
 import { cmdAppCreate, cmdAppDeploy, cmdAppRemove, cmdAppList, cmdAppRestart, cmdAppLogs, listAppSummaries } from "./app";
 import type { Runtime, PackageManager } from "../lib/state";
-import { cmdCertIssue, cmdCertRenew, cmdCertList } from "./cert";
+import { cmdCertIssue, cmdCertRenew, cmdCertList, cmdCertRevoke } from "./cert";
+import { getAcmeEmail } from "../lib/state";
 import { cmdDbCreate, cmdDbList, cmdDbBackup } from "./db";
 import { cmdRedisAllocations, cmdRedisInfo } from "./redis";
 import { cmdBackupRun, cmdBackupSchedule, cmdBackupList } from "./backup";
@@ -152,13 +153,37 @@ async function menuApp(): Promise<void> {
 
 async function menuCert(): Promise<void> {
   while (true) {
-    printMenu("Quản lý SSL (certbot)", ["Danh sách chứng chỉ", "Phát hành SSL cho domain", "Gia hạn tất cả"]);
+    printMenu("Quản lý SSL (Let's Encrypt / certbot)", [
+      "Danh sách chứng chỉ",
+      "Phát hành SSL (chọn app)",
+      "Gia hạn một domain (chọn app)",
+      "Gia hạn TẤT CẢ",
+      "Thu hồi / gỡ chứng chỉ (chọn app)",
+    ]);
     const choice = await ask("Chọn: ");
     if (choice === "0" || choice === "") return;
     if (choice === "1") await guard(() => cmdCertList());
     else if (choice === "2")
-      await guard(async () => cmdCertIssue(await ask("Domain: "), { noWww: false, extra: [] }));
-    else if (choice === "3") await guard(() => cmdCertRenew(undefined, { force: false }));
+      await guard(async () => {
+        const domain = await askAppDomain("phát hành SSL");
+        if (!domain) return;
+        const saved = getAcmeEmail();
+        const email = (await ask(`Email Let's Encrypt${saved ? ` (Enter = ${saved})` : " (Enter = đăng ký KHÔNG email)"}: `)).trim() || saved || "";
+        cmdCertIssue(domain, { noWww: false, extra: [], email: email || undefined, registerWithoutEmail: !email, redirect: true });
+      });
+    else if (choice === "3")
+      await guard(async () => {
+        const domain = await askAppDomain("gia hạn");
+        if (domain) cmdCertRenew(domain, { force: false });
+      });
+    else if (choice === "4") await guard(() => cmdCertRenew(undefined, { force: false }));
+    else if (choice === "5")
+      await guard(async () => {
+        const domain = await askAppDomain("thu hồi/gỡ chứng chỉ");
+        if (!domain) return;
+        const yes = await askYesNo(`Thu hồi & xoá chứng chỉ của '${domain}'? Website sẽ mất HTTPS tới khi phát hành lại.`);
+        if (yes) await cmdCertRevoke(domain, { yes: true });
+      });
   }
 }
 
