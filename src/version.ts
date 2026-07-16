@@ -16,6 +16,17 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.10.0
+- Sửa BUG header WebSocket: vhost ép cứng 'Connection: upgrade' cho MỌI request,
+  kể cả HTTP thường (Upgrade rỗng) -> header méo + phá keepalive tới upstream.
+  Nay dùng map \\$napp_connection_upgrade (conf.d/00-napp-proxy.conf): chỉ request
+  WebSocket thật mới upgrade. Chạy 'napp nginx sync' để vá các app ĐANG CHẠY
+  (vá tại chỗ, KHÔNG đụng khối SSL certbot đã chèn).
+- App mới tự có PROTOCOL_HEADER/HOST_HEADER/ADDRESS_HEADER/XFF_DEPTH trong .env:
+  SvelteKit adapter-node mặc định không tin X-Forwarded-*, nên app tưởng mình
+  chạy HTTP dù người dùng vào bằng HTTPS -> code redirect "chưa https" lặp vô
+  hạn, cookie Secure/CSRF sai. App CŨ: thêm tay rồi 'napp app restart'.
+
 ## 1.9.0
 - Backup: menu tự LIỆT KÊ database để chọn (một DB cụ thể hoặc tất cả). Cờ mới
   'backup run --database <name>'. File backup vẫn nén gzip (.sql.gz / .tar.gz).

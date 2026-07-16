@@ -5,6 +5,28 @@ export const NGINX_TUNING_CONF = "/etc/nginx/conf.d/napp-tuning.conf";
 // Tiền tố 00- để load sớm; đây là server mặc định BẮT các request không khớp domain.
 export const NGINX_DEFAULT_SERVER_CONF = "/etc/nginx/conf.d/00-napp-default-server.conf";
 export const NGINX_HARDENING_CONF = "/etc/nginx/conf.d/napp-hardening.conf";
+// Các `map` dùng chung ở mức http cho MỌI vhost napp quản lý. `map` KHÔNG hợp lệ
+// bên trong `server {}` nên phải nằm ở file conf.d riêng như thế này.
+export const NGINX_PROXY_CONF = "/etc/nginx/conf.d/00-napp-proxy.conf";
+
+// Biến $napp_connection_upgrade: chỉ gửi 'Connection: upgrade' cho request
+// WebSocket THẬT SỰ. Tên có tiền tố napp_ để không đụng map $connection_upgrade
+// mà người dùng có thể đã tự khai báo ở nơi khác (trùng tên -> nginx báo lỗi).
+export function renderNappProxyConf(): string {
+  return `# Managed by napp — TỰ ĐỘNG SINH RA, đừng sửa tay (chạy \`napp nginx sync\` để cập nhật).
+# Quyết định giá trị header 'Connection' gửi lên upstream:
+#   - Request WebSocket (có Upgrade: websocket) -> 'Connection: upgrade'
+#   - Request HTTP thường (Upgrade rỗng)        -> Connection RỖNG
+# Giá trị rỗng khiến nginx BỎ header đi và dùng keep-alive mặc định của HTTP/1.1,
+# đúng thứ mà 'keepalive 32' trong khối upstream cần. Ép cứng "upgrade" cho mọi
+# request (bug cũ) sẽ gửi 'Connection: upgrade' kèm 'Upgrade:' rỗng — header méo,
+# đồng thời phá luôn keepalive tới upstream.
+map $http_upgrade $napp_connection_upgrade {
+    default upgrade;
+    ''      '';
+}
+`;
+}
 
 // Cấu hình hardening ở mức http (áp cho toàn nginx).
 export function renderNginxHardeningConf(): string {
@@ -129,9 +151,10 @@ server {
         proxy_pass http://napp_${sanitizeUpstreamName(app.domain)};
         proxy_http_version 1.1;
 
-        # WebSocket
+        # WebSocket — chỉ nâng cấp khi client THẬT SỰ xin nâng cấp.
+        # $napp_connection_upgrade định nghĩa ở /etc/nginx/conf.d/00-napp-proxy.conf.
         proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
+        proxy_set_header Connection $napp_connection_upgrade;
 
         # IP/host thật của client — nhờ napp_cloudflare_realip.conf, $remote_addr
         # ở đây ĐÃ LÀ IP thật của client (không phải IP Cloudflare edge) khi

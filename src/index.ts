@@ -24,7 +24,7 @@ import { cmdFirewallSync, cmdFirewallStatus } from "./commands/firewall";
 import { cmdFail2banSetup, cmdFail2banStatus, cmdFail2banUnban } from "./commands/fail2ban";
 import { cmdTuneShow, cmdTuneApply } from "./commands/tune";
 import { cmdCloudflareSync, cmdCloudflareSchedule, cmdCloudflareUnschedule } from "./commands/cloudflare";
-import { cmdNginxHarden, cmdNginxUnharden } from "./commands/nginx";
+import { cmdNginxHarden, cmdNginxUnharden, cmdNginxSync } from "./commands/nginx";
 import { cmdUpdate, cmdVersion, cmdChangelog } from "./commands/update";
 import { cmdInstallSelf, cmdUninstallSelf } from "./commands/installSelf";
 import { runMenu } from "./commands/menu";
@@ -267,6 +267,10 @@ nginx
   .description("chặn truy cập thẳng IP / Host lạ (default_server trả 444) + ẩn phiên bản nginx")
   .action(() => cmdNginxHarden());
 nginx.command("unharden").description("gỡ cấu hình hardening nginx (khôi phục hành vi mặc định)").action(() => cmdNginxUnharden());
+nginx
+  .command("sync")
+  .description("cập nhật cấu hình proxy dùng chung + vá vhost cũ (sửa header Connection/WebSocket) — giữ nguyên SSL")
+  .action(() => cmdNginxSync());
 
 // ------------------------------------------------------- update/version ---
 program.command("update").description("tự cập nhật napp lên bản mới nhất (OTA qua gist)").action(() => cmdUpdate());

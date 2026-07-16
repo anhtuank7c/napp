@@ -24,6 +24,7 @@ import { acquireLock } from "../lib/lock";
 import { createDatabase, dropDatabase } from "../lib/mysql";
 import { mergeEnvFile } from "../lib/envfile";
 import { renderAppNginxConf } from "../templates/nginx";
+import { ensureNappProxyConf } from "./nginx";
 import { renderAppSystemdService, execStartLine } from "../templates/systemd";
 import { detectHardware } from "../lib/hardware";
 import { nodeMaxOldSpaceMB } from "../templates/tuning";
@@ -291,6 +292,23 @@ EOF`,
       NODE_ENV: "production",
       PORT: String(port),
       APP_URL: `http://${domain}`,
+      // --- App chạy sau reverse proxy (nginx) ---
+      // adapter-node của SvelteKit mặc định KHÔNG tin các header X-Forwarded-*,
+      // nên app tưởng mình đang chạy HTTP kể cả khi người dùng vào bằng HTTPS
+      // (nginx mới là chỗ kết thúc TLS). Hệ quả: mọi đoạn code kiểu "chưa https
+      // thì redirect sang https" sẽ LẶP VÔ HẠN, cookie Secure và kiểm tra CSRF
+      // cũng sai theo. Ba biến dưới đây bảo adapter-node đọc header do nginx gửi.
+      // Framework khác không hiểu thì đơn giản là bỏ qua — vô hại.
+      //
+      // CỐ Ý không đặt ORIGIN cứng: để trống thì adapter-node tự dựng origin từ
+      // PROTOCOL_HEADER + HOST_HEADER nên chạy đúng cả TRƯỚC và SAU khi có SSL.
+      // Đặt ORIGIN=https://... ngay lúc tạo app sẽ sai vì cert chưa được cấp.
+      PROTOCOL_HEADER: "x-forwarded-proto",
+      HOST_HEADER: "host",
+      ADDRESS_HEADER: "x-forwarded-for",
+      // Số proxy TIN CẬY đứng trước app, đếm từ phải qua trong X-Forwarded-For.
+      // 1 = chỉ có nginx. Nếu đặt thêm CDN/WAF trước nginx thì tăng lên 2.
+      XFF_DEPTH: "1",
     };
     if (dbInfo) {
       envUpdates.DB_CONNECTION = "mysql";
@@ -358,6 +376,9 @@ EOF`,
     ok(`Đã tạo và khởi động systemd service '${serviceName}'`);
 
     // --- nginx vhost (chỉ HTTP; certbot sẽ thêm SSL sau) ---
+    // Ghi map dùng chung TRƯỚC: vhost dưới đây tham chiếu $napp_connection_upgrade,
+    // thiếu file này thì `nginx -t` sẽ trượt vì biến chưa được định nghĩa.
+    ensureNappProxyConf();
     const ngxConf = `${NGINX_AVAILABLE}/${domain}.conf`;
     writeFile(ngxConf, renderAppNginxConf(record, { ipv6: ipv6Available() }), 0o644);
     runCmd("ln", ["-sf", ngxConf, `${NGINX_ENABLED}/${domain}.conf`]);

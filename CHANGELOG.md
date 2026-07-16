@@ -2,6 +2,12 @@
 
 Tất cả thay đổi đáng chú ý của `napp` được ghi lại ở đây.
 
+## 1.10.0
+
+- **Sửa bug header WebSocket gửi sai cho mọi request**. Vhost trước đây ép cứng `proxy_set_header Connection "upgrade"` cho **mọi** request. Với request HTTP thường, `$http_upgrade` rỗng nên nginx gửi `Connection: upgrade` kèm `Upgrade:` rỗng — **header méo**, đồng thời **phá `keepalive 32`** khai báo trong khối `upstream` (keepalive tới upstream đòi hỏi `Connection` rỗng). Nay dùng `map $http_upgrade $napp_connection_upgrade` đặt tại `/etc/nginx/conf.d/00-napp-proxy.conf`: **chỉ request WebSocket thật sự mới `Connection: upgrade`**, request thường dùng keep-alive đúng chuẩn.
+- **Lệnh mới `napp nginx sync`** để áp bản sửa trên cho các app **đang chạy**: ghi file map dùng chung rồi **vá tại chỗ** từng vhost. Cố ý **không render lại** vhost — render lại sẽ xoá sạch khối SSL mà certbot đã chèn và làm sập HTTPS của site. Có sao lưu + tự hoàn tác nếu `nginx -t` trượt.
+- **App mới tự cấu hình cho app chạy sau reverse proxy**: `.env` nay có `PROTOCOL_HEADER=x-forwarded-proto`, `HOST_HEADER=host`, `ADDRESS_HEADER=x-forwarded-for`, `XFF_DEPTH=1`. Lý do: `adapter-node` của **SvelteKit** mặc định **không tin** các header `X-Forwarded-*`, nên app tưởng mình đang chạy HTTP kể cả khi người dùng vào bằng HTTPS (nginx mới là chỗ kết thúc TLS) — mọi đoạn code kiểu *"chưa https thì redirect sang https"* sẽ **lặp vô hạn** (`ERR_TOO_MANY_REDIRECTS`), cookie `Secure` và kiểm tra CSRF cũng sai theo. Cố ý **không** đặt `ORIGIN` cứng để vhost chạy đúng cả trước lẫn sau khi cấp SSL. App **cũ** cần thêm tay vào `.env` rồi `napp app restart`.
+
 ## 1.9.0
 
 - **Backup chọn database + retention theo ngày**:
