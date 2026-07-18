@@ -1,5 +1,5 @@
 import { existsSync, rmSync } from "node:fs";
-import { execCapture, runCmd, runAs, ensureDir, requireRoot, commandExists, writeFile } from "../lib/exec";
+import { execCapture, runCmd, runAs, ensureDir, requireRoot, commandExists, writeFile, appendFile } from "../lib/exec";
 import { info, ok, warn, die, section } from "../lib/log";
 import { validateDomain, validatePort, validateRepoUrl, validateBranch, validateEnvKey } from "../lib/validate";
 import {
@@ -300,9 +300,17 @@ EOF`,
       // cũng sai theo. Ba biến dưới đây bảo adapter-node đọc header do nginx gửi.
       // Framework khác không hiểu thì đơn giản là bỏ qua — vô hại.
       //
+      // ĐẶC BIỆT với SvelteKit — kiểm tra CSRF: adapter-node so Origin của trình
+      // duyệt với origin server tự suy ra và CHẶN mọi POST/form action bằng lỗi
+      // 403 "Cross-site POST form submissions are forbidden" nếu hai bên lệch.
+      // Sau proxy server chỉ thấy http://127.0.0.1:<port> nên rất dễ lệch; cặp
+      // PROTOCOL_HEADER + HOST_HEADER cho adapter dựng lại đúng https://<domain>
+      // từ header nginx -> form action hết bị 403 mà KHÔNG cần hardcode ORIGIN.
+      //
       // CỐ Ý không đặt ORIGIN cứng: để trống thì adapter-node tự dựng origin từ
       // PROTOCOL_HEADER + HOST_HEADER nên chạy đúng cả TRƯỚC và SAU khi có SSL.
       // Đặt ORIGIN=https://... ngay lúc tạo app sẽ sai vì cert chưa được cấp.
+      // (Gợi ý bật ORIGIN thủ công được ghi dạng comment vào .env bên dưới.)
       PROTOCOL_HEADER: "x-forwarded-proto",
       HOST_HEADER: "host",
       ADDRESS_HEADER: "x-forwarded-for",
@@ -332,6 +340,28 @@ EOF`,
       envUpdates[key] = kv.slice(eq + 1);
     }
     mergeEnvFile(`${webRoot}/.env`, envUpdates, 0o600);
+    // Khối GỢI Ý (comment) về CSRF của SvelteKit — mergeEnvFile chỉ ghi KEY=VALUE
+    // và lược bỏ comment, nên phải append riêng ở đây. Chỉ có trong .env "mẫu"
+    // lúc tạo app; lần `napp app env set` sau sẽ ghi lại file và bỏ khối này —
+    // không sao, nó chỉ là hướng dẫn, PROTOCOL_HEADER/HOST_HEADER ở trên mới là
+    // phần thực sự làm CSRF chạy đúng.
+    appendFile(
+      `${webRoot}/.env`,
+      [
+        "",
+        "# --- SvelteKit · kiểm tra CSRF khi chạy sau reverse proxy ---------------",
+        "# adapter-node CHẶN mọi POST/form action bằng 403 \"Cross-site POST form",
+        "# submissions are forbidden\" nếu Origin trình duyệt gửi lên không khớp",
+        "# origin server tự suy ra. Sau proxy server chỉ thấy http://127.0.0.1 nên",
+        "# rất dễ lệch. PROTOCOL_HEADER + HOST_HEADER ở trên đã cho adapter dựng lại",
+        `# đúng https://${domain} từ header nginx -> thường KHÔNG cần đặt gì thêm.`,
+        "#",
+        "# Nếu vẫn dính 403 (hoặc muốn ghim cứng origin), BỎ COMMENT dòng dưới SAU",
+        "# khi đã cấp SSL (napp cert issue) — trước đó cert chưa có, đặt https sẽ sai:",
+        `# ORIGIN=https://${domain}`,
+        "",
+      ].join("\n")
+    );
     runCmd("chown", [`${user}:${user}`, `${webRoot}/.env`]);
     ok("Đã ghi cấu hình vào .env (quyền 600, chỉ user của app đọc được)");
 
@@ -417,6 +447,7 @@ EOF`,
     console.log(`  1. Trỏ bản ghi DNS A của ${domain} (và www.${domain} nếu dùng) về server này.`);
     console.log(`  2. Kích hoạt SSL:  sudo napp cert issue ${domain}`);
     console.log(`  3. Xem log:        sudo napp app logs ${domain} -f`);
+    console.log("  App SvelteKit dùng form action: nếu POST bị 403 CSRF, xem ghi chú ORIGIN trong .env.");
     console.log("===============================================================");
   } catch (e) {
     rollback();

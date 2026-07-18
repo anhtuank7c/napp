@@ -1,5 +1,5 @@
 import { spawnSync, type SpawnSyncOptionsWithStringEncoding } from "node:child_process";
-import { mkdirSync, writeFileSync, chmodSync, existsSync } from "node:fs";
+import { mkdirSync, writeFileSync, appendFileSync, chmodSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
 import { dryRunNotice, die } from "./log";
 
@@ -135,6 +135,17 @@ export function writeFile(path: string, content: string, mode = 0o644): void {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, content, { encoding: "utf8" });
   chmodSync(path, mode);
+}
+
+// Nối thêm nội dung vào cuối file (giữ nguyên phần đã có). Dùng để chèn khối
+// ghi chú/gợi ý vào .env SAU khi mergeEnvFile đã ghi các cặp KEY=VALUE — vì
+// mergeEnvFile chỉ serialize KEY=VALUE nên comment phải append riêng ở đây.
+export function appendFile(path: string, content: string): void {
+  if (state.dryRun) {
+    dryRunNotice(`Sẽ nối thêm vào file ${path} (${content.length} bytes)`);
+    return;
+  }
+  appendFileSync(path, content, { encoding: "utf8" });
 }
 
 export function ensureDir(path: string, mode = 0o755): void {
