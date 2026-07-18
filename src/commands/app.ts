@@ -247,9 +247,33 @@ cat > ${JSON.stringify(webRoot + "/server.js")} <<'EOF'
 // File tạm do napp tạo — hãy thay bằng mã nguồn thật của bạn.
 const http = require("http");
 const port = process.env.PORT || ${port};
+const html = \`<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${domain}</title>
+  <style>
+    html, body { height: 100%; margin: 0; }
+    body {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      padding: 16px;
+      box-sizing: border-box;
+      font-family: system-ui, -apple-system, sans-serif;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <p>Trang web đang trong quá trình phát triển. Vui lòng quay lại sau.</p>
+</body>
+</html>\`;
 http.createServer((req, res) => {
-  res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
-  res.end("Website ${domain} đang được thiết lập bởi napp.");
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+  res.end(html);
 }).listen(port, () => console.log("listening on " + port));
 EOF`,
       ]);
