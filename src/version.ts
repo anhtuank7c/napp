@@ -16,6 +16,12 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.11.2
+- Sửa cảnh báo "getcwd: cannot access parent directories" khi tạo app: lệnh chạy
+  dưới user hệ thống của app kế thừa CWD của napp (thường /root, user app không
+  vào được). Nay runAs mặc định cwd="/" nếu không chỉ định -> hết cảnh báo. App
+  vẫn tạo đúng như trước; đây chỉ là dọn tiếng ồn.
+
 ## 1.11.1
 - App mới: thêm khối GỢI Ý (comment) về CSRF của SvelteKit vào .env. adapter-node
   chặn POST/form action bằng 403 "Cross-site POST form submissions are forbidden"

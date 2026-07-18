@@ -104,7 +104,12 @@ export function runAs(
   // the -D option"). Thay vào đó, đặt cwd ngay trên tiến trình spawn sudo —
   // sudo kế thừa thư mục làm việc này khi exec sang user khác, không cần
   // quyền đặc biệt nào trong sudoers.
-  const res = spawnSync("sudo", sudoArgs, { encoding: "utf8", stdio: "inherit", cwd: opts.cwd });
+  //
+  // Mặc định cwd = "/" khi caller không chỉ định: nếu để kế thừa CWD của tiến
+  // trình napp (thường là /root khi chạy `sudo napp`), user hệ thống của app
+  // KHÔNG có quyền vào đó -> shell con phun cảnh báo "getcwd: cannot access
+  // parent directories". "/" thì mọi user đều traverse được, hết cảnh báo.
+  const res = spawnSync("sudo", sudoArgs, { encoding: "utf8", stdio: "inherit", cwd: opts.cwd ?? "/" });
   if (res.error) {
     if (opts.silentFail) return { code: 127, stdout: "", stderr: String(res.error.message) };
     const hint = /ENOENT/.test(String(res.error.message))

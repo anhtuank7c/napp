@@ -2,6 +2,10 @@
 
 Tất cả thay đổi đáng chú ý của `napp` được ghi lại ở đây.
 
+## 1.11.2
+
+- **Sửa cảnh báo `getcwd: cannot access parent directories` khi tạo app**. Các lệnh chạy dưới **user hệ thống của app** (`runAs`) kế thừa thư mục làm việc của tiến trình `napp` — thường là `/root` khi chạy `sudo napp` — mà user app **không có quyền truy cập**, nên shell con phun `shell-init: error retrieving current directory: getcwd...`. App vẫn được tạo đúng (heredoc dùng đường dẫn tuyệt đối), đây chỉ là **tiếng ồn gây hoang mang**. Nay `runAs` mặc định `cwd="/"` khi caller không chỉ định (mọi user đều traverse được) → hết cảnh báo.
+
 ## 1.11.1
 
 - **Gợi ý CSRF cho app SvelteKit ngay trong `.env`**. App mới nay được chèn một **khối ghi chú** vào `.env` giải thích: `adapter-node` **chặn mọi POST/form action** bằng lỗi `403 "Cross-site POST form submissions are forbidden"` khi `Origin` trình duyệt gửi lên không khớp origin server tự suy ra — sau reverse proxy server chỉ thấy `http://127.0.0.1` nên rất dễ lệch. Cặp `PROTOCOL_HEADER`/`HOST_HEADER` (đã tự có từ 1.10.0) cho adapter dựng lại đúng `https://<domain>` nên **thường không cần làm gì thêm**; kèm sẵn dòng `# ORIGIN=https://<domain>` đã comment để **bật tay sau khi cấp SSL** nếu vẫn dính 403 hoặc muốn ghim cứng origin. Phần **"Các bước tiếp theo"** khi tạo app cũng thêm một dòng nhắc trỏ tới ghi chú này.
