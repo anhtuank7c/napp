@@ -16,6 +16,14 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.11.0
+- Xoá app KHÔNG còn mặc định xoá sạch mọi thứ: 'napp app remove' giờ CHỌN từng
+  tài nguyên cần xoá — cấu hình nginx, chứng chỉ SSL, mã nguồn (+ user), database.
+  Mặc định XOÁ nginx + ssl, GIỮ mã nguồn + database (dữ liệu quý, tránh mất trắng).
+  Menu tương tác hiện danh sách [x] tick chọn nhiều mục. Cờ CLI mới: --all,
+  --source, --db, --keep-nginx, --keep-ssl (--keep-db vẫn nhận cho tương thích).
+  Service systemd LUÔN bị gỡ vì app rời khỏi registry thì napp không quản lý được.
+
 ## 1.10.0
 - Sửa BUG header WebSocket: vhost ép cứng 'Connection: upgrade' cho MỌI request,
   kể cả HTTP thường (Upgrade rỗng) -> header méo + phá keepalive tới upstream.

@@ -461,18 +461,82 @@ export async function cmdAppDeploy(domain: string): Promise<void> {
   }
 }
 
-export async function cmdAppRemove(domain: string, opts: { yes: boolean; keepDb: boolean }): Promise<void> {
+// Những tài nguyên có thể chọn xoá khi gỡ app. `service` (systemd) LUÔN bị gỡ vì
+// app rời khỏi registry thì napp không quản lý được service nữa — nên nó không
+// nằm trong lựa chọn. Mặc định: xoá nginx + ssl (an toàn, dễ tạo lại), GIỮ mã
+// nguồn + database (dữ liệu quý, xoá nhầm là mất trắng) trừ khi người dùng chọn.
+export interface AppRemoveOptions {
+  yes: boolean;
+  nginx: boolean; // xoá cấu hình vhost nginx + reload
+  ssl: boolean; // xoá chứng chỉ SSL (certbot delete)
+  source: boolean; // xoá mã nguồn + user hệ thống của app
+  database: boolean; // xoá database + user CSDL
+}
+
+// Xoá chứng chỉ SSL của domain — best-effort, không bao giờ chặn phần gỡ còn lại.
+// Dùng `certbot delete` (chỉ xoá file cert + cấu hình gia hạn ở LOCAL, không gọi
+// mạng tới Let's Encrypt như `revoke`) — hợp với ngữ cảnh gỡ app: nhanh, không
+// treo, không phụ thuộc mạng. certbot đặt tên cert theo domain chính (-d đầu tiên
+// lúc phát hành) nên `--cert-name <domain>` là đúng.
+function removeCert(domain: string): void {
+  if (!commandExists("certbot")) {
+    info("certbot không có sẵn — bỏ qua xoá chứng chỉ SSL.");
+    return;
+  }
+  const res = execCapture("certbot", ["delete", "--cert-name", domain, "--non-interactive"]);
+  if (res.code === 0) ok(`Đã xoá chứng chỉ SSL của '${domain}'.`);
+  else info(`Không có chứng chỉ SSL tên '${domain}' để xoá (hoặc đã xoá trước đó).`);
+}
+
+export async function cmdAppRemove(domain: string, opts: AppRemoveOptions): Promise<void> {
   requireRoot();
   validateDomain(domain);
   const app = requireApp(domain);
+
+  // Cảnh báo các tổ hợp lệch trước khi làm gì:
+  // - Xoá cert nhưng GIỮ vhost nginx: vhost trỏ tới file cert không còn tồn tại
+  //   -> lần `nginx -t`/reload sau sẽ trượt.
+  if (opts.ssl && !opts.nginx) {
+    warn("Bạn chọn xoá SSL nhưng giữ cấu hình nginx — vhost sẽ trỏ tới chứng chỉ đã xoá và lần reload nginx sau có thể trượt. Cân nhắc xoá luôn cấu hình nginx.");
+  }
+  // - Giữ vhost nginx nhưng service systemd LUÔN bị gỡ: vhost vẫn proxy vào
+  //   127.0.0.1:port nhưng không còn tiến trình nào lắng nghe -> site trả 502.
+  if (!opts.nginx) {
+    warn(`Bạn chọn giữ cấu hình nginx, nhưng service systemd luôn bị gỡ — '${domain}' sẽ trả 502 (không còn tiến trình lắng nghe ở cổng ${app.port}) cho tới khi bạn dựng lại backend.`);
+  }
+  // - Xoá mã nguồn nhưng GIỮ database: mật khẩu DB chỉ nằm trong .env (không lưu
+  //   ở state.json), xoá mã nguồn là xoá .env -> giữ được DATA nhưng MẤT credential.
+  //   Data còn nguyên, chỉ là phải reset mật khẩu bằng root mới truy cập lại được.
+  if (opts.source && !opts.database && app.dbName) {
+    warn(
+      `Bạn chọn xoá mã nguồn nhưng giữ database '${app.dbName}' — mật khẩu DB chỉ lưu trong .env (nằm trong mã nguồn), xoá đi là MẤT. ` +
+        `Database và dữ liệu vẫn còn, nhưng muốn dùng lại phải đặt mật khẩu mới: ALTER USER '${app.dbUser ?? app.dbName}'@'localhost' IDENTIFIED BY '<mật khẩu mới>'. ` +
+        `Hãy sao chép .env (hoặc dòng DB_PASSWORD) ra nơi khác trước nếu cần.`
+    );
+  }
+
+  // Danh sách những gì sẽ bị xoá — hiển thị để người dùng xác nhận có chủ đích.
+  const willDelete = [
+    `service systemd (${serviceNameFor(domain)})`,
+    ...(opts.nginx ? [`cấu hình nginx (${domain}.conf)`] : []),
+    ...(opts.ssl ? ["chứng chỉ SSL"] : []),
+    ...(opts.source ? [`mã nguồn (${app.webRoot}) + user hệ thống '${app.user}'`] : []),
+    ...(opts.database && app.dbName ? [`database '${app.dbName}'`] : []),
+  ];
+  const willKeep = [
+    ...(!opts.nginx ? ["cấu hình nginx"] : []),
+    ...(!opts.source ? [`mã nguồn (${app.webRoot})`] : []),
+    ...(!opts.database && app.dbName ? [`database '${app.dbName}'`] : []),
+  ];
 
   if (!opts.yes) {
     const readline = await import("node:readline/promises");
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     const ans = await rl.question(
-      `Thao tác này sẽ XOÁ app '${domain}': service, nginx vhost, user hệ thống, mã nguồn tại ${app.webRoot}` +
-        (app.dbName && !opts.keepDb ? `, và database '${app.dbName}'` : "") +
-        `.\nTiếp tục? [y/N] `
+      `Thao tác này sẽ gỡ app '${domain}' khỏi napp và XOÁ:\n` +
+        willDelete.map((w) => `  - ${w}`).join("\n") +
+        (willKeep.length ? `\nGIỮ lại:\n` + willKeep.map((w) => `  - ${w}`).join("\n") : "") +
+        `\nTiếp tục? [y/N] `
     );
     rl.close();
     if (!/^y(es)?$/i.test(ans.trim())) {
@@ -483,41 +547,64 @@ export async function cmdAppRemove(domain: string, opts: { yes: boolean; keepDb:
 
   const release = acquireLock(domain);
   try {
+    // --- service systemd: LUÔN gỡ (app rời registry -> không quản lý được nữa) ---
     const serviceName = serviceNameFor(domain);
     runCmd("systemctl", ["stop", serviceName], { silentFail: true });
     runCmd("systemctl", ["disable", serviceName], { silentFail: true });
     runCmd("rm", ["-f", `${SYSTEMD_DIR}/${serviceName}.service`], { silentFail: true });
     runCmd("systemctl", ["daemon-reload"], { silentFail: true });
 
-    runCmd("rm", ["-f", `${NGINX_ENABLED}/${domain}.conf`, `${NGINX_AVAILABLE}/${domain}.conf`], { silentFail: true });
-    runCmd("bash", ["-lc", "nginx -t >/dev/null 2>&1 && systemctl reload nginx || true"], { silentFail: true });
+    // --- SSL: xoá cert TRƯỚC khi đụng nginx (nếu cùng xoá cả hai) ---
+    if (opts.ssl) removeCert(domain);
 
-    if (existsSync(app.webRoot)) {
-      try {
-        rmSync(app.webRoot, { recursive: true, force: true });
-      } catch (e) {
-        warn(`Không xoá được thư mục mã nguồn ${app.webRoot} (${(e as Error).message}) — hãy tự xoá sau.`);
-      }
+    // --- nginx vhost ---
+    if (opts.nginx) {
+      runCmd("rm", ["-f", `${NGINX_ENABLED}/${domain}.conf`, `${NGINX_AVAILABLE}/${domain}.conf`], { silentFail: true });
+      runCmd("bash", ["-lc", "nginx -t >/dev/null 2>&1 && systemctl reload nginx || true"], { silentFail: true });
+      ok(`Đã xoá cấu hình nginx của '${domain}'.`);
+    } else {
+      info("Giữ lại cấu hình nginx.");
     }
 
-    if (execCapture("id", [app.user]).code === 0) {
-      runCmd("userdel", ["-r", app.user], { silentFail: true });
+    // --- mã nguồn + user hệ thống (đi kèm nhau: user chỉ để chạy app này) ---
+    if (opts.source) {
+      if (existsSync(app.webRoot)) {
+        try {
+          rmSync(app.webRoot, { recursive: true, force: true });
+          ok(`Đã xoá mã nguồn ${app.webRoot}.`);
+        } catch (e) {
+          warn(`Không xoá được thư mục mã nguồn ${app.webRoot} (${(e as Error).message}) — hãy tự xoá sau.`);
+        }
+      }
+      if (execCapture("id", [app.user]).code === 0) {
+        runCmd("userdel", ["-r", app.user], { silentFail: true });
+        ok(`Đã xoá user hệ thống '${app.user}'.`);
+      }
+    } else {
+      info(`Giữ lại mã nguồn ${app.webRoot} và user hệ thống '${app.user}'.`);
     }
 
-    if (app.dbName && !opts.keepDb) {
-      try {
-        dropDatabase(app.dbName, app.dbUser);
-        ok(`Đã xoá database '${app.dbName}'`);
-      } catch (e) {
-        warn(
-          `Không xoá được database '${app.dbName}' (${(e as Error).message}). ` +
-            `Các tài nguyên khác của app đã bị xoá — hãy tự xoá database này sau bằng 'napp db drop ${app.dbName} --yes --user ${app.dbUser ?? app.dbName}'.`
-        );
+    // --- database ---
+    if (opts.database) {
+      if (app.dbName) {
+        try {
+          dropDatabase(app.dbName, app.dbUser);
+          ok(`Đã xoá database '${app.dbName}'.`);
+        } catch (e) {
+          warn(
+            `Không xoá được database '${app.dbName}' (${(e as Error).message}). ` +
+              `Các tài nguyên khác đã xử lý xong — hãy tự xoá database này sau bằng 'napp db drop ${app.dbName} --yes --user ${app.dbUser ?? app.dbName}'.`
+          );
+        }
+      } else {
+        info("App không có database riêng — bỏ qua.");
       }
+    } else if (app.dbName) {
+      info(`Giữ lại database '${app.dbName}'. Muốn xoá sau: napp db drop ${app.dbName} --yes --user ${app.dbUser ?? app.dbName}`);
     }
 
     removeAppFromState(domain);
-    ok(`Đã xoá app '${domain}'.`);
+    ok(`Đã gỡ app '${domain}' khỏi napp.`);
 
     // Cân đối lại heap V8 cho các app còn lại — nay được chia phần RAM lớn hơn.
     const remaining = Object.keys(loadState().apps).length;

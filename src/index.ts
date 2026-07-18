@@ -91,10 +91,23 @@ app
 
 app
   .command("remove <domain>")
-  .description("xoá app: service, nginx vhost, user hệ thống, mã nguồn (và database nếu có)")
-  .option("-y, --yes", "không hỏi xác nhận")
-  .option("--keep-db", "giữ lại database khi xoá app")
-  .action(async (domain, opts) => cmdAppRemove(domain, { yes: Boolean(opts.yes), keepDb: Boolean(opts.keepDb) }));
+  .description("gỡ app khỏi napp — chọn xoá nginx / ssl / mã nguồn / database (service systemd luôn bị gỡ)")
+  .option("-y, --yes", "không hỏi xác nhận (mặc định: xoá nginx + ssl, GIỮ mã nguồn + database)")
+  .option("--all", "xoá tất cả: nginx, ssl, mã nguồn (+ user), database")
+  .option("--source", "xoá luôn mã nguồn và user hệ thống của app")
+  .option("--db", "xoá luôn database")
+  .option("--keep-nginx", "giữ lại cấu hình nginx")
+  .option("--keep-ssl", "giữ lại chứng chỉ SSL")
+  .option("--keep-db", "giữ lại database (mặc định đã giữ; cờ này để tương thích script cũ)")
+  .action(async (domain, opts) =>
+    cmdAppRemove(domain, {
+      yes: Boolean(opts.yes),
+      nginx: opts.all ? true : !opts.keepNginx,
+      ssl: opts.all ? true : !opts.keepSsl,
+      source: Boolean(opts.all || opts.source),
+      database: opts.all ? true : Boolean(opts.db) && !opts.keepDb,
+    })
+  );
 
 app.command("list").description("liệt kê các app đang quản lý").action(() => cmdAppList());
 app.command("restart <domain>").description("khởi động lại app").action((domain) => cmdAppRestart(domain));

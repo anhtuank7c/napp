@@ -94,6 +94,33 @@ async function askDatabase(actionLabel: string): Promise<string | "__ALL__" | un
   return undefined;
 }
 
+// Chọn NHIỀU tuỳ chọn bằng cách bật/tắt (tick) theo số thứ tự. Mỗi tuỳ chọn có
+// trạng thái mặc định (đã tick hay chưa); người dùng gõ các số để đảo trạng thái,
+// Enter trống = xác nhận danh sách đang hiển thị. Trả về Set các key đang bật.
+async function askMultiSelect(
+  label: string,
+  options: readonly { key: string; label: string; default: boolean }[]
+): Promise<Set<string>> {
+  const selected = new Set(options.filter((o) => o.default).map((o) => o.key));
+  while (true) {
+    console.log(`${label}`);
+    options.forEach((o, i) => console.log(`  ${i + 1}. [${selected.has(o.key) ? "x" : " "}] ${o.label}`));
+    const ans = await ask(`Gõ số để bật/tắt (cách nhau bởi dấu cách/phẩy), Enter = xác nhận: `);
+    if (!ans) return selected;
+    for (const tok of ans.split(/[\s,]+/).filter(Boolean)) {
+      const n = parseInt(tok, 10);
+      if (Number.isInteger(n) && n >= 1 && n <= options.length) {
+        const key = options[n - 1]!.key;
+        if (selected.has(key)) selected.delete(key);
+        else selected.add(key);
+      } else {
+        warn(`Bỏ qua lựa chọn không hợp lệ: '${tok}'`);
+      }
+    }
+    console.log();
+  }
+}
+
 // Hỏi số ngày retention, mặc định DEFAULT_RETENTION_DAYS.
 async function askRetentionDays(): Promise<number> {
   const ans = (await ask(`Giữ backup trong bao nhiêu NGÀY (retention, mặc định ${DEFAULT_RETENTION_DAYS}): `)).trim();
@@ -175,8 +202,22 @@ async function menuApp(): Promise<void> {
       await guard(async () => {
         const domain = await askAppDomain("XOÁ");
         if (!domain) return;
-        const yes = await askYesNo(`Xác nhận xoá '${domain}' (không thể hoàn tác)?`);
-        if (yes) await cmdAppRemove(domain, { yes: true, keepDb: false });
+        // Mặc định tick sẵn nginx + ssl; mã nguồn + database là tuỳ chọn (giữ dữ liệu).
+        const sel = await askMultiSelect(`Chọn những gì cần xoá khi gỡ app '${domain}' ([x] = sẽ xoá; service systemd luôn bị gỡ):`, [
+          { key: "nginx", label: "Cấu hình domain nginx", default: true },
+          { key: "ssl", label: "Chứng chỉ SSL", default: true },
+          { key: "source", label: "Mã nguồn (và user hệ thống)", default: false },
+          { key: "database", label: "Database", default: false },
+        ]);
+        const yes = await askYesNo(`Xác nhận gỡ app '${domain}' (không thể hoàn tác)?`);
+        if (yes)
+          await cmdAppRemove(domain, {
+            yes: true,
+            nginx: sel.has("nginx"),
+            ssl: sel.has("ssl"),
+            source: sel.has("source"),
+            database: sel.has("database"),
+          });
       });
     }
   }

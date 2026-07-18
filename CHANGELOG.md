@@ -2,6 +2,13 @@
 
 Tất cả thay đổi đáng chú ý của `napp` được ghi lại ở đây.
 
+## 1.11.0
+
+- **Xoá app không còn mặc định xoá cả database**. `napp app remove` giờ cho **chọn từng tài nguyên** cần xoá khi gỡ app: **cấu hình nginx**, **chứng chỉ SSL**, **mã nguồn** (kèm user hệ thống), **database**. Mặc định **xoá nginx + ssl** (an toàn, dễ tạo lại) và **GIỮ mã nguồn + database** (dữ liệu quý — xoá nhầm là mất trắng) trừ khi người dùng chủ động chọn.
+  - **Menu tương tác**: hiện danh sách **tick chọn nhiều mục** (`[x]` = sẽ xoá) — gõ số để bật/tắt, Enter để xác nhận. nginx + ssl tick sẵn.
+  - **CLI**: cờ mới `--all` (xoá tất cả), `--source` (xoá luôn mã nguồn + user), `--db` (xoá luôn database), `--keep-nginx`, `--keep-ssl`. `--keep-db` vẫn nhận để **tương thích script cũ** (nay database mặc định đã được giữ). Ví dụ: `napp app remove api.example.com --yes` chỉ xoá nginx + ssl; thêm `--all` để xoá sạch.
+  - **Service systemd luôn bị gỡ** vì app rời khỏi registry thì napp không quản lý được service nữa. SSL dùng `certbot delete` (chỉ xoá cert + cấu hình gia hạn ở local, không gọi mạng).
+
 ## 1.10.0
 
 - **Sửa bug header WebSocket gửi sai cho mọi request**. Vhost trước đây ép cứng `proxy_set_header Connection "upgrade"` cho **mọi** request. Với request HTTP thường, `$http_upgrade` rỗng nên nginx gửi `Connection: upgrade` kèm `Upgrade:` rỗng — **header méo**, đồng thời **phá `keepalive 32`** khai báo trong khối `upstream` (keepalive tới upstream đòi hỏi `Connection` rỗng). Nay dùng `map $http_upgrade $napp_connection_upgrade` đặt tại `/etc/nginx/conf.d/00-napp-proxy.conf`: **chỉ request WebSocket thật sự mới `Connection: upgrade`**, request thường dùng keep-alive đúng chuẩn.

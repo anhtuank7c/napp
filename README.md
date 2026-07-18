@@ -77,7 +77,9 @@ Gõ số rồi Enter, `0` để quay lại/thoát.
 | `sudo napp app restart\|stop\|start <domain>` | Điều khiển service |
 | `napp app logs <domain> [-f] [-n 200]` | Xem log (journalctl) |
 | `sudo napp app env-set <domain> KEY=VALUE...` | Cập nhật `.env` |
-| `sudo napp app remove <domain> [--keep-db] [-y]` | Xoá app |
+| `sudo napp app remove <domain> [-y]` | Gỡ app — mặc định xoá nginx + ssl, GIỮ mã nguồn + database |
+| `sudo napp app remove <domain> --all` | Gỡ app + xoá tất cả (nginx, ssl, mã nguồn, database) |
+| `sudo napp app remove <domain> --source --db` | Xoá thêm mã nguồn và/hoặc database (`--keep-nginx`/`--keep-ssl` để giữ) |
 | `sudo napp domain add\|remove <domain> <alias>` | Domain phụ trỏ vào app |
 | `sudo napp cert issue <domain> --email <email> [--no-www] [--no-redirect] [--extra <d>]` | Phát hành SSL (không tương tác; nhớ email cho lần sau) |
 | `sudo napp cert renew [<domain>] [--force]` | Gia hạn SSL |
