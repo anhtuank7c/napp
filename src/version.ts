@@ -16,6 +16,13 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.11.1
+- App mới: thêm khối GỢI Ý (comment) về CSRF của SvelteKit vào .env. adapter-node
+  chặn POST/form action bằng 403 "Cross-site POST form submissions are forbidden"
+  khi origin lệch; PROTOCOL_HEADER/HOST_HEADER (đã có sẵn từ 1.10.0) khắc phục,
+  kèm dòng '# ORIGIN=https://<domain>' đã comment để bật TAY sau khi cấp SSL nếu
+  vẫn dính 403. Output tạo app thêm một dòng nhắc trỏ tới ghi chú này.
+
 ## 1.11.0
 - Xoá app KHÔNG còn mặc định xoá sạch mọi thứ: 'napp app remove' giờ CHỌN từng
   tài nguyên cần xoá — cấu hình nginx, chứng chỉ SSL, mã nguồn (+ user), database.
