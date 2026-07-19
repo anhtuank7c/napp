@@ -60,6 +60,8 @@ app
   .option("--port <port>", "cổng nội bộ (mặc định: tự cấp phát 3000-3999)", (v) => parseInt(v, 10))
   .option("--repo <url>", "git repo để clone (bỏ trống để tạo app mẫu rỗng)")
   .option("--branch <branch>", "branch git", "main")
+  .option("--token <token>", "Personal Access Token để clone repo PRIVATE qua HTTPS (không hỏi mật khẩu)")
+  .option("--ssh-key <path>", "deploy key để clone repo PRIVATE qua SSH — đường dẫn file HOẶC nội dung key")
   .addOption(new Option("--runtime <runtime>", "runtime chạy app").choices(["node", "bun"]).default("node"))
   .addOption(new Option("--package-manager <pm>", "trình quản lý gói phụ thuộc (mặc định: bun nếu runtime bun, còn lại npm)").choices(["npm", "pnpm", "yarn", "bun"]))
   .option("--install-cmd <cmd>", "lệnh cài dependencies (mặc định theo package manager)")
@@ -73,6 +75,8 @@ app
       port: opts.port,
       repo: opts.repo,
       branch: opts.branch,
+      token: opts.token,
+      sshKey: opts.sshKey,
       runtime: opts.runtime,
       packageManager: opts.packageManager,
       installCmd: opts.installCmd,

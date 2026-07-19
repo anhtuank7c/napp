@@ -1,4 +1,4 @@
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, rmSync, readFileSync } from "node:fs";
 import { execCapture, runCmd, runAs, ensureDir, requireRoot, commandExists, writeFile, appendFile } from "../lib/exec";
 import { info, ok, warn, die, section } from "../lib/log";
 import { validateDomain, validatePort, validateRepoUrl, validateBranch, validateEnvKey } from "../lib/validate";
@@ -42,6 +42,108 @@ export interface CreateAppOptions {
   db: boolean;
   redis: boolean;
   env: string[]; // "KEY=VALUE"
+  token?: string; // Personal Access Token để clone repo PRIVATE qua HTTPS
+  sshKey?: string; // đường dẫn deploy key (SSH private key) để clone repo PRIVATE qua SSH
+}
+
+// Env để MỌI thao tác git (clone/fetch) chạy KHÔNG TƯƠNG TÁC. Không bao giờ
+// treo ở prompt nhập username/password (HTTPS) hay yes/no host-key (SSH): repo
+// private thiếu thông tin xác thực sẽ BÁO LỖI NGAY, thay vì kẹt vô hạn ở
+// /dev/tty (gõ không ăn) — vì git/ssh đọc prompt từ terminal điều khiển, mà
+// tiến trình đang chạy sâu qua `sudo -u <user hệ thống>` không sở hữu terminal.
+//   - GIT_TERMINAL_PROMPT=0: HTTPS thiếu credential -> fail ngay, không hỏi.
+//   - BatchMode=yes: SSH không hỏi passphrase/mật khẩu.
+//   - StrictHostKeyChecking=accept-new: tự thêm host key lần đầu, không hỏi yes/no.
+const GIT_NONINTERACTIVE_ENV: Record<string, string> = {
+  GIT_TERMINAL_PROMPT: "0",
+  GIT_SSH_COMMAND: "ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes",
+};
+
+function repoIsHttp(url: string): boolean {
+  return /^https?:\/\//i.test(url);
+}
+
+function repoIsSsh(url: string): boolean {
+  return /^ssh:\/\//i.test(url) || /^[^@\s]+@[^:\s]+:.+$/.test(url); // ssh:// hoặc user@host:path
+}
+
+// Rút host từ URL git để ghim credential/known-host đúng máy chủ.
+function repoHost(url: string): string {
+  const proto = url.match(/^[a-z]+:\/\/(?:[^@/]+@)?([^:/\s]+)/i); // scheme://[user@]host[:port]/...
+  if (proto) return proto[1]!;
+  const scp = url.match(/^[^@\s]+@([^:\s]+):/); // user@host:path
+  if (scp) return scp[1]!;
+  return "";
+}
+
+const KEY_HEADER_RE = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/;
+
+// Nhận deploy key ở DẠNG BẤT KỲ: nội dung key dán trực tiếp (bắt đầu bằng
+// '-----BEGIN ... PRIVATE KEY-----') HOẶC đường dẫn tới file key. Trả về nội
+// dung key đã chuẩn hoá (đúng 1 newline cuối — OpenSSH bắt buộc).
+function resolveSshKeyMaterial(value: string): string {
+  let content: string;
+  if (KEY_HEADER_RE.test(value)) {
+    content = value; // người dùng dán thẳng nội dung key
+  } else {
+    if (!existsSync(value)) {
+      die(
+        `Không tìm thấy file SSH deploy key: '${value}'.\n` +
+          `  Hãy nhập ĐƯỜNG DẪN tới file key, HOẶC dán trực tiếp nội dung key\n` +
+          `  (bắt đầu bằng '-----BEGIN ... PRIVATE KEY-----').`
+      );
+    }
+    try {
+      content = readFileSync(value, "utf8");
+    } catch (e) {
+      die(`Không đọc được SSH key '${value}': ${(e as Error).message}`);
+    }
+    if (!KEY_HEADER_RE.test(content)) {
+      die(`File '${value}' không giống SSH private key (thiếu dòng '-----BEGIN ... PRIVATE KEY-----').`);
+    }
+  }
+  if (!/-----END [A-Z0-9 ]*PRIVATE KEY-----/.test(content)) {
+    die("SSH deploy key thiếu dòng kết '-----END ... PRIVATE KEY-----' — nội dung key có vẻ bị cắt cụt.");
+  }
+  return content.trim() + "\n";
+}
+
+// Chuẩn bị thông tin xác thực cho user hệ thống của app để clone/pull repo
+// PRIVATE mà KHÔNG cần prompt. Lưu vào home của user với quyền tối thiểu nên
+// `napp app deploy` sau này dùng lại được, và remote vẫn là URL SẠCH (token
+// không nhúng vào .git/config).
+function setupRepoAuth(user: string, repo: string, opts: CreateAppOptions): void {
+  const home = `/home/${user}`;
+  if (opts.token) {
+    // credential.helper=store đọc ~/.git-credentials, khớp theo host -> token
+    // nằm đúng MỘT chỗ (quyền 600), remote HTTPS giữ nguyên URL sạch.
+    const host = repoHost(repo) || "github.com";
+    writeFile(`${home}/.git-credentials`, `https://x-access-token:${opts.token}@${host}\n`, 0o600);
+    runCmd("chown", [`${user}:${user}`, `${home}/.git-credentials`]);
+    runAs(user, "git", ["config", "--global", "credential.helper", "store"]);
+    ok("Đã lưu token để clone repo private qua HTTPS (chỉ user app đọc được).");
+  } else if (opts.sshKey) {
+    const sshDir = `${home}/.ssh`;
+    const keyPath = `${sshDir}/napp_deploy`;
+    const host = repoHost(repo);
+    ensureDir(sshDir, 0o700);
+    writeFile(keyPath, opts.sshKey, 0o600); // đã resolve + chuẩn hoá ở bước validate sớm
+    // ~/.ssh/config ghim deploy key + tự nhận host key -> cả clone lẫn deploy
+    // dùng đúng key, không hỏi passphrase/yes-no.
+    writeFile(
+      `${sshDir}/config`,
+      [
+        host ? `Host ${host}` : "Host *",
+        `  IdentityFile ${keyPath}`,
+        "  IdentitiesOnly yes",
+        "  StrictHostKeyChecking accept-new",
+        "",
+      ].join("\n"),
+      0o600
+    );
+    runCmd("chown", ["-R", `${user}:${user}`, sshDir]);
+    ok("Đã cài deploy key để clone repo private qua SSH (chỉ user app đọc được).");
+  }
 }
 
 // Trình quản lý gói mặc định khi người dùng không chỉ định: runtime bun dùng
@@ -159,6 +261,24 @@ export async function cmdAppCreate(domain: string, opts: CreateAppOptions): Prom
   validateBranch(opts.branch);
   if (opts.repo) validateRepoUrl(opts.repo);
 
+  // --- xác thực repo private (không tương tác) ---
+  if ((opts.token || opts.sshKey) && !opts.repo) {
+    die("--token/--ssh-key chỉ dùng kèm --repo (dùng để clone repo private).");
+  }
+  if (opts.token && opts.sshKey) {
+    die("Chỉ chọn MỘT cách xác thực: --token (HTTPS) HOẶC --ssh-key (SSH), không dùng cả hai.");
+  }
+  if (opts.token) {
+    if (!repoIsHttp(opts.repo!)) die("--token dùng cho repo HTTPS (https://...). Repo SSH thì dùng --ssh-key.");
+    if (/[\s\x00-\x1f]/.test(opts.token)) die("Token chứa khoảng trắng/ký tự điều khiển không hợp lệ.");
+  }
+  if (opts.sshKey) {
+    if (!repoIsSsh(opts.repo!)) die("--ssh-key dùng cho repo SSH (git@host:... hoặc ssh://...). Repo HTTPS thì dùng --token.");
+    // Resolve + validate NGAY để fail sớm (trước khi tạo user/tài nguyên, khỏi
+    // phải rollback). Từ đây opts.sshKey là NỘI DUNG key đã chuẩn hoá.
+    opts.sshKey = resolveSshKeyMaterial(opts.sshKey);
+  }
+
   const user = userFor(domain);
   const webRoot = `${WWW_ROOT}/${domain}`;
   const port = allocatePort(opts.port);
@@ -229,8 +349,21 @@ export async function cmdAppCreate(domain: string, opts: CreateAppOptions): Prom
     runCmd("chown", [`${user}:${user}`, webRoot]);
 
     if (opts.repo) {
+      if (opts.token || opts.sshKey) setupRepoAuth(user, opts.repo, opts);
       info(`Đang clone ${opts.repo} (branch ${opts.branch})...`);
-      runAs(user, "git", ["clone", "--branch", opts.branch, "--depth", "1", opts.repo, webRoot]);
+      const clone = runAs(user, "git", ["clone", "--branch", opts.branch, "--depth", "1", opts.repo, webRoot], {
+        env: GIT_NONINTERACTIVE_ENV,
+        silentFail: true,
+      });
+      if (clone.code !== 0) {
+        const privateHint =
+          !opts.token && !opts.sshKey
+            ? `\n  Nếu đây là repo PRIVATE: napp KHÔNG hỏi mật khẩu tương tác (tránh treo). Hãy thêm:\n` +
+              `    - Repo HTTPS: --token <Personal-Access-Token>\n` +
+              `    - Repo SSH  : --ssh-key <đường-dẫn-deploy-key>`
+            : `\n  Kiểm tra lại token/deploy key có quyền đọc repo, và branch '${opts.branch}' tồn tại.`;
+        die(`Clone repo thất bại (mã ${clone.code}). Kiểm tra URL/branch, mạng, hoặc quyền truy cập.${privateHint}`);
+      }
     } else {
       info("Không có --repo — tạo app mẫu tối giản để bạn tự đưa mã nguồn lên sau...");
       runAs(user, "bash", [
@@ -489,8 +622,10 @@ export async function cmdAppDeploy(domain: string): Promise<void> {
   try {
     section(`Deploy ${domain}`);
     info(`Đang git pull (${app.branch})...`);
-    runAs(app.user, "git", ["fetch", "origin", app.branch], { cwd: app.webRoot });
-    runAs(app.user, "git", ["reset", "--hard", `origin/${app.branch}`], { cwd: app.webRoot });
+    // Cùng env KHÔNG TƯƠNG TÁC như lúc clone: repo private dùng lại token/deploy
+    // key đã lưu trong home của user app; nếu hỏng thì fail rõ ràng, không treo.
+    runAs(app.user, "git", ["fetch", "origin", app.branch], { cwd: app.webRoot, env: GIT_NONINTERACTIVE_ENV });
+    runAs(app.user, "git", ["reset", "--hard", `origin/${app.branch}`], { cwd: app.webRoot, env: GIT_NONINTERACTIVE_ENV });
 
     // Đảm bảo trình quản lý gói của app dùng được ở mức hệ thống (tự cài pnpm/yarn
     // nếu thiếu) — tránh 'command not found' khi chạy installCmd dưới app user.

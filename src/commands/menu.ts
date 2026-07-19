@@ -29,6 +29,24 @@ async function askYesNo(q: string, def = false): Promise<boolean> {
   return /^y(es)?$/i.test(ans);
 }
 
+// Nhập deploy key: CHO PHÉP dán cả khối key nhiều dòng (đọc tiếp tới dòng
+// '-----END ... PRIVATE KEY-----') HOẶC nhập một đường dẫn file trên 1 dòng.
+// Trả về nội dung key (dán) hoặc đường dẫn (nhập tay) — cmdAppCreate tự phân
+// biệt. Bắt buộc phải đọc nhiều dòng: readline chỉ lấy 1 dòng nên nếu chỉ
+// dùng ask() thì key dán vào sẽ bị cắt cụt ở dòng '-----BEGIN' đầu tiên.
+async function askSshKey(): Promise<string | undefined> {
+  const first = (await rl.question("Deploy key — DÁN nội dung key (bắt đầu '-----BEGIN'), hoặc nhập ĐƯỜNG DẪN file:\n")).trim();
+  if (!first) return undefined;
+  if (!/^-----BEGIN /.test(first)) return first; // 1 dòng, không phải header key -> coi là đường dẫn
+  const lines = [first];
+  // Đọc tiếp từng dòng key (không trim nội dung) tới khi gặp dòng END.
+  while (!/-----END [A-Z0-9 ]*PRIVATE KEY-----/.test(lines[lines.length - 1]!)) {
+    const line = await rl.question("");
+    lines.push(line.replace(/\r$/, ""));
+  }
+  return lines.join("\n");
+}
+
 // Cho người dùng chọn 1 giá trị từ danh sách bằng số thứ tự (hoặc gõ thẳng tên).
 // Enter trống -> lấy mặc định.
 async function askChoice<T extends string>(label: string, options: readonly T[], defaultValue: T): Promise<T> {
@@ -167,6 +185,17 @@ async function menuApp(): Promise<void> {
       await guard(async () => {
         const domain = await ask("Domain (vd: api.example.com): ");
         const repo = await ask("Git repo URL (bỏ trống nếu chưa có): ");
+        // Repo PRIVATE cần xác thực trước — nếu không sẽ treo ở prompt nhập
+        // username/password (HTTPS) hoặc yes/no host-key (SSH). Hỏi ngay tại đây.
+        let token: string | undefined;
+        let sshKey: string | undefined;
+        if (repo && (await askYesNo("Repo này có PRIVATE (cần xác thực) không?"))) {
+          if (/^https?:\/\//i.test(repo)) {
+            token = (await ask("Personal Access Token (HTTPS): ")).trim() || undefined;
+          } else {
+            sshKey = await askSshKey();
+          }
+        }
         const runtime = await askChoice<Runtime>("Runtime engine", ["node", "bun"], "node");
         // Mặc định package manager theo runtime: bun -> bun, node -> npm.
         const pmDefault: PackageManager = runtime === "bun" ? "bun" : "npm";
@@ -176,6 +205,8 @@ async function menuApp(): Promise<void> {
         await cmdAppCreate(domain, {
           repo: repo || undefined,
           branch: "main",
+          token,
+          sshKey,
           runtime,
           packageManager,
           db,

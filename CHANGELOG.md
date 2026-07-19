@@ -2,6 +2,16 @@
 
 Tất cả thay đổi đáng chú ý của `napp` được ghi lại ở đây.
 
+## 1.12.0
+
+- **Sửa lỗi TREO khi clone repo private lúc tạo app**. Trước đây với repo **private**, `git`/`ssh` hỏi username/password (HTTPS) hoặc `yes/no` host-key (SSH) nhưng đọc câu trả lời từ **terminal điều khiển** — mà tiến trình chạy sâu qua `sudo -u <user hệ thống của app>` **không sở hữu terminal**, nên prompt hiện ra mà **gõ không ăn**, kẹt vô hạn. Nay **mọi thao tác git** (clone khi tạo app + fetch/reset khi deploy) chạy **KHÔNG TƯƠNG TÁC** (`GIT_TERMINAL_PROMPT=0`, ssh `BatchMode=yes`, `StrictHostKeyChecking=accept-new`): repo private thiếu xác thực sẽ **báo lỗi ngay kèm hướng dẫn**, thay vì treo.
+- **Thêm xác thực repo private cho `napp app create`** (không tương tác):
+  - `--token <PAT>` — clone repo private qua **HTTPS**. Token lưu vào `~/.git-credentials` của user app (quyền `600`) qua `credential.helper=store`; **remote giữ URL sạch**, token không nhúng vào `.git/config`.
+  - `--ssh-key <path>` — clone repo private qua **SSH** bằng **deploy key**. Key được cài vào `~/.ssh/napp_deploy` + `~/.ssh/config` của user app (quyền `600`), ghim đúng key cho host.
+  - `napp app deploy` **dùng lại** thông tin đã lưu nên các lần pull sau cũng không hỏi.
+  - `--ssh-key` nhận **cả đường dẫn file lẫn nội dung key dán trực tiếp**; key bị cắt cụt (thiếu dòng `-----END`) bị chặn ngay với thông báo rõ, không clone lỗi âm thầm.
+  - **Menu tương tác** thêm bước hỏi repo có private không rồi xin token/deploy key theo giao thức; ô nhập deploy key **đọc trọn khối key nhiều dòng** khi dán (trước đây readline chỉ lấy 1 dòng nên key bị cắt).
+
 ## 1.11.2
 
 - **Sửa cảnh báo `getcwd: cannot access parent directories` khi tạo app**. Các lệnh chạy dưới **user hệ thống của app** (`runAs`) kế thừa thư mục làm việc của tiến trình `napp` — thường là `/root` khi chạy `sudo napp` — mà user app **không có quyền truy cập**, nên shell con phun `shell-init: error retrieving current directory: getcwd...`. App vẫn được tạo đúng (heredoc dùng đường dẫn tuyệt đối), đây chỉ là **tiếng ồn gây hoang mang**. Nay `runAs` mặc định `cwd="/"` khi caller không chỉ định (mọi user đều traverse được) → hết cảnh báo.

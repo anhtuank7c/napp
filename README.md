@@ -121,6 +121,20 @@ sudo napp app create api.example.com \
 - Tạo `/var/www/api.example.com`, systemd service `napp-api_example_com`, vhost nginx (HTTP)
 - Tạo sẵn database + user MariaDB, cấp một Redis DB riêng, ghi hết vào `.env`
 
+**Repo private?** napp không hỏi mật khẩu tương tác (tránh treo) — truyền xác thực ngay khi tạo:
+
+```bash
+# HTTPS + Personal Access Token
+sudo napp app create api.example.com \
+  --repo https://github.com/you/api.git --token ghp_xxx
+
+# SSH + deploy key
+sudo napp app create api.example.com \
+  --repo git@github.com:you/api.git --ssh-key /root/deploy_key
+```
+
+Token/deploy key được lưu vào home của user app (quyền `600`) nên `napp app deploy` các lần sau cũng không hỏi lại.
+
 Trỏ bản ghi DNS A của domain về server (bật proxy Cloudflare nếu dùng), rồi bật HTTPS:
 
 ```bash

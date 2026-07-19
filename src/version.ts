@@ -16,6 +16,22 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.12.0
+- Sửa lỗi TREO khi clone repo PRIVATE lúc tạo app: trước đây git/ssh hỏi
+  username/password (HTTPS) hoặc yes/no host-key (SSH) nhưng đọc prompt từ
+  terminal điều khiển — mà tiến trình chạy sâu qua 'sudo -u <user app>' không
+  sở hữu terminal nên gõ KHÔNG ăn, kẹt vô hạn. Nay MỌI thao tác git (clone +
+  deploy) chạy KHÔNG TƯƠNG TÁC (GIT_TERMINAL_PROMPT=0, ssh BatchMode=yes,
+  StrictHostKeyChecking=accept-new): repo private thiếu xác thực sẽ báo lỗi
+  ngay kèm hướng dẫn, thay vì treo.
+- Thêm xác thực repo private không tương tác cho 'napp app create':
+    --token <PAT>       clone repo PRIVATE qua HTTPS (lưu vào ~/.git-credentials
+                        của user app, quyền 600; remote giữ URL sạch).
+    --ssh-key <path>    clone repo PRIVATE qua SSH bằng deploy key (cài vào
+                        ~/.ssh + ~/.ssh/config của user app, quyền 600).
+  'napp app deploy' dùng lại thông tin này nên pull các bản sau cũng không hỏi.
+  Menu tương tác thêm bước hỏi repo có private không rồi xin token/deploy key.
+
 ## 1.11.2
 - Sửa cảnh báo "getcwd: cannot access parent directories" khi tạo app: lệnh chạy
   dưới user hệ thống của app kế thừa CWD của napp (thường /root, user app không
