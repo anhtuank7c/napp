@@ -2,6 +2,10 @@
 
 Tất cả thay đổi đáng chú ý của `napp` được ghi lại ở đây.
 
+## 1.12.1
+
+- **Phát hành lại** (republish) — không đổi tính năng, chỉ tăng version để đẩy bản cập nhật qua `napp update`.
+
 ## 1.12.0
 
 - **Sửa lỗi TREO khi clone repo private lúc tạo app**. Trước đây với repo **private**, `git`/`ssh` hỏi username/password (HTTPS) hoặc `yes/no` host-key (SSH) nhưng đọc câu trả lời từ **terminal điều khiển** — mà tiến trình chạy sâu qua `sudo -u <user hệ thống của app>` **không sở hữu terminal**, nên prompt hiện ra mà **gõ không ăn**, kẹt vô hạn. Nay **mọi thao tác git** (clone khi tạo app + fetch/reset khi deploy) chạy **KHÔNG TƯƠNG TÁC** (`GIT_TERMINAL_PROMPT=0`, ssh `BatchMode=yes`, `StrictHostKeyChecking=accept-new`): repo private thiếu xác thực sẽ **báo lỗi ngay kèm hướng dẫn**, thay vì treo.

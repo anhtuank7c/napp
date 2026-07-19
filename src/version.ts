@@ -16,6 +16,10 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.12.1
+- Phát hành lại (republish) — không đổi tính năng, chỉ tăng version để đẩy bản
+  cập nhật qua 'napp update'.
+
 ## 1.12.0
 - Sửa lỗi TREO khi clone repo PRIVATE lúc tạo app: trước đây git/ssh hỏi
   username/password (HTTPS) hoặc yes/no host-key (SSH) nhưng đọc prompt từ
