@@ -16,6 +16,15 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.12.2
+- Sửa lỗi tạo app runtime bun THẤT BẠI khi repo mang lockfile của trình khác
+  (pnpm-lock.yaml / package-lock.json / yarn.lock): bun migrate sang bun.lock
+  (=thay đổi lockfile) rồi bị chặn "lockfile had changes, but lockfile is
+  frozen" nếu frozen bật (bunfig.toml, biến CI). Nay lệnh cài của bun đã
+  "lockfile-aware": có bun.lock -> cài frozen (tất định); không có -> ép
+  --no-frozen-lockfile để bun được phép ghi lock migrate. Cùng nếp với
+  pnpm/yarn/npm (đều có fallback khi lock lệch).
+
 ## 1.12.1
 - Phát hành lại (republish) — không đổi tính năng, chỉ tăng version để đẩy bản
   cập nhật qua 'napp update'.

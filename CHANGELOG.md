@@ -2,6 +2,10 @@
 
 Tất cả thay đổi đáng chú ý của `napp` được ghi lại ở đây.
 
+## 1.12.2
+
+- **Sửa lỗi tạo app runtime `bun` thất bại khi repo mang lockfile của trình khác** (`pnpm-lock.yaml` / `package-lock.json` / `yarn.lock`). `bun install` migrate lockfile ngoại sang `bun.lock` — tức **thay đổi lockfile** — rồi bị chặn `lockfile had changes, but lockfile is frozen` nếu frozen được bật (qua `bunfig.toml` `frozenLockfile = true`, biến `CI`, ...). Nay lệnh cài của bun đã **lockfile-aware**: có `bun.lock`/`bun.lockb` → cài `--frozen-lockfile` (tất định), fallback ghi lại nếu lock lệch; **không có** → ép `--no-frozen-lockfile` để bun được phép ghi lockfile migrate. Đồng bộ cách làm với pnpm/yarn/npm.
+
 ## 1.12.1
 
 - **Phát hành lại** (republish) — không đổi tính năng, chỉ tăng version để đẩy bản cập nhật qua `napp update`.

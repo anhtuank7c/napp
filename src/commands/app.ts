@@ -159,7 +159,12 @@ export function defaultPackageManager(runtime: Runtime): PackageManager {
 function defaultInstallCmd(pm: PackageManager): string {
   switch (pm) {
     case "bun":
-      return "bun install --production";
+      // Có bun lockfile -> cài frozen (tất định), fallback ghi lại nếu lock lệch.
+      // KHÔNG có bun lockfile (repo mang lockfile pnpm/npm/yarn, hoặc chưa commit
+      // lock): bun MIGRATE sang bun.lock = "thay đổi lockfile". Nếu frozen bị bật
+      // (bunfig.toml frozenLockfile=true, biến CI, ...) sẽ lỗi "lockfile is frozen"
+      // -> ép --no-frozen-lockfile để bun được phép ghi lock migrate.
+      return "if [ -f bun.lockb ] || [ -f bun.lock ]; then bun install --production --frozen-lockfile || bun install --production --no-frozen-lockfile; else bun install --production --no-frozen-lockfile; fi";
     case "pnpm":
       return "if [ -f pnpm-lock.yaml ]; then pnpm install --prod --frozen-lockfile || pnpm install --prod; else pnpm install --prod; fi";
     case "yarn":
