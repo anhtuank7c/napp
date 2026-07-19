@@ -15,6 +15,17 @@ import {
   cmdAppLogs,
   cmdAppEnvSet,
 } from "./commands/app";
+import {
+  cmdServiceCreate,
+  cmdServiceDeploy,
+  cmdServiceRemove,
+  cmdServiceList,
+  cmdServiceRestart,
+  cmdServiceStop,
+  cmdServiceStart,
+  cmdServiceLogs,
+  cmdServiceEnvSet,
+} from "./commands/service";
 import { cmdDomainAdd, cmdDomainRemove, cmdDomainList } from "./commands/domain";
 import { cmdCertIssue, cmdCertRenew, cmdCertRevoke, cmdCertList, cmdCertStatus } from "./commands/cert";
 import { cmdDbCreate, cmdDbDrop, cmdDbList, cmdDbBackup } from "./commands/db";
@@ -129,6 +140,82 @@ app
   .command("env-set <domain> <pairs...>")
   .description("cập nhật biến môi trường trong .env (dạng KEY=VALUE, có thể truyền nhiều)")
   .action((domain, pairs) => cmdAppEnvSet(domain, pairs));
+
+// -------------------------------------------------------------- service ---
+// Background service = ứng dụng Node.js/Bun chạy NGẦM (worker, bot, queue
+// consumer, cron poller): KHÔNG domain, KHÔNG nginx/SSL, cổng là tuỳ chọn.
+const service = program.command("service").description("quản lý ứng dụng chạy ngầm (background service, không domain/nginx)");
+
+service
+  .command("create <name>")
+  .description("tạo background service: user hệ thống riêng, clone repo, systemd service (không nginx/domain)")
+  .option("--port <port>", "cổng nội bộ (mặc định: KHÔNG cấp; chỉ đặt khi service tự bind, vd health-check)", (v) => parseInt(v, 10))
+  .option("--repo <url>", "git repo để clone (bỏ trống để tạo worker mẫu rỗng)")
+  .option("--branch <branch>", "branch git", "main")
+  .option("--token <token>", "Personal Access Token để clone repo PRIVATE qua HTTPS (không hỏi mật khẩu)")
+  .option("--ssh-key <path>", "deploy key để clone repo PRIVATE qua SSH — đường dẫn file HOẶC nội dung key")
+  .addOption(new Option("--runtime <runtime>", "runtime chạy service").choices(["node", "bun"]).default("node"))
+  .addOption(new Option("--package-manager <pm>", "trình quản lý gói phụ thuộc (mặc định: bun nếu runtime bun, còn lại npm)").choices(["npm", "pnpm", "yarn", "bun"]))
+  .option("--install-cmd <cmd>", "lệnh cài dependencies (mặc định theo package manager)")
+  .option("--build-cmd <cmd>", "lệnh build (vd: 'npm run build')")
+  .option("--start-cmd <cmd>", "lệnh khởi động (mặc định 'npm start' theo package.json; vd: 'node worker.js')")
+  .option("--db", "tạo kèm database MariaDB riêng cho service")
+  .option("--redis", "cấp Redis DB riêng cho service (0-15)")
+  .option("--env <KEY=VALUE...>", "biến môi trường bổ sung, có thể lặp lại nhiều lần", (v, prev: string[]) => [...prev, v], [] as string[])
+  .action(async (name, opts) => {
+    await cmdServiceCreate(name, {
+      port: opts.port,
+      repo: opts.repo,
+      branch: opts.branch,
+      token: opts.token,
+      sshKey: opts.sshKey,
+      runtime: opts.runtime,
+      packageManager: opts.packageManager,
+      installCmd: opts.installCmd,
+      buildCmd: opts.buildCmd,
+      startCmd: opts.startCmd,
+      db: Boolean(opts.db),
+      redis: Boolean(opts.redis),
+      env: opts.env ?? [],
+    });
+  });
+
+service
+  .command("deploy <name>")
+  .description("git pull + cài dependencies + build + restart service")
+  .action(async (name) => cmdServiceDeploy(name));
+
+service
+  .command("remove <name>")
+  .description("gỡ background service khỏi napp — chọn xoá mã nguồn / database (service systemd luôn bị gỡ)")
+  .option("-y, --yes", "không hỏi xác nhận (mặc định: GIỮ mã nguồn + database)")
+  .option("--all", "xoá tất cả: mã nguồn (+ user), database")
+  .option("--source", "xoá luôn mã nguồn và user hệ thống của service")
+  .option("--db", "xoá luôn database")
+  .action(async (name, opts) =>
+    cmdServiceRemove(name, {
+      yes: Boolean(opts.yes),
+      source: Boolean(opts.all || opts.source),
+      database: Boolean(opts.all || opts.db),
+    })
+  );
+
+service.command("list").description("liệt kê các background service đang quản lý").action(() => cmdServiceList());
+service.command("restart <name>").description("khởi động lại service").action((name) => cmdServiceRestart(name));
+service.command("stop <name>").description("dừng service").action((name) => cmdServiceStop(name));
+service.command("start <name>").description("khởi động service").action((name) => cmdServiceStart(name));
+
+service
+  .command("logs <name>")
+  .description("xem log của service (qua journalctl)")
+  .option("-f, --follow", "theo dõi log liên tục")
+  .option("-n, --lines <n>", "số dòng log", (v) => parseInt(v, 10), 100)
+  .action((name, opts) => cmdServiceLogs(name, { follow: Boolean(opts.follow), lines: opts.lines }));
+
+service
+  .command("env-set <name> <pairs...>")
+  .description("cập nhật biến môi trường trong .env (dạng KEY=VALUE, có thể truyền nhiều)")
+  .action((name, pairs) => cmdServiceEnvSet(name, pairs));
 
 // --------------------------------------------------------------- domain ---
 const domain = program.command("domain").description("quản lý domain phụ (alias) gắn vào một app");

@@ -10,6 +10,11 @@ export const NGINX_AVAILABLE = "/etc/nginx/sites-available";
 export const NGINX_ENABLED = "/etc/nginx/sites-enabled";
 export const SYSTEMD_DIR = "/etc/systemd/system";
 export const USER_PREFIX = "na_";
+// Background service (chạy ngầm, KHÔNG domain/nginx): mã nguồn đặt ở /srv/napp
+// (không phải /var/www vì nginx không phục vụ), user prefix + tên systemd riêng
+// để KHÔNG bao giờ đụng tài nguyên của web app dù slug có trùng.
+export const SERVICE_ROOT = "/srv/napp";
+export const SERVICE_USER_PREFIX = "nas_";
 export const BACKUP_ROOT = "/var/backups/napp";
 export const PORT_RANGE_START = 3000;
 export const PORT_RANGE_END = 3999;
@@ -39,16 +44,42 @@ export interface AppRecord {
   updatedAt: string;
 }
 
+// Ứng dụng chạy NGẦM (background service): worker, bot, queue consumer, cron
+// poller... KHÔNG có domain, KHÔNG nginx/SSL. Định danh bằng `name`. Cổng là
+// TUỲ CHỌN (chỉ có khi người dùng truyền --port; service thuần worker không
+// listen gì cả). Tái sử dụng phần lifecycle chung với AppRecord (user riêng,
+// systemd, clone/deploy, db/redis, heap V8) nhưng bỏ toàn bộ phần web.
+export interface ServiceRecord {
+  name: string;
+  user: string;
+  workDir: string;
+  nodeRuntime: Runtime;
+  packageManager?: PackageManager;
+  nodeVersion?: string;
+  installCmd: string;
+  buildCmd: string;
+  startCmd: string;
+  port?: number; // chỉ có khi tạo với --port (service tự bind); không public qua nginx
+  repoUrl?: string;
+  branch: string;
+  dbName?: string;
+  dbUser?: string;
+  redisDbIndex?: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface NappState {
   version: 1;
   apps: Record<string, AppRecord>; // key = domain chính
+  services: Record<string, ServiceRecord>; // key = name (background service, không domain)
   usedPorts: number[];
   usedRedisDb: number[];
   acmeEmail?: string; // email đã dùng đăng ký Let's Encrypt — nhớ để đỡ nhập lại
 }
 
 function emptyState(): NappState {
-  return { version: 1, apps: {}, usedPorts: [], usedRedisDb: [] };
+  return { version: 1, apps: {}, services: {}, usedPorts: [], usedRedisDb: [] };
 }
 
 let cache: NappState | null = null;
@@ -63,6 +94,7 @@ export function loadState(): NappState {
     const raw = readFileSync(STATE_PATH, "utf8");
     cache = JSON.parse(raw) as NappState;
     cache.apps ??= {};
+    cache.services ??= {}; // state cũ (trước khi có background service) không có khoá này
     cache.usedPorts ??= [];
     cache.usedRedisDb ??= [];
     return cache;
@@ -167,4 +199,53 @@ export function userFor(domain: string): string {
 
 export function serviceNameFor(domain: string): string {
   return `napp-${slugFor(domain)}`;
+}
+
+// --- Background service (chạy ngầm) --------------------------------------
+// Namespace TÁCH BIỆT với web app: dù slug của một service trùng slug của một
+// domain, user hệ thống và tên unit systemd vẫn khác nhau -> không tranh chấp.
+export function serviceUserFor(name: string): string {
+  return (SERVICE_USER_PREFIX + slugFor(name)).slice(0, 32);
+}
+
+export function svcSystemdName(name: string): string {
+  return `napp-svc-${slugFor(name)}`;
+}
+
+export function getService(name: string): ServiceRecord | undefined {
+  return loadState().services[name];
+}
+
+export function requireService(name: string): ServiceRecord {
+  const svc = getService(name);
+  if (!svc) {
+    die(
+      `Không tìm thấy background service '${name}' trong registry (${STATE_PATH}).\n` +
+        `  Chạy 'napp service list' để xem danh sách, hoặc 'napp service create ${name} ...' để tạo mới.`
+    );
+  }
+  return svc;
+}
+
+export function upsertService(svc: ServiceRecord): void {
+  const s = loadState();
+  s.services[svc.name] = svc;
+  if (svc.port !== undefined && !s.usedPorts.includes(svc.port)) s.usedPorts.push(svc.port);
+  if (svc.redisDbIndex !== undefined && !s.usedRedisDb.includes(svc.redisDbIndex)) {
+    s.usedRedisDb.push(svc.redisDbIndex);
+  }
+  saveState(s);
+}
+
+export function removeService(name: string): ServiceRecord | undefined {
+  const s = loadState();
+  const svc = s.services[name];
+  if (!svc) return undefined;
+  delete s.services[name];
+  if (svc.port !== undefined) s.usedPorts = s.usedPorts.filter((p) => p !== svc.port);
+  if (svc.redisDbIndex !== undefined) {
+    s.usedRedisDb = s.usedRedisDb.filter((d) => d !== svc.redisDbIndex);
+  }
+  saveState(s);
+  return svc;
 }

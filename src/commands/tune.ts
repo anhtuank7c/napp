@@ -17,7 +17,9 @@ import { readFileSync, existsSync } from "node:fs";
 
 export function cmdTuneShow(): void {
   const hw = detectHardware();
-  const appCount = Object.keys(loadState().apps).length;
+  // Heap V8 chia cho TỔNG số đơn vị chạy Node: web app + background service.
+  const st = loadState();
+  const appCount = Object.keys(st.apps).length + Object.keys(st.services).length;
   section("Phần cứng phát hiện được");
   console.log(formatHardware(hw));
   const plan = computeTuningPlan(hw, undefined, appCount);
@@ -27,7 +29,7 @@ export function cmdTuneShow(): void {
   console.log(`  MariaDB max_connections : ${plan.maxConnections}`);
   console.log(`  Redis maxmemory    : ${plan.redisMaxMemoryMB} MB (volatile-lru)`);
   console.log(`  nginx worker_connections : ${plan.workerConnections}`);
-  console.log(`  Node heap mỗi app  : --max-old-space-size=${plan.nodeMaxOldSpaceMB} (chia cho ${Math.max(1, appCount)} app; chỉ app runtime=node)`);
+  console.log(`  Node heap mỗi đơn vị : --max-old-space-size=${plan.nodeMaxOldSpaceMB} (chia cho ${Math.max(1, appCount)} đơn vị node: app + service; chỉ runtime=node)`);
 }
 
 export interface TuneApplyOptions {
@@ -60,7 +62,9 @@ function patchNginxMainConf(workerConnections: number): void {
 export async function cmdTuneApply(opts: TuneApplyOptions): Promise<void> {
   requireRoot();
   const hw = detectHardware();
-  const appCount = Object.keys(loadState().apps).length;
+  // Heap V8 chia cho TỔNG số đơn vị chạy Node: web app + background service.
+  const st = loadState();
+  const appCount = Object.keys(st.apps).length + Object.keys(st.services).length;
   const plan = computeTuningPlan(hw, opts.dbRamPercent, appCount);
 
   section("Tối ưu theo phần cứng thực tế");
@@ -69,7 +73,7 @@ export async function cmdTuneApply(opts: TuneApplyOptions): Promise<void> {
   console.log(`  InnoDB buffer pool -> ${plan.innodbBufferPoolMB} MB`);
   console.log(`  Redis maxmemory    -> ${plan.redisMaxMemoryMB} MB (volatile-lru)`);
   console.log(`  nginx worker_connections -> ${plan.workerConnections}`);
-  console.log(`  Node heap mỗi app  -> --max-old-space-size=${plan.nodeMaxOldSpaceMB} (chia cho ${Math.max(1, appCount)} app)`);
+  console.log(`  Node heap mỗi đơn vị -> --max-old-space-size=${plan.nodeMaxOldSpaceMB} (chia cho ${Math.max(1, appCount)} đơn vị node: app + service)`);
   if (hw.diskFreeGB > 0 && hw.diskFreeGB < 5) {
     warn(`Ổ đĩa trống chỉ còn ${hw.diskFreeGB} GB — chú ý dung lượng cho log/AOF Redis/backup.`);
   }

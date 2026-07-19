@@ -16,6 +16,24 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.13.0
+- Thêm BACKGROUND SERVICE — ứng dụng Node.js/Bun chạy NGẦM (worker, bot, queue
+  consumer, cron poller): KHÔNG domain, KHÔNG nginx/SSL. Nhóm lệnh mới
+  'napp service' (create/deploy/remove/list/restart/stop/start/logs/env-set),
+  cũng có trong menu tương tác. Mỗi service vẫn có user hệ thống riêng, unit
+  systemd (hardening + tự restart), tuỳ chọn --db/--redis, và clone repo private
+  qua --token/--ssh-key y như app web.
+- Cổng là TUỲ CHỌN cho service: mặc định KHÔNG cấp cổng (worker thuần không
+  listen gì). Truyền --port khi service tự bind (health-check/socket) — vẫn
+  không public qua nginx.
+- Lệnh khởi động đặt tự do qua --start-cmd cho cả framework khác nhau (Express:
+  'node src/index.js'; SvelteKit adapter-node: 'node build/index.js'; hoặc
+  worker: 'node worker.js'). Mặc định 'npm start' theo package.json.
+- Heap V8 nay chia cho TỔNG số đơn vị chạy Node (app web + service) để tổng heap
+  không vượt RAM khi có thêm worker. Tự cân đối lại khi tạo/xoá service và khi
+  'napp tune apply'. Namespace tách biệt: service dùng user 'nas_*', unit
+  'napp-svc-*', mã nguồn ở /srv/napp/<name> — không đụng tài nguyên app web.
+
 ## 1.12.2
 - Sửa lỗi tạo app runtime bun THẤT BẠI khi repo mang lockfile của trình khác
   (pnpm-lock.yaml / package-lock.json / yarn.lock): bun migrate sang bun.lock

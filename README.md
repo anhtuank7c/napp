@@ -80,6 +80,13 @@ Gõ số rồi Enter, `0` để quay lại/thoát.
 | `sudo napp app remove <domain> [-y]` | Gỡ app — mặc định xoá nginx + ssl, GIỮ mã nguồn + database |
 | `sudo napp app remove <domain> --all` | Gỡ app + xoá tất cả (nginx, ssl, mã nguồn, database) |
 | `sudo napp app remove <domain> --source --db` | Xoá thêm mã nguồn và/hoặc database (`--keep-nginx`/`--keep-ssl` để giữ) |
+| `sudo napp service create <name> [--repo <url>] [--start-cmd <cmd>] [--runtime node\|bun] [--db] [--redis] [--port <n>] [--env K=V...]` | Tạo **background service** (chạy ngầm, không domain/nginx) |
+| `sudo napp service deploy <name>` | git pull + cài deps + build + restart service |
+| `sudo napp service list` | Liệt kê background service đang quản lý |
+| `sudo napp service restart\|stop\|start <name>` | Điều khiển service |
+| `napp service logs <name> [-f] [-n 200]` | Xem log (journalctl) |
+| `sudo napp service env-set <name> KEY=VALUE...` | Cập nhật `.env` |
+| `sudo napp service remove <name> [-y] [--source] [--db] [--all]` | Gỡ service — mặc định GIỮ mã nguồn + database |
 | `sudo napp domain add\|remove <domain> <alias>` | Domain phụ trỏ vào app |
 | `sudo napp cert issue <domain> --email <email> [--no-www] [--no-redirect] [--extra <d>]` | Phát hành SSL (không tương tác; nhớ email cho lần sau) |
 | `sudo napp cert renew [<domain>] [--force]` | Gia hạn SSL |
@@ -151,6 +158,46 @@ Deploy bản mới sau khi push code:
 
 ```bash
 sudo napp app deploy api.example.com
+```
+
+---
+
+## ⚙️ Ví dụ: background service chạy ngầm (worker / bot / queue consumer)
+
+Không phải chương trình Node.js nào cũng có domain. Worker xử lý hàng đợi, bot
+Telegram/Discord, cron poller… chạy NGẦM, không cần nginx/SSL/cổng. Dùng nhóm
+lệnh `napp service` — vẫn có user riêng, systemd (hardening + tự restart),
+tuỳ chọn `--db`/`--redis`, clone repo private y như app web, chỉ khác là **không
+domain, không nginx**.
+
+```bash
+# Worker xử lý hàng đợi (không listen cổng nào)
+sudo napp service create queue-email \
+  --repo git@github.com:you/worker.git \
+  --start-cmd "node src/index.js" \
+  --db --redis
+
+# Bot Telegram, dùng bun
+sudo napp service create bot-telegram \
+  --repo git@github.com:you/bot.git \
+  --runtime bun --start-cmd "bun run start"
+
+# Service tự bind một cổng nội bộ (health-check) — vẫn KHÔNG public qua nginx
+sudo napp service create metrics-agent --port 3500 --start-cmd "node agent.js"
+```
+
+- Tạo user hệ thống `nas_<name>`, mã nguồn ở `/srv/napp/<name>`, systemd
+  `napp-svc-<name>` (namespace tách biệt với app web).
+- **Lệnh khởi động tự do theo framework**: Express `node src/index.js`,
+  SvelteKit adapter-node `node build/index.js`, worker `node worker.js`… đặt qua
+  `--start-cmd` (mặc định `npm start` theo `package.json`).
+- **Cổng là tuỳ chọn**: mặc định không cấp cổng; chỉ `--port` khi service tự bind.
+- Heap V8 được chia chung với các app web để tổng RAM không bị vượt.
+
+```bash
+sudo napp service logs queue-email -f      # xem log
+sudo napp service deploy queue-email       # git pull + rebuild + restart
+sudo napp service remove queue-email       # gỡ (mặc định giữ mã nguồn + database)
 ```
 
 ---

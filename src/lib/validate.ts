@@ -10,6 +10,15 @@ export function validateDomain(d: string): void {
   if (d.length > 253) die(`Tên miền quá dài: ${d}`);
 }
 
+// Tên background service (không phải domain): chữ thường/số/gạch ngang, bắt đầu
+// bằng chữ-số, dài 1-63 ký tự. Đủ để làm slug user hệ thống + tên unit systemd
+// an toàn, và tránh nhầm với domain (không có dấu chấm).
+export function validateServiceName(name: string): void {
+  if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(name) || name.length > 63) {
+    die(`Tên service không hợp lệ: '${name}' (chỉ chữ thường, số, gạch ngang; ví dụ: worker-telegram, queue-email).`);
+  }
+}
+
 export function validatePort(p: number): void {
   if (!Number.isInteger(p) || p < 1 || p > 65535) {
     die(`Cổng không hợp lệ: ${p} (phải trong khoảng 1-65535)`);

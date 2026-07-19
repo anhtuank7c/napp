@@ -1,6 +1,15 @@
 import readline from "node:readline/promises";
 import { cmdCheck } from "./check";
 import { cmdAppCreate, cmdAppDeploy, cmdAppRemove, cmdAppList, cmdAppRestart, cmdAppLogs, listAppSummaries } from "./app";
+import {
+  cmdServiceCreate,
+  cmdServiceDeploy,
+  cmdServiceRemove,
+  cmdServiceList,
+  cmdServiceRestart,
+  cmdServiceLogs,
+  listServiceSummaries,
+} from "./service";
 import type { Runtime, PackageManager } from "../lib/state";
 import { cmdCertIssue, cmdCertRenew, cmdCertList, cmdCertRevoke } from "./cert";
 import { getAcmeEmail } from "../lib/state";
@@ -86,6 +95,31 @@ async function askAppDomain(actionLabel: string): Promise<string | undefined> {
   }
   const byName = apps.find((a) => a.domain === ans.trim());
   if (byName) return byName.domain;
+  warn(`Lựa chọn không hợp lệ: '${ans}'.`);
+  return undefined;
+}
+
+// Xổ danh sách background service hiện có để CHỌN thay vì gõ tay tên. Trả về
+// undefined nếu không có service nào, hoặc người dùng huỷ (0/Enter).
+async function askServiceName(actionLabel: string): Promise<string | undefined> {
+  const services = listServiceSummaries();
+  if (services.length === 0) {
+    warn("Chưa có background service nào — hãy tạo service trước (mục 'Tạo service mới').");
+    return undefined;
+  }
+  console.log(`Chọn service để ${actionLabel}:`);
+  services.forEach((s, i) =>
+    console.log(`  ${i + 1}. ${s.name.padEnd(30)} ${s.port !== undefined ? `port=${s.port}` : "no-port"}  ${s.running ? "● đang chạy" : "○ đã dừng"}`)
+  );
+  const ans = await ask(`Chọn [1-${services.length}] (0 = huỷ): `);
+  if (!ans || ans === "0") return undefined;
+  const n = parseInt(ans, 10);
+  if (Number.isInteger(n) && n >= 1 && n <= services.length) {
+    const picked = services[n - 1];
+    if (picked) return picked.name;
+  }
+  const byName = services.find((s) => s.name === ans.trim());
+  if (byName) return byName.name;
   warn(`Lựa chọn không hợp lệ: '${ans}'.`);
   return undefined;
 }
@@ -254,6 +288,94 @@ async function menuApp(): Promise<void> {
   }
 }
 
+async function menuService(): Promise<void> {
+  while (true) {
+    printMenu("Quản lý Background Service (chạy ngầm, không domain)", [
+      "Danh sách service",
+      "Tạo service mới",
+      "Deploy (git pull + rebuild + restart)",
+      "Restart service",
+      "Xem log (tail 100 dòng)",
+      "Xoá service",
+    ]);
+    const choice = await ask("Chọn: ");
+    if (choice === "0" || choice === "") return;
+    if (choice === "1") {
+      await guard(() => cmdServiceList());
+    } else if (choice === "2") {
+      await guard(async () => {
+        const name = await ask("Tên service (vd: worker-telegram, queue-email): ");
+        const repo = await ask("Git repo URL (bỏ trống nếu chưa có): ");
+        let token: string | undefined;
+        let sshKey: string | undefined;
+        if (repo && (await askYesNo("Repo này có PRIVATE (cần xác thực) không?"))) {
+          if (/^https?:\/\//i.test(repo)) {
+            token = (await ask("Personal Access Token (HTTPS): ")).trim() || undefined;
+          } else {
+            sshKey = await askSshKey();
+          }
+        }
+        const startCmd = (await ask("Lệnh khởi động (Enter = 'npm start' theo package.json; vd: node worker.js): ")).trim() || undefined;
+        const runtime = await askChoice<Runtime>("Runtime engine", ["node", "bun"], "node");
+        const pmDefault: PackageManager = runtime === "bun" ? "bun" : "npm";
+        const packageManager = await askChoice<PackageManager>("Trình quản lý gói phụ thuộc", ["npm", "pnpm", "yarn", "bun"], pmDefault);
+        const wantPort = await askYesNo("Service có tự listen một cổng nội bộ không (health-check/socket)?");
+        let port: number | undefined;
+        if (wantPort) {
+          const p = parseInt((await ask("Cổng nội bộ (Enter = tự cấp 3000-3999): ")).trim(), 10);
+          if (Number.isInteger(p)) port = p;
+        }
+        const db = await askYesNo("Tạo database MariaDB riêng cho service này?");
+        const redis = await askYesNo("Cấp Redis DB riêng cho service này?");
+        await cmdServiceCreate(name, {
+          repo: repo || undefined,
+          branch: "main",
+          token,
+          sshKey,
+          startCmd,
+          runtime,
+          packageManager,
+          port,
+          db,
+          redis,
+          env: [],
+        });
+      });
+    } else if (choice === "3") {
+      await guard(async () => {
+        const name = await askServiceName("deploy");
+        if (name) await cmdServiceDeploy(name);
+      });
+    } else if (choice === "4") {
+      await guard(async () => {
+        const name = await askServiceName("restart");
+        if (name) cmdServiceRestart(name);
+      });
+    } else if (choice === "5") {
+      await guard(async () => {
+        const name = await askServiceName("xem log");
+        if (name) cmdServiceLogs(name, { follow: false, lines: 100 });
+      });
+    } else if (choice === "6") {
+      await guard(async () => {
+        const name = await askServiceName("XOÁ");
+        if (!name) return;
+        const sel = await askMultiSelect(`Chọn những gì cần xoá khi gỡ service '${name}' ([x] = sẽ xoá; service systemd luôn bị gỡ):`, [
+          { key: "source", label: "Mã nguồn (và user hệ thống)", default: false },
+          { key: "database", label: "Database", default: false },
+        ]);
+        const yes = await askYesNo(`Xác nhận gỡ service '${name}' (không thể hoàn tác)?`);
+        if (yes)
+          await cmdServiceRemove(name, {
+            yes: true,
+            source: sel.has("source"),
+            database: sel.has("database"),
+          });
+      });
+    }
+  }
+}
+
 async function menuCert(): Promise<void> {
   while (true) {
     printMenu("Quản lý SSL (Let's Encrypt / certbot)", [
@@ -382,7 +504,8 @@ export async function runMenu(): Promise<void> {
     while (true) {
       printMenu(`napp v${NAPP_VERSION} — Quản lý server Node.js`, [
         "Kiểm tra môi trường máy chủ",
-        "Quản lý App",
+        "Quản lý App (web, có domain)",
+        "Quản lý Background Service (chạy ngầm)",
         "Quản lý SSL",
         "Quản lý Database",
         "Redis",
@@ -394,12 +517,13 @@ export async function runMenu(): Promise<void> {
       if (choice === "0" || choice === "" || choice.toLowerCase() === "q") break;
       if (choice === "1") await guard(() => cmdCheck({ fix: false, yes: false }));
       else if (choice === "2") await menuApp();
-      else if (choice === "3") await menuCert();
-      else if (choice === "4") await menuDb();
-      else if (choice === "5") await guard(() => cmdRedisAllocations());
-      else if (choice === "6") await menuBackup();
-      else if (choice === "7") await menuInfra();
-      else if (choice === "8") await guard(() => cmdUpdate());
+      else if (choice === "3") await menuService();
+      else if (choice === "4") await menuCert();
+      else if (choice === "5") await menuDb();
+      else if (choice === "6") await guard(() => cmdRedisAllocations());
+      else if (choice === "7") await menuBackup();
+      else if (choice === "8") await menuInfra();
+      else if (choice === "9") await guard(() => cmdUpdate());
     }
   } finally {
     rl.close();

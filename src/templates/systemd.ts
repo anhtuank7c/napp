@@ -1,4 +1,4 @@
-import type { AppRecord } from "../lib/state";
+import type { AppRecord, ServiceRecord } from "../lib/state";
 
 export interface AppSystemdOptions {
   // NODE_OPTIONS đặt cho app (ví dụ "--max-old-space-size=768"). Chỉ nên set cho
@@ -6,20 +6,31 @@ export interface AppSystemdOptions {
   nodeOptions?: string;
 }
 
-// Service systemd cho một app Node.js/Bun — chạy dưới user riêng của site,
-// có hardening (NoNewPrivileges/ProtectSystem/ProtectHome), tự khởi động lại
-// khi crash, và đọc biến môi trường từ file .env qua EnvironmentFile.
-//
-// Thứ tự biến môi trường CÓ CHỦ ĐÍCH:
-//   - NODE_OPTIONS đặt TRƯỚC EnvironmentFile -> chỉ là MẶC ĐỊNH, .env của user
-//     ghi đè được (systemd: directive sau thắng directive trước).
-//   - NODE_ENV/PORT đặt SAU EnvironmentFile -> napp ÉP, .env không ghi đè được
-//     (PORT do napp cấp phát, không cho app tự đổi).
-export function renderAppSystemdService(app: AppRecord, execStart: string, opts: AppSystemdOptions = {}): string {
-  const nodeOptionsLine = opts.nodeOptions ? `Environment=NODE_OPTIONS=${opts.nodeOptions}\n` : "";
-  return `# Managed by napp — site: ${app.domain}
+// Thông tin định danh + môi trường để dựng MỘT unit systemd. Web app và
+// background service dùng CHUNG renderer này (cùng hardening/restart/log), chỉ
+// khác phần mô tả, thư mục, và các biến môi trường napp ÉP (forcedEnv).
+interface UnitSpec {
+  headerComment: string; // dòng "# Managed by napp — ..."
+  description: string; // Description= trong [Unit]
+  user: string;
+  workDir: string;
+  logBase: string; // tiền tố file log: <logBase>.out.log / <logBase>.error.log
+  execStart: string;
+  nodeOptions?: string; // MẶC ĐỊNH (đặt trước EnvironmentFile, .env ghi đè được)
+  forcedEnv: string[]; // napp ÉP (đặt sau EnvironmentFile, .env KHÔNG ghi đè được)
+}
+
+// Renderer nền dùng chung. Thứ tự biến môi trường CÓ CHỦ ĐÍCH:
+//   - NODE_OPTIONS đặt TRƯỚC EnvironmentFile -> chỉ là MẶC ĐỊNH, .env ghi đè được
+//     (systemd: directive sau thắng directive trước).
+//   - forcedEnv (NODE_ENV/PORT...) đặt SAU EnvironmentFile -> napp ÉP, .env không
+//     ghi đè được (PORT do napp cấp phát, không cho tự đổi).
+function renderUnit(spec: UnitSpec): string {
+  const nodeOptionsLine = spec.nodeOptions ? `Environment=NODE_OPTIONS=${spec.nodeOptions}\n` : "";
+  const forcedEnvLines = spec.forcedEnv.map((e) => `Environment=${e}`).join("\n");
+  return `${spec.headerComment}
 [Unit]
-Description=napp application - ${app.domain}
+Description=${spec.description}
 After=network.target mariadb.service redis-server.service
 Wants=network-online.target
 StartLimitIntervalSec=60
@@ -27,13 +38,12 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-User=${app.user}
-Group=${app.user}
-WorkingDirectory=${app.webRoot}
-${nodeOptionsLine}EnvironmentFile=-${app.webRoot}/.env
-Environment=NODE_ENV=production
-Environment=PORT=${app.port}
-ExecStart=${execStart}
+User=${spec.user}
+Group=${spec.user}
+WorkingDirectory=${spec.workDir}
+${nodeOptionsLine}EnvironmentFile=-${spec.workDir}/.env
+${forcedEnvLines}
+ExecStart=${spec.execStart}
 Restart=always
 RestartSec=5
 TimeoutStopSec=15
@@ -46,7 +56,7 @@ ProtectSystem=strict
 # home (bun ~/.bun, node ~/.npm) mà không lộ dữ liệu người dùng.
 ProtectHome=tmpfs
 PrivateTmp=yes
-ReadWritePaths=${app.webRoot}
+ReadWritePaths=${spec.workDir}
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
@@ -57,12 +67,46 @@ LockPersonality=yes
 LimitNOFILE=65535
 
 # --- Log ---
-StandardOutput=append:/var/log/napp/${app.domain}.out.log
-StandardError=append:/var/log/napp/${app.domain}.error.log
+StandardOutput=append:${spec.logBase}.out.log
+StandardError=append:${spec.logBase}.error.log
 
 [Install]
 WantedBy=multi-user.target
 `;
+}
+
+// Unit systemd cho một app WEB (Node.js/Bun) — chạy dưới user riêng của site,
+// có hardening, tự khởi động lại khi crash, đọc .env qua EnvironmentFile. napp
+// ÉP NODE_ENV=production và PORT (cổng nội bộ do napp cấp phát cho nginx proxy).
+export function renderAppSystemdService(app: AppRecord, execStart: string, opts: AppSystemdOptions = {}): string {
+  return renderUnit({
+    headerComment: `# Managed by napp — site: ${app.domain}`,
+    description: `napp application - ${app.domain}`,
+    user: app.user,
+    workDir: app.webRoot,
+    logBase: `/var/log/napp/${app.domain}`,
+    execStart,
+    nodeOptions: opts.nodeOptions,
+    forcedEnv: [`NODE_ENV=production`, `PORT=${app.port}`],
+  });
+}
+
+// Unit systemd cho một BACKGROUND SERVICE (chạy ngầm, không domain/nginx). Giống
+// app web về hardening/restart/log, nhưng: napp CHỈ ép NODE_ENV=production; PORT
+// chỉ đặt khi service được tạo với --port (worker thuần không listen gì cả).
+export function renderServiceSystemdService(svc: ServiceRecord, execStart: string, opts: AppSystemdOptions = {}): string {
+  const forcedEnv = [`NODE_ENV=production`];
+  if (svc.port !== undefined) forcedEnv.push(`PORT=${svc.port}`);
+  return renderUnit({
+    headerComment: `# Managed by napp — service: ${svc.name}`,
+    description: `napp background service - ${svc.name}`,
+    user: svc.user,
+    workDir: svc.workDir,
+    logBase: `/var/log/napp/${svc.name}`,
+    execStart,
+    nodeOptions: opts.nodeOptions,
+    forcedEnv,
+  });
 }
 
 // ExecStart bọc qua bash -lc để chấp nhận BẤT KỲ lệnh khởi động nào người

@@ -1,4 +1,4 @@
-import { existsSync, rmSync, readFileSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { execCapture, runCmd, runAs, ensureDir, requireRoot, commandExists, writeFile, appendFile } from "../lib/exec";
 import { info, ok, warn, die, section } from "../lib/log";
 import { validateDomain, validatePort, validateRepoUrl, validateBranch, validateEnvKey } from "../lib/validate";
@@ -14,6 +14,7 @@ import {
   allocateRedisDb,
   userFor,
   serviceNameFor,
+  svcSystemdName,
   WWW_ROOT,
   NGINX_AVAILABLE,
   NGINX_ENABLED,
@@ -25,10 +26,12 @@ import { createDatabase, dropDatabase } from "../lib/mysql";
 import { mergeEnvFile } from "../lib/envfile";
 import { renderAppNginxConf } from "../templates/nginx";
 import { ensureNappProxyConf } from "./nginx";
-import { renderAppSystemdService, execStartLine } from "../templates/systemd";
+import { renderAppSystemdService, renderServiceSystemdService, execStartLine } from "../templates/systemd";
 import { detectHardware } from "../lib/hardware";
 import { nodeMaxOldSpaceMB } from "../templates/tuning";
 import { ipv6Available } from "../lib/network";
+import { GIT_NONINTERACTIVE_ENV, prepareRepoAuth, setupRepoAuth } from "../lib/repo";
+import { defaultPackageManager, defaultInstallCmd, defaultStartCmd, ensurePackageManager, ensureRuntime } from "../lib/provision";
 
 export interface CreateAppOptions {
   port?: number;
@@ -46,193 +49,40 @@ export interface CreateAppOptions {
   sshKey?: string; // đường dẫn deploy key (SSH private key) để clone repo PRIVATE qua SSH
 }
 
-// Env để MỌI thao tác git (clone/fetch) chạy KHÔNG TƯƠNG TÁC. Không bao giờ
-// treo ở prompt nhập username/password (HTTPS) hay yes/no host-key (SSH): repo
-// private thiếu thông tin xác thực sẽ BÁO LỖI NGAY, thay vì kẹt vô hạn ở
-// /dev/tty (gõ không ăn) — vì git/ssh đọc prompt từ terminal điều khiển, mà
-// tiến trình đang chạy sâu qua `sudo -u <user hệ thống>` không sở hữu terminal.
-//   - GIT_TERMINAL_PROMPT=0: HTTPS thiếu credential -> fail ngay, không hỏi.
-//   - BatchMode=yes: SSH không hỏi passphrase/mật khẩu.
-//   - StrictHostKeyChecking=accept-new: tự thêm host key lần đầu, không hỏi yes/no.
-const GIT_NONINTERACTIVE_ENV: Record<string, string> = {
-  GIT_TERMINAL_PROMPT: "0",
-  GIT_SSH_COMMAND: "ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes",
-};
-
-function repoIsHttp(url: string): boolean {
-  return /^https?:\/\//i.test(url);
-}
-
-function repoIsSsh(url: string): boolean {
-  return /^ssh:\/\//i.test(url) || /^[^@\s]+@[^:\s]+:.+$/.test(url); // ssh:// hoặc user@host:path
-}
-
-// Rút host từ URL git để ghim credential/known-host đúng máy chủ.
-function repoHost(url: string): string {
-  const proto = url.match(/^[a-z]+:\/\/(?:[^@/]+@)?([^:/\s]+)/i); // scheme://[user@]host[:port]/...
-  if (proto) return proto[1]!;
-  const scp = url.match(/^[^@\s]+@([^:\s]+):/); // user@host:path
-  if (scp) return scp[1]!;
-  return "";
-}
-
-const KEY_HEADER_RE = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/;
-
-// Nhận deploy key ở DẠNG BẤT KỲ: nội dung key dán trực tiếp (bắt đầu bằng
-// '-----BEGIN ... PRIVATE KEY-----') HOẶC đường dẫn tới file key. Trả về nội
-// dung key đã chuẩn hoá (đúng 1 newline cuối — OpenSSH bắt buộc).
-function resolveSshKeyMaterial(value: string): string {
-  let content: string;
-  if (KEY_HEADER_RE.test(value)) {
-    content = value; // người dùng dán thẳng nội dung key
-  } else {
-    if (!existsSync(value)) {
-      die(
-        `Không tìm thấy file SSH deploy key: '${value}'.\n` +
-          `  Hãy nhập ĐƯỜNG DẪN tới file key, HOẶC dán trực tiếp nội dung key\n` +
-          `  (bắt đầu bằng '-----BEGIN ... PRIVATE KEY-----').`
-      );
-    }
-    try {
-      content = readFileSync(value, "utf8");
-    } catch (e) {
-      die(`Không đọc được SSH key '${value}': ${(e as Error).message}`);
-    }
-    if (!KEY_HEADER_RE.test(content)) {
-      die(`File '${value}' không giống SSH private key (thiếu dòng '-----BEGIN ... PRIVATE KEY-----').`);
-    }
-  }
-  if (!/-----END [A-Z0-9 ]*PRIVATE KEY-----/.test(content)) {
-    die("SSH deploy key thiếu dòng kết '-----END ... PRIVATE KEY-----' — nội dung key có vẻ bị cắt cụt.");
-  }
-  return content.trim() + "\n";
-}
-
-// Chuẩn bị thông tin xác thực cho user hệ thống của app để clone/pull repo
-// PRIVATE mà KHÔNG cần prompt. Lưu vào home của user với quyền tối thiểu nên
-// `napp app deploy` sau này dùng lại được, và remote vẫn là URL SẠCH (token
-// không nhúng vào .git/config).
-function setupRepoAuth(user: string, repo: string, opts: CreateAppOptions): void {
-  const home = `/home/${user}`;
-  if (opts.token) {
-    // credential.helper=store đọc ~/.git-credentials, khớp theo host -> token
-    // nằm đúng MỘT chỗ (quyền 600), remote HTTPS giữ nguyên URL sạch.
-    const host = repoHost(repo) || "github.com";
-    writeFile(`${home}/.git-credentials`, `https://x-access-token:${opts.token}@${host}\n`, 0o600);
-    runCmd("chown", [`${user}:${user}`, `${home}/.git-credentials`]);
-    runAs(user, "git", ["config", "--global", "credential.helper", "store"]);
-    ok("Đã lưu token để clone repo private qua HTTPS (chỉ user app đọc được).");
-  } else if (opts.sshKey) {
-    const sshDir = `${home}/.ssh`;
-    const keyPath = `${sshDir}/napp_deploy`;
-    const host = repoHost(repo);
-    ensureDir(sshDir, 0o700);
-    writeFile(keyPath, opts.sshKey, 0o600); // đã resolve + chuẩn hoá ở bước validate sớm
-    // ~/.ssh/config ghim deploy key + tự nhận host key -> cả clone lẫn deploy
-    // dùng đúng key, không hỏi passphrase/yes-no.
-    writeFile(
-      `${sshDir}/config`,
-      [
-        host ? `Host ${host}` : "Host *",
-        `  IdentityFile ${keyPath}`,
-        "  IdentitiesOnly yes",
-        "  StrictHostKeyChecking accept-new",
-        "",
-      ].join("\n"),
-      0o600
-    );
-    runCmd("chown", ["-R", `${user}:${user}`, sshDir]);
-    ok("Đã cài deploy key để clone repo private qua SSH (chỉ user app đọc được).");
-  }
-}
-
-// Trình quản lý gói mặc định khi người dùng không chỉ định: runtime bun dùng
-// bun, còn lại dùng npm (luôn có sẵn cùng Node).
-export function defaultPackageManager(runtime: Runtime): PackageManager {
-  return runtime === "bun" ? "bun" : "npm";
-}
-
-// Lệnh cài dependencies theo từng package manager. TẤT CẢ đều "lockfile-aware":
-// nếu có lockfile thì cài đúng theo lock (nhanh, tất định) và fallback cài
-// thường khi lock lệch; nếu KHÔNG có lockfile (app mẫu / repo chưa commit lock)
-// thì cài thẳng để tránh lỗi kiểu `npm ci` EUSAGE.
-function defaultInstallCmd(pm: PackageManager): string {
-  switch (pm) {
-    case "bun":
-      // Có bun lockfile -> cài frozen (tất định), fallback ghi lại nếu lock lệch.
-      // KHÔNG có bun lockfile (repo mang lockfile pnpm/npm/yarn, hoặc chưa commit
-      // lock): bun MIGRATE sang bun.lock = "thay đổi lockfile". Nếu frozen bị bật
-      // (bunfig.toml frozenLockfile=true, biến CI, ...) sẽ lỗi "lockfile is frozen"
-      // -> ép --no-frozen-lockfile để bun được phép ghi lock migrate.
-      return "if [ -f bun.lockb ] || [ -f bun.lock ]; then bun install --production --frozen-lockfile || bun install --production --no-frozen-lockfile; else bun install --production --no-frozen-lockfile; fi";
-    case "pnpm":
-      return "if [ -f pnpm-lock.yaml ]; then pnpm install --prod --frozen-lockfile || pnpm install --prod; else pnpm install --prod; fi";
-    case "yarn":
-      // yarn classic hiểu --frozen-lockfile; yarn berry hiểu --immutable — thử lần lượt cho tương thích cả hai.
-      return "if [ -f yarn.lock ]; then yarn install --production --frozen-lockfile || yarn install --immutable || yarn install; else yarn install --production || yarn install; fi";
-    case "npm":
-    default:
-      return "if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then npm ci --omit=dev || npm install --omit=dev; else npm install --omit=dev; fi";
-  }
-}
-
-// Lệnh khởi động mặc định. Runtime bun luôn chạy bằng `bun run start`. Runtime
-// node chạy script "start" qua chính package manager đã chọn (npm/pnpm/yarn);
-// nếu lỡ ghép node + bun thì dùng npm cho an toàn (npm luôn có cùng Node).
-function defaultStartCmd(runtime: Runtime, pm: PackageManager): string {
-  if (runtime === "bun") return "bun run start";
-  return pm === "bun" ? "npm start" : `${pm} start`;
-}
-
-// Kiểm tra một lệnh có sẵn Ở MỨC HỆ THỐNG không (/usr, /opt, /bin) — tức MỌI user
-// (kể cả app user chạy qua systemd / login shell) đều gọi được. Khác commandExists
-// (chỉ dò PATH của root): pnpm/bun cài trong home của root sẽ KHÔNG tính là hệ
-// thống, và đó chính là bẫy khiến bước cài deps của app user báo 'command not found'.
-function commandExistsSystemWide(cmd: string): boolean {
-  const res = execCapture("bash", ["-lc", `p="$(command -v ${cmd} 2>/dev/null)" && readlink -f "$p"`]);
-  if (res.code !== 0) return false;
-  return /^\/(usr|opt|bin|sbin)\//.test(res.stdout.trim());
-}
-
-// Đảm bảo trình quản lý gói dùng được ở mức hệ thống trước khi tạo app. npm đi
-// kèm Node. pnpm/yarn thiếu thì cài global qua npm (-> /usr/bin, mọi user thấy).
-// bun phải được cài sẵn system-wide (do install.sh) — thiếu thì báo lỗi rõ ràng.
-function ensurePackageManager(pm: PackageManager): void {
-  if (pm === "npm") return;
-  if (commandExistsSystemWide(pm)) return;
-  if (pm === "bun") {
-    die(
-      "bun chưa được cài ở mức hệ thống. Cài lại bằng install.sh (mặc định có cài bun), hoặc:\n" +
-        "  sudo bash -c 'export BUN_INSTALL=/usr/local; curl -fsSL https://bun.sh/install | bash'\n" +
-        "rồi thử lại — hoặc chọn package manager khác."
-    );
-  }
-  info(`'${pm}' chưa có ở mức hệ thống — đang cài global bằng 'npm install -g ${pm}'...`);
-  runCmd("npm", ["install", "-g", pm]);
-  if (!commandExistsSystemWide(pm)) {
-    die(`Đã chạy 'npm install -g ${pm}' nhưng '${pm}' vẫn chưa dùng được ở mức hệ thống. Hãy cài '${pm}' thủ công rồi thử lại.`);
-  }
-  ok(`Đã cài '${pm}' ở mức hệ thống.`);
-}
-
-// Cân đối heap V8 giữa TẤT CẢ app trên máy: heap mỗi app node = ngân sách RAM
-// cho app / tổng số app (xem nodeMaxOldSpaceMB). Ghi lại unit systemd cho mọi
-// app (đồng thời đồng bộ hardening mới), daemon-reload, và tùy chọn restart để
-// áp ngay. Gọi khi số app thay đổi (tạo/xoá) và khi `napp tune apply`.
-// Trả về số MB heap/app đã áp (0 nếu không có app nào).
+// Cân đối heap V8 giữa TẤT CẢ đơn vị chạy Node trên máy — web app VÀ background
+// service: heap mỗi đơn vị node = ngân sách RAM / tổng số đơn vị (xem
+// nodeMaxOldSpaceMB). Ghi lại unit systemd cho mọi đơn vị (đồng thời đồng bộ
+// hardening mới), daemon-reload, và tùy chọn restart để áp ngay. Gọi khi số app/
+// service thay đổi (tạo/xoá) và khi `napp tune apply`. Background service cũng ăn
+// RAM nên phải tính vào mẫu số, nếu không tổng heap sẽ vượt RAM khi có nhiều
+// worker. Trả về số MB heap/đơn vị đã áp (0 nếu không có đơn vị nào).
+//
+// skipRestartFor: bỏ qua restart đơn vị có định danh này (domain HOẶC name) — dùng
+// khi đơn vị vừa tạo đã chạy với heap đúng rồi, chỉ cần restart các đơn vị cũ.
 export function applyNodeHeaps(opts: { restart: boolean; skipRestartFor?: string } = { restart: false }): number {
-  const apps = Object.values(loadState().apps);
-  if (apps.length === 0) return 0;
-  const heapMB = nodeMaxOldSpaceMB(detectHardware(), apps.length);
+  const s = loadState();
+  const apps = Object.values(s.apps);
+  const services = Object.values(s.services);
+  const total = apps.length + services.length;
+  if (total === 0) return 0;
+  const heapMB = nodeMaxOldSpaceMB(detectHardware(), total);
   for (const app of apps) {
     const nodeOptions = app.nodeRuntime === "node" ? `--max-old-space-size=${heapMB}` : undefined;
     writeFile(`${SYSTEMD_DIR}/${serviceNameFor(app.domain)}.service`, renderAppSystemdService(app, execStartLine(app.startCmd), { nodeOptions }), 0o644);
+  }
+  for (const svc of services) {
+    const nodeOptions = svc.nodeRuntime === "node" ? `--max-old-space-size=${heapMB}` : undefined;
+    writeFile(`${SYSTEMD_DIR}/${svcSystemdName(svc.name)}.service`, renderServiceSystemdService(svc, execStartLine(svc.startCmd), { nodeOptions }), 0o644);
   }
   runCmd("systemctl", ["daemon-reload"]);
   if (opts.restart) {
     for (const app of apps) {
       if (app.domain === opts.skipRestartFor) continue;
       runCmd("systemctl", ["restart", serviceNameFor(app.domain)], { silentFail: true });
+    }
+    for (const svc of services) {
+      if (svc.name === opts.skipRestartFor) continue;
+      runCmd("systemctl", ["restart", svcSystemdName(svc.name)], { silentFail: true });
     }
   }
   return heapMB;
@@ -267,22 +117,9 @@ export async function cmdAppCreate(domain: string, opts: CreateAppOptions): Prom
   if (opts.repo) validateRepoUrl(opts.repo);
 
   // --- xác thực repo private (không tương tác) ---
-  if ((opts.token || opts.sshKey) && !opts.repo) {
-    die("--token/--ssh-key chỉ dùng kèm --repo (dùng để clone repo private).");
-  }
-  if (opts.token && opts.sshKey) {
-    die("Chỉ chọn MỘT cách xác thực: --token (HTTPS) HOẶC --ssh-key (SSH), không dùng cả hai.");
-  }
-  if (opts.token) {
-    if (!repoIsHttp(opts.repo!)) die("--token dùng cho repo HTTPS (https://...). Repo SSH thì dùng --ssh-key.");
-    if (/[\s\x00-\x1f]/.test(opts.token)) die("Token chứa khoảng trắng/ký tự điều khiển không hợp lệ.");
-  }
-  if (opts.sshKey) {
-    if (!repoIsSsh(opts.repo!)) die("--ssh-key dùng cho repo SSH (git@host:... hoặc ssh://...). Repo HTTPS thì dùng --token.");
-    // Resolve + validate NGAY để fail sớm (trước khi tạo user/tài nguyên, khỏi
-    // phải rollback). Từ đây opts.sshKey là NỘI DUNG key đã chuẩn hoá.
-    opts.sshKey = resolveSshKeyMaterial(opts.sshKey);
-  }
+  // Fail sớm (trước khi tạo tài nguyên, khỏi rollback). Nếu có --ssh-key thì sau
+  // lệnh này opts.sshKey là NỘI DUNG key đã chuẩn hoá (không còn là đường dẫn).
+  prepareRepoAuth(opts);
 
   const user = userFor(domain);
   const webRoot = `${WWW_ROOT}/${domain}`;
@@ -295,16 +132,7 @@ export async function cmdAppCreate(domain: string, opts: CreateAppOptions): Prom
   const pm: PackageManager = opts.packageManager ?? defaultPackageManager(opts.runtime);
 
   // Runtime engine phải chạy được (app node chạy bằng node; app bun chạy bằng bun).
-  if (opts.runtime === "node" && !commandExists("node")) {
-    die("Node.js chưa được cài. Chạy 'napp check --fix' trước.");
-  }
-  if (opts.runtime === "bun" && !commandExistsSystemWide("bun")) {
-    die(
-      "bun chưa được cài ở mức hệ thống (runtime=bun cần bun để chạy). Cài lại bằng install.sh\n" +
-        "  (mặc định có cài bun), hoặc: sudo bash -c 'export BUN_INSTALL=/usr/local; curl -fsSL https://bun.sh/install | bash'\n" +
-        "rồi thử lại — hoặc chọn runtime node."
-    );
-  }
+  ensureRuntime(opts.runtime);
   // Trình quản lý gói phải dùng được Ở MỨC HỆ THỐNG (app user + systemd đều thấy).
   // Tự cài pnpm/yarn qua npm nếu thiếu. Làm TRƯỚC khi tạo tài nguyên để fail sớm,
   // không phải tạo rồi rollback.
