@@ -1,5 +1,6 @@
 import readline from "node:readline/promises";
 import { cmdCheck } from "./check";
+import { cmdDoctor, cmdDoctorSystem, cmdDoctorDeps, cmdDoctorUpgrade } from "./doctor";
 import { cmdAppCreate, cmdAppDeploy, cmdAppRemove, cmdAppList, cmdAppRestart, cmdAppLogs, listAppSummaries } from "./app";
 import {
   cmdServiceCreate,
@@ -498,6 +499,41 @@ async function menuInfra(): Promise<void> {
   }
 }
 
+async function menuDoctor(): Promise<void> {
+  while (true) {
+    printMenu("Bảo mật (doctor)", [
+      "Quét TẤT CẢ (bản vá hệ thống + dependencies)",
+      "Kiểm tra bản vá bảo mật của hệ thống",
+      "Quét dependencies của MỌI app/service",
+      "Quét dependencies của MỘT app (chọn)",
+      "Quét dependencies của MỘT service (chọn)",
+      "Cài bản vá BẢO MẬT ngay (apt + restart dịch vụ)",
+      "Cài TẤT CẢ bản cập nhật đang chờ",
+    ]);
+    const choice = await ask("Chọn: ");
+    if (choice === "0" || choice === "") return;
+    if (choice === "1")
+      await guard(async () => {
+        const deep = await askYesNo("Tra thêm tuổi bản phát hành trên registry npm (cần mạng, chậm hơn)?", false);
+        await cmdDoctor({ refresh: true, audit: true, deep });
+      });
+    else if (choice === "2") await guard(async () => void cmdDoctorSystem({ refresh: true }));
+    else if (choice === "3") await guard(async () => void (await cmdDoctorDeps({ audit: true, deep: false })));
+    else if (choice === "4")
+      await guard(async () => {
+        const domain = await askAppDomain("quét dependencies");
+        if (domain) await cmdDoctorDeps({ target: domain, audit: true, deep: false });
+      });
+    else if (choice === "5")
+      await guard(async () => {
+        const name = await askServiceName("quét dependencies");
+        if (name) await cmdDoctorDeps({ target: name, audit: true, deep: false });
+      });
+    else if (choice === "6") await guard(() => cmdDoctorUpgrade({ all: false, only: [], yes: false, restart: true }));
+    else if (choice === "7") await guard(() => cmdDoctorUpgrade({ all: true, only: [], yes: false, restart: true }));
+  }
+}
+
 export async function runMenu(): Promise<void> {
   rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   try {
@@ -511,6 +547,7 @@ export async function runMenu(): Promise<void> {
         "Redis",
         "Sao lưu định kỳ",
         "Hạ tầng (Firewall / fail2ban / Cloudflare / Tối ưu)",
+        "Bảo mật: bản vá hệ thống & rủi ro dependencies (doctor)",
         "Cập nhật napp",
       ]);
       const choice = await ask("Chọn: ");
@@ -523,7 +560,8 @@ export async function runMenu(): Promise<void> {
       else if (choice === "6") await guard(() => cmdRedisAllocations());
       else if (choice === "7") await menuBackup();
       else if (choice === "8") await menuInfra();
-      else if (choice === "9") await guard(() => cmdUpdate());
+      else if (choice === "9") await menuDoctor();
+      else if (choice === "10") await guard(() => cmdUpdate());
     }
   } finally {
     rl.close();

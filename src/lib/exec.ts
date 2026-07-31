@@ -122,6 +122,38 @@ export function runAs(
   return { code, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
 }
 
+// Chạy lệnh CHỈ ĐỌC dưới quyền user khác và LẤY output về. Khác runAs: runAs
+// kế thừa stdio (in thẳng ra màn hình, không đọc được kết quả) và tôn trọng
+// dry-run vì nó dùng cho lệnh thay đổi hệ thống. Hàm này dùng cho các bước
+// quét/audit — phải chạy đúng user của app để cache (npm/pnpm/bun) không bị
+// root tạo ra trong thư mục app, và KHÔNG bị dry-run chặn vì không đổi gì.
+export function execCaptureAs(
+  user: string,
+  cmd: string,
+  args: string[] = [],
+  opts: { cwd?: string; env?: Record<string, string>; timeoutMs?: number } = {}
+): RunResult {
+  // -n (non-interactive): nếu sudo cần mật khẩu thì THOÁT NGAY thay vì chờ gõ.
+  // Bắt buộc vì stdio ở đây là pipe — prompt mật khẩu sẽ treo vô hạn.
+  const sudoArgs = ["-n", "-u", user, "-H", "env"];
+  if (opts.env) {
+    for (const [k, v] of Object.entries(opts.env)) sudoArgs.push(`${k}=${v}`);
+  }
+  sudoArgs.push(cmd, ...args);
+  const res = spawnSync("sudo", sudoArgs, {
+    encoding: "utf8",
+    cwd: opts.cwd ?? "/",
+    timeout: opts.timeoutMs,
+    maxBuffer: 1024 * 1024 * 64,
+  });
+  if (res.error) {
+    // Quá thời gian chờ (ETIMEDOUT) cũng vào nhánh này — trả mã lỗi để caller
+    // báo "không chạy được audit" thay vì làm hỏng cả phiên quét.
+    return { code: 127, stdout: res.stdout ?? "", stderr: String(res.error.message) };
+  }
+  return { code: res.status ?? 1, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
+}
+
 // Ghi nội dung ra file. Dry-run: chỉ in preview. Thật: tạo thư mục cha, ghi
 // file, và có thể chmod ngay (mặc định 0644).
 export function writeFile(path: string, content: string, mode = 0o644): void {

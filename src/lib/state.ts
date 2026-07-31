@@ -10,10 +10,14 @@ export const NGINX_AVAILABLE = "/etc/nginx/sites-available";
 export const NGINX_ENABLED = "/etc/nginx/sites-enabled";
 export const SYSTEMD_DIR = "/etc/systemd/system";
 export const USER_PREFIX = "na_";
-// Background service (chạy ngầm, KHÔNG domain/nginx): mã nguồn đặt ở /srv/napp
-// (không phải /var/www vì nginx không phục vụ), user prefix + tên systemd riêng
-// để KHÔNG bao giờ đụng tài nguyên của web app dù slug có trùng.
-export const SERVICE_ROOT = "/srv/napp";
+// Background service (chạy ngầm, KHÔNG domain/nginx): mã nguồn đặt CÙNG CHỖ với
+// app web (/var/www) để mọi mã nguồn napp quản lý nằm một nơi, khỏi phân mảnh
+// thư mục và khỏi phải đi tìm. Phân biệt bằng HẬU TỐ '-service' trong tên thư
+// mục (app web giữ nguyên tên domain). Nginx KHÔNG phục vụ thư mục này vì
+// không có vhost nào trỏ tới nó — nằm trong /var/www không làm nó public.
+// User prefix + tên systemd vẫn riêng để KHÔNG bao giờ đụng tài nguyên của
+// web app dù slug có trùng.
+export const SERVICE_DIR_SUFFIX = "-service";
 export const SERVICE_USER_PREFIX = "nas_";
 export const BACKUP_ROOT = "/var/backups/napp";
 export const PORT_RANGE_START = 3000;
@@ -210,6 +214,13 @@ export function serviceUserFor(name: string): string {
 
 export function svcSystemdName(name: string): string {
   return `napp-svc-${slugFor(name)}`;
+}
+
+// Thư mục mã nguồn của background service: /var/www/<name>-service.
+// Chỉ dùng khi TẠO MỚI — các lệnh khác luôn đọc `workDir` đã lưu trong registry
+// nên service tạo bởi bản napp cũ (ở /srv/napp/<name>) vẫn chạy đúng chỗ cũ.
+export function serviceWorkDirFor(name: string): string {
+  return `${WWW_ROOT}/${name}${SERVICE_DIR_SUFFIX}`;
 }
 
 export function getService(name: string): ServiceRecord | undefined {

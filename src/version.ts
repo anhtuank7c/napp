@@ -16,6 +16,64 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.14.0
+- Thêm 'napp doctor' — soi RỦI RO BẢO MẬT (khác 'napp check' vốn chỉ hỏi môi
+  trường đã ĐỦ chưa). Có trong menu tương tác, mục 9.
+- 'napp doctor system': liệt kê gói có BẢN VÁ BẢO MẬT đang chờ (đọc từ kho
+  '-security' của apt, đánh dấu gói trọng yếu: nginx/OpenSSL/OpenSSH/libc/
+  MariaDB/Redis/Node.js/certbot); phát hiện dịch vụ ĐÃ VÁ NHƯNG CHƯA RESTART
+  (còn nạp thư viện cũ trong RAM — đọc /proc/<pid>/maps tìm file '(deleted)',
+  không cần cài needrestart); đối chiếu phiên bản nginx với bảng CVE nổi bật
+  (CVE-2021-23017 RCE qua resolver, HTTP/2 Rapid Reset, module mp4, mTLS
+  session resumption...); cảnh báo Node.js đã EOL (hết nhận bản vá); báo khi
+  máy cần reboot.
+- CVE của nginx được KẾT LUẬN BẰNG BẰNG CHỨNG trên máy, không chỉ so số phiên
+  bản: '[ĐÃ VÁ]' khi mã CVE có trong changelog của gói đã cài (bản vá backport
+  luôn ghi mã CVE vào /usr/share/doc/nginx-*/changelog.Debian.gz, đọc offline);
+  '[KHÔNG DÍNH]' khi module không được biên dịch vào ('nginx -V') hoặc cấu hình
+  đang chạy không kích hoạt phần đó ('nginx -T': không mp4, không HTTP/2, không
+  resolver, không ssl_verify_client); chỉ báo động khi KHÔNG chứng minh được là
+  đã xử lý, kèm lý do còn thiếu bằng chứng nào và lệnh kiểm chứng thủ công.
+  Lý do: Ubuntu/Debian vá ngược mà giữ nguyên số upstream, nên nginx 1.24.0 đã
+  vá và chưa vá nhìn giống hệt nhau — chỉ so số thì báo động mãi không tắt kể
+  cả sau khi đã 'apt upgrade'. Có in kèm phiên bản GÓI (vd 1.24.0-2ubuntu7.5).
+- 'napp doctor deps [<domain|name>]': quét rủi ro CHUỖI CUNG ỨNG (dependency
+  chain attack) trong mã nguồn từng app/service — thiếu lockfile, dependency
+  '*'/'latest', dependency trỏ thẳng git/URL (không có hash toàn vẹn), tên gần
+  giống package phổ biến (typosquat), package chạy script khi cài
+  (preinstall/install/postinstall), lỗ hổng đã công bố qua audit của chính
+  package manager (npm/pnpm/yarn/bun), .npmrc chứa token quyền quá rộng. Mỗi
+  phát hiện đều kèm CÁCH XỬ LÝ cụ thể. Thêm '--deep' để tra ngày phát hành của
+  dependency trực tiếp trên registry npm (gói bị chiếm thường chỉ sống vài giờ
+  tới vài ngày trước khi bị gỡ).
+- Output của doctor phân màu theo mức độ: ĐỎ ĐẬM cho NGHIÊM TRỌNG, ĐỎ cho CAO
+  (tô cả nội dung, không chỉ nhãn), vàng cho TRUNG BÌNH, xám cho phần tham
+  khảo. Gói trọng yếu trong danh sách bản vá được đánh dấu '!' màu đỏ. Thêm mức
+  log '[NGUY HIỂM]' (đỏ đậm) cho cảnh báo bảo mật, tách khỏi '[CẢNH BÁO]' vàng
+  vốn dùng cho việc vận hành thường.
+- 'napp doctor upgrade': LẤY BẢN VÁ VỀ — mặc định chỉ cài bản vá BẢO MẬT
+  ('--all' cho mọi cập nhật, '--only nginx' cho một gói). Dùng --force-confold
+  nên KHÔNG ghi đè cấu hình đang chạy và không treo ở prompt của dpkg; nâng cấp
+  nginx thì chạy 'nginx -t' TRƯỚC khi restart (cấu hình sai thì dừng, không làm
+  sập site); sau khi cài chỉ restart đúng những dịch vụ còn nạp thư viện cũ.
+
+## 1.13.1
+- Background service KHÔNG còn nằm ở /srv/napp nữa: mã nguồn chuyển về CHUNG
+  /var/www với app web để khỏi phân mảnh thư mục và khỏi đi tìm nhiều nơi.
+  Phân biệt bằng HẬU TỐ tên thư mục: app web giữ tên domain
+  (/var/www/api.example.com), service thêm '-service'
+  (/var/www/queue-email-service). Nằm trong /var/www KHÔNG làm service public —
+  nginx chỉ phục vụ thư mục nào có vhost trỏ tới, mà service thì không có vhost.
+- Áp dụng cho service TẠO MỚI. Service tạo bằng bản cũ vẫn chạy đúng thư mục cũ
+  (napp đọc đường dẫn từ registry). Muốn dời sang chỗ mới:
+    sudo systemctl stop napp-svc-<name>
+    sudo mv /srv/napp/<name> /var/www/<name>-service
+    sudo sed -i 's#/srv/napp/<name>#/var/www/<name>-service#g' \\
+      /etc/napp/state.json /etc/systemd/system/napp-svc-<name>.service
+    sudo systemctl daemon-reload && sudo systemctl start napp-svc-<name>
+- Chặn đặt tên service kết thúc bằng '-service' (napp tự thêm hậu tố này) và
+  chặn tạo service trùng thư mục với một app web đang có trong registry.
+
 ## 1.13.0
 - Thêm BACKGROUND SERVICE — ứng dụng Node.js/Bun chạy NGẦM (worker, bot, queue
   consumer, cron poller): KHÔNG domain, KHÔNG nginx/SSL. Nhóm lệnh mới
@@ -32,7 +90,7 @@ export const CHANGELOG = `\
 - Heap V8 nay chia cho TỔNG số đơn vị chạy Node (app web + service) để tổng heap
   không vượt RAM khi có thêm worker. Tự cân đối lại khi tạo/xoá service và khi
   'napp tune apply'. Namespace tách biệt: service dùng user 'nas_*', unit
-  'napp-svc-*', mã nguồn ở /srv/napp/<name> — không đụng tài nguyên app web.
+  'napp-svc-*', mã nguồn ở /var/www/<name>-service — không đụng tài nguyên app web.
 
 ## 1.12.2
 - Sửa lỗi tạo app runtime bun THẤT BẠI khi repo mang lockfile của trình khác

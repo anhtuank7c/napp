@@ -20,6 +20,7 @@ cô lập hoàn toàn giữa các app, nginx chỉ đóng vai trò reverse-proxy
 - 💾 **Backup định kỳ** (database + mã nguồn) qua **systemd timer**, có xoay vòng retention
 - ⚙️ **Tối ưu theo phần cứng thực tế**: `napp tune apply` phát hiện CPU/RAM và điều chỉnh nginx/MariaDB/Redis/sysctl **và NODE_OPTIONS heap V8 cho từng app node** — chạy lại bất cứ khi nào nâng cấp server
 - 🔍 `napp check --fix`: kiểm tra + tự cài Node.js, nginx, certbot, MariaDB, Redis, fail2ban, UFW nếu thiếu
+- 🩺 **`napp doctor`**: soi **bản vá bảo mật đang chờ** (nginx, OpenSSL, OpenSSH…), dịch vụ còn chạy **thư viện cũ** sau khi vá, đối chiếu **CVE nổi bật của nginx**, vòng đời Node.js; quét **rủi ro chuỗi cung ứng** (dependency chain attack) trong dependencies của từng app/service — và `napp doctor upgrade` để lấy bản vá về
 - 🔄 Tự cập nhật (`napp update`) qua gist công khai, giống lara
 - 🇻🇳 Toàn bộ output tiếng Việt, menu tương tác dạng số
 - 💻 Hệ điều hành: **Ubuntu 20.04 – 26.04 LTS**
@@ -71,6 +72,10 @@ Gõ số rồi Enter, `0` để quay lại/thoát.
 | Lệnh | Tác dụng |
 | --- | --- |
 | `sudo napp check [--fix]` | Kiểm tra / tự cài môi trường máy chủ |
+| `sudo napp doctor [--deep]` | **Soi bảo mật**: bản vá đang chờ + rủi ro dependencies của mọi app/service |
+| `sudo napp doctor system` | Chỉ kiểm tra bản vá hệ thống, dịch vụ còn nạp thư viện cũ, CVE nginx, EOL Node.js |
+| `sudo napp doctor deps [<domain\|name>]` | Chỉ quét rủi ro chuỗi cung ứng của dependencies |
+| `sudo napp doctor upgrade [--all] [--only nginx] [-y]` | Cài bản vá (mặc định chỉ bản vá **bảo mật**) + restart dịch vụ liên quan |
 | `sudo napp app create <domain> [--repo <url>] [--branch <b>] [--runtime node\|bun] [--db] [--redis] [--port <n>] [--env K=V...]` | Tạo app mới |
 | `sudo napp app deploy <domain>` | git pull + cài deps + build + restart |
 | `sudo napp app list` | Liệt kê app đang quản lý |
@@ -186,8 +191,12 @@ sudo napp service create bot-telegram \
 sudo napp service create metrics-agent --port 3500 --start-cmd "node agent.js"
 ```
 
-- Tạo user hệ thống `nas_<name>`, mã nguồn ở `/srv/napp/<name>`, systemd
+- Tạo user hệ thống `nas_<name>`, mã nguồn ở `/var/www/<name>-service`, systemd
   `napp-svc-<name>` (namespace tách biệt với app web).
+- **Mọi mã nguồn nằm chung `/var/www`**: app web giữ tên domain
+  (`/var/www/api.example.com`), service có hậu tố `-service`
+  (`/var/www/queue-email-service`) — khỏi phân mảnh thư mục, dễ tìm. Nằm trong
+  `/var/www` KHÔNG làm service public: nginx chỉ phục vụ những gì có vhost trỏ tới.
 - **Lệnh khởi động tự do theo framework**: Express `node src/index.js`,
   SvelteKit adapter-node `node build/index.js`, worker `node worker.js`… đặt qua
   `--start-cmd` (mặc định `npm start` theo `package.json`).
@@ -214,6 +223,103 @@ sudo napp service remove queue-email       # gỡ (mặc định giữ mã ngu�
 ⚠️ **An toàn khi chạy `napp firewall sync` lần đầu**: hãy giữ một phiên
 SSH/console **thứ hai** đang mở song song — nếu cổng SSH bị dò sai hoặc UFW
 cấu hình nhầm, phiên hiện tại có thể bị khoá ngay lập tức.
+
+---
+
+## 🩺 Soi bảo mật: `napp doctor`
+
+`napp check` trả lời *"môi trường đã ĐỦ chưa"*. `napp doctor` trả lời *"môi
+trường có ĐANG AN TOÀN không"* — hai việc khác nhau.
+
+```bash
+sudo napp doctor                 # quét tất cả: bản vá hệ thống + dependencies mọi app/service
+sudo napp doctor system          # chỉ phần hệ thống
+sudo napp doctor deps            # chỉ phần dependencies
+sudo napp doctor deps api.example.com    # một app cụ thể (hoặc tên service)
+sudo napp doctor upgrade         # LẤY BẢN VÁ VỀ: cài bản vá bảo mật + restart dịch vụ
+```
+
+### Phần hệ thống (`doctor system`)
+
+| Kiểm tra | Vì sao quan trọng |
+| --- | --- |
+| **Bản vá bảo mật đang chờ** | Đọc từ apt (`-security`), đánh dấu `!` cho gói trọng yếu: nginx, OpenSSL, OpenSSH, libc, MariaDB, Redis, Node.js, certbot… |
+| **Dịch vụ còn nạp thư viện CŨ** | Cái bẫy kinh điển: `apt upgrade` xong tưởng đã an toàn, nhưng nginx vẫn giữ `libssl` cũ **trong RAM** cho tới khi restart. napp đọc `/proc/<pid>/maps` tìm thư viện `(deleted)` — không cần cài thêm gói nào |
+| **CVE nổi bật của nginx** | Đối chiếu bảng CVE kèm theo (CVE-2021-23017 RCE qua resolver, HTTP/2 Rapid Reset, mp4 module, mTLS session resumption…) rồi **kết luận bằng bằng chứng trên máy**: `[ĐÃ VÁ]` / `[KHÔNG DÍNH]` / mức độ cần chú ý |
+| **Vòng đời Node.js** | Bản EOL **không còn nhận bản vá nào nữa** — rủi ro lớn hơn một CVE lẻ vì vĩnh viễn không được sửa |
+| **Cần khởi động lại máy** | `/var/run/reboot-required` sau khi vá kernel/libc |
+
+#### Vì sao không chỉ so số phiên bản
+
+Ubuntu/Debian **vá ngược (backport)** mà giữ nguyên số phiên bản upstream:
+`nginx 1.24.0` đã vá và chưa vá **nhìn giống hệt nhau**. Một công cụ chỉ so số
+sẽ báo động mãi không tắt kể cả sau khi bạn đã `apt upgrade` — vô dụng, và còn
+tệ hơn không có vì bạn sẽ học cách phớt lờ nó.
+
+Nên `doctor` kết luận từng CVE bằng **bằng chứng đọc được ngay trên máy**, theo
+thứ tự tin cậy giảm dần:
+
+| Kết luận | Căn cứ |
+| --- | --- |
+| `[ĐÃ VÁ]` | Mã CVE **có trong changelog của gói đã cài** (`/usr/share/doc/nginx-*/changelog.Debian.gz`) — bản vá backport luôn ghi mã CVE vào đây. Đây là bằng chứng chắc chắn nhất, đọc offline, không cần mạng |
+| `[KHÔNG DÍNH]` | Module chứa lỗ hổng **không được biên dịch vào** (`nginx -V`), hoặc cấu hình đang chạy **không kích hoạt** phần đó (`nginx -T`): không có `mp4`, không bật HTTP/2, không có `resolver`, không dùng `ssl_verify_client`… |
+| `[CAO]` / `[NGHIÊM TRỌNG]` | Không chứng minh được là đã xử lý — kèm dòng *"vì sao còn nằm đây"* để bạn biết còn thiếu bằng chứng nào |
+
+Chạy bằng `sudo` thì đọc được `nginx -T`, nên kết luận đầy đủ hơn hẳn. Lưu ý
+`[KHÔNG DÍNH]` dựa trên cấu hình **tại thời điểm quét** — bật HTTP/2 hay thêm
+`resolver` sau đó thì phải quét lại. Bảng CVE nằm trong binary nên hãy chạy
+`napp update` để có bảng mới nhất.
+
+**Tự kiểm chứng bằng tay:**
+
+```bash
+dpkg-query -W -f='${Version}\n' nginx-core nginx-common   # phiên bản GÓI (vd 1.24.0-2ubuntu7.5) — con số thật sự phản ánh mức vá
+zgrep -i 'CVE-2023-44487' /usr/share/doc/nginx-common/changelog.Debian.gz   # có ghi = đã backport bản vá
+apt changelog nginx | head -40                            # xem toàn bộ lịch sử vá của gói
+```
+
+Hoặc tra trên trang chính thức: `https://ubuntu.com/security/CVE-2023-44487` —
+trang này ghi rõ mỗi bản Ubuntu đã vá ở **phiên bản gói nào**, đối chiếu với số
+`dpkg-query` ở trên là biết chắc.
+
+### Phần dependencies (`doctor deps`)
+
+Nhắm đúng kịch bản **dependency chain attack**: kẻ xấu chiếm tài khoản npm của
+một thư viện, đẩy bản vá nhỏ có mã độc; app dùng dải phiên bản mở và không có
+lockfile nên lần deploy kế tiếp tự kéo bản độc về, rồi `postinstall` chạy ngay
+với quyền user của app.
+
+| Dấu hiệu | Mức | Cách xử lý napp gợi ý |
+| --- | --- | --- |
+| Thiếu **lockfile** | CAO | Sinh + **commit** lockfile — bản ghi chính xác từng phiên bản kèm hash toàn vẹn |
+| Dependency `*` / `latest` | CAO | Ghim phiên bản cụ thể |
+| Dependency trỏ thẳng **git/URL** | CAO | Không có hash toàn vẹn — ghim theo commit SHA đầy đủ |
+| Tên **gần giống** package phổ biến (typosquat) | CAO | Đối chiếu tên chính thức; nếu đã cài nhầm thì đổi toàn bộ secret |
+| **Lỗ hổng đã công bố** (`npm/pnpm/yarn/bun audit`) | tuỳ mức | Nâng cấp, commit lockfile mới, deploy lại |
+| Package chạy **script khi cài** | TB/THẤP | Rà danh sách; chặn hẳn bằng `--install-cmd '... --ignore-scripts'` |
+| `.npmrc` chứa token, quyền quá rộng | CAO | `chmod 600` |
+| Bản phát hành **quá mới** (`--deep`) | TB | Gói bị chiếm thường chỉ sống vài giờ–vài ngày trên registry trước khi bị gỡ — đáng dừng lại kiểm tra changelog |
+
+`--deep` tra thêm ngày phát hành của **dependency trực tiếp** trên registry npm
+(cần mạng, giới hạn 40 gói/dự án để không biến việc quét thành trận tải lớn).
+
+### Lấy bản vá về (`doctor upgrade`)
+
+```bash
+sudo napp doctor upgrade              # chỉ bản vá BẢO MẬT (khuyến nghị)
+sudo napp doctor upgrade --only nginx # chỉ nginx và các gói nginx-*
+sudo napp doctor upgrade --all        # mọi bản cập nhật đang chờ
+sudo napp doctor upgrade -y --no-restart   # cài, tự quyết định lúc nào restart
+```
+
+Lệnh này giữ **an toàn cho cấu hình đang chạy**: dùng
+`--force-confold` nên dpkg **không ghi đè** file cấu hình hiện có và không dừng
+lại hỏi tương tác; nếu có nâng cấp nginx thì chạy `nginx -t` **trước khi**
+restart — cấu hình sai thì dừng lại thay vì làm sập site. Sau khi cài, napp tìm
+đúng những dịch vụ còn nạp thư viện cũ và chỉ restart bấy nhiêu đó.
+
+Nếu bản phân phối đã hết hỗ trợ và không còn phát hành bản vá nginx nữa, napp sẽ
+gợi ý nâng cấp OS hoặc chuyển sang [kho chính thức nginx.org](https://nginx.org/en/linux_packages.html).
 
 ---
 

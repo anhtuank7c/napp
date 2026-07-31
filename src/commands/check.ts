@@ -227,6 +227,7 @@ export async function cmdCheck(opts: CheckOptions): Promise<void> {
 
   if (findings.length === 0) {
     ok("Môi trường đã sẵn sàng đầy đủ.");
+    info("Kiểm tra thêm về BẢO MẬT (bản vá đang chờ, rủi ro dependencies): sudo napp doctor");
     return;
   }
 

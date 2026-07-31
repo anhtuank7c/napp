@@ -14,7 +14,8 @@ import {
   allocateRedisDb,
   serviceUserFor,
   svcSystemdName,
-  SERVICE_ROOT,
+  serviceWorkDirFor,
+  SERVICE_DIR_SUFFIX,
   SYSTEMD_DIR,
   loadState,
 } from "../lib/state";
@@ -50,8 +51,12 @@ function serviceExists(name: string): boolean {
 
 function assertServiceAbsent(name: string, user: string): void {
   const conflicts: string[] = [];
-  const workDir = `${SERVICE_ROOT}/${name}`;
+  const workDir = serviceWorkDirFor(name);
   if (existsSync(workDir)) conflicts.push(`thư mục mã nguồn: ${workDir}`);
+  // Service nay nằm chung /var/www với app web: chặn trường hợp tên thư mục
+  // đụng đúng webRoot của một app đang trong registry (dù thư mục đã bị xoá tay).
+  const clash = Object.values(loadState().apps).find((a) => a.webRoot === workDir);
+  if (clash) conflicts.push(`app web '${clash.domain}' đang dùng thư mục này`);
   const unit = `${SYSTEMD_DIR}/${svcSystemdName(name)}.service`;
   if (existsSync(unit)) conflicts.push(`systemd unit: ${unit}`);
   if (execCapture("id", [user]).code === 0) conflicts.push(`user hệ thống: ${user}`);
@@ -69,6 +74,15 @@ function assertServiceAbsent(name: string, user: string): void {
 export async function cmdServiceCreate(name: string, opts: CreateServiceOptions): Promise<void> {
   requireRoot();
   validateServiceName(name);
+  // Hậu tố '-service' do napp TỰ THÊM vào tên thư mục. Nếu cho phép đặt tên kết
+  // thúc bằng '-service' thì service 'mailer' và 'mailer-service' sẽ tranh nhau
+  // cùng một thư mục /var/www/mailer-service.
+  if (name.endsWith(SERVICE_DIR_SUFFIX)) {
+    die(
+      `Tên service không được kết thúc bằng '${SERVICE_DIR_SUFFIX}' — napp tự thêm hậu tố này vào tên thư mục.\n` +
+        `  Hãy dùng: napp service create ${name.slice(0, -SERVICE_DIR_SUFFIX.length)} ...  (mã nguồn sẽ ở ${serviceWorkDirFor(name.slice(0, -SERVICE_DIR_SUFFIX.length))})`
+    );
+  }
   validateBranch(opts.branch);
   if (opts.repo) validateRepoUrl(opts.repo);
 
@@ -76,7 +90,7 @@ export async function cmdServiceCreate(name: string, opts: CreateServiceOptions)
   prepareRepoAuth(opts);
 
   const user = serviceUserFor(name);
-  const workDir = `${SERVICE_ROOT}/${name}`;
+  const workDir = serviceWorkDirFor(name);
   // Cổng LÀ TUỲ CHỌN cho background service. Chỉ cấp (và ép Environment=PORT) khi
   // người dùng truyền --port; worker thuần không listen gì thì không cần cổng.
   const port = opts.port !== undefined ? allocatePort(opts.port) : undefined;

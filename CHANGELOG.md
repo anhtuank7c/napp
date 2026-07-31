@@ -2,6 +2,42 @@
 
 Tất cả thay đổi đáng chú ý của `napp` được ghi lại ở đây.
 
+## 1.14.0
+
+- **Thêm `napp doctor` — soi rủi ro bảo mật.** `napp check` hỏi *"môi trường đã ĐỦ chưa"*; `doctor` hỏi *"môi trường có ĐANG AN TOÀN không"*. Có trong menu tương tác (mục 9).
+- **`napp doctor system`**:
+  - Liệt kê gói có **bản vá bảo mật đang chờ**, đọc từ kho `-security` của apt (`apt-get -s dist-upgrade`), đánh dấu `!` cho gói trọng yếu: nginx, OpenSSL, OpenSSH, libc, MariaDB, Redis, Node.js, certbot…
+  - Phát hiện **dịch vụ đã vá nhưng chưa restart** — vá gói xong mà tiến trình vẫn giữ `libssl` cũ **trong RAM** thì bản vá chưa có hiệu lực. napp đọc `/proc/<pid>/maps` tìm thư viện bị đánh dấu `(deleted)`, không cần cài thêm `needrestart`.
+  - Đối chiếu **bảng CVE nổi bật** của nginx (CVE-2021-23017 RCE qua resolver, CVE-2023-44487 HTTP/2 Rapid Reset, CVE-2024-7347 & CVE-2022-41741/41742 module mp4, CVE-2025-23419 mTLS session resumption…) rồi **kết luận bằng bằng chứng trên máy** thay vì chỉ so số phiên bản: `[ĐÃ VÁ]` khi mã CVE có trong changelog của gói đã cài (`/usr/share/doc/nginx-*/changelog.Debian.gz` — bản vá backport luôn ghi mã CVE vào đây, đọc offline); `[KHÔNG DÍNH]` khi module không được biên dịch vào (`nginx -V`) hoặc cấu hình đang chạy không kích hoạt phần đó (`nginx -T`: không `mp4`, không HTTP/2, không `resolver`, không `ssl_verify_client`); chỉ báo động khi **không chứng minh được là đã xử lý**, kèm dòng *"vì sao còn nằm đây"* và lệnh kiểm chứng thủ công.
+  - Lý do: Ubuntu/Debian vá ngược mà giữ nguyên số upstream, nên `nginx 1.24.0` đã vá và chưa vá nhìn giống hệt nhau — công cụ chỉ so số sẽ báo động mãi không tắt kể cả sau khi người dùng đã `apt upgrade`.
+  - Cảnh báo **Node.js đã EOL** (không còn nhận bản vá nào nữa) và khi máy **cần reboot**.
+  - Hiển thị thêm **phiên bản gói** của bản phân phối (vd `nginx-core 1.24.0-2ubuntu7.5`) bên cạnh số upstream — đây mới là con số phản ánh đã nhận bản vá tới đâu. Bảng CVE nằm trong binary nên cần `napp update` để làm mới; `[KHÔNG DÍNH]` dựa trên cấu hình tại thời điểm quét nên đổi cấu hình thì phải quét lại.
+- **`napp doctor deps [<domain|name>]` — quét rủi ro chuỗi cung ứng** (dependency chain attack) trong mã nguồn từng app/service: thiếu lockfile, dependency `*`/`latest`, dependency trỏ thẳng git/URL (không có hash toàn vẹn), tên gần giống package phổ biến (typosquat), package chạy script khi cài (`preinstall`/`install`/`postinstall`), lỗ hổng đã công bố qua audit của chính package manager (npm/pnpm/yarn/bun — tự nhận diện yarn classic vs berry), `.npmrc` chứa token với quyền quá rộng. **Mỗi phát hiện đều kèm cách xử lý cụ thể.** Cờ `--deep` tra thêm ngày phát hành của dependency trực tiếp trên registry npm: gói bị chiếm tài khoản thường chỉ sống vài giờ tới vài ngày trước khi bị gỡ, nên bản còn quá mới là lúc đáng dừng lại kiểm tra.
+- **Phân màu theo mức độ**: đỏ đậm cho `[NGHIÊM TRỌNG]`, đỏ cho `[CAO]` (tô cả nội dung chứ không chỉ nhãn), vàng cho `[TRUNG BÌNH]`, xám cho phần tham khảo; gói trọng yếu trong danh sách bản vá được đánh dấu `!` đỏ. Thêm mức log `[NGUY HIỂM]` (đỏ đậm) cho cảnh báo **bảo mật**, tách khỏi `[CẢNH BÁO]` vàng vốn dùng cho việc vận hành thường. Màu tự tắt khi output không phải terminal (ghi log/journal vẫn sạch).
+- **`napp doctor upgrade` — lấy bản vá về**: mặc định **chỉ cài bản vá bảo mật** (`--all` cho mọi cập nhật, `--only nginx` cho một nhóm gói). Dùng `--force-confold` nên dpkg **không ghi đè cấu hình đang chạy** và không treo ở prompt tương tác; khi có nâng cấp nginx thì chạy `nginx -t` **trước** khi restart (cấu hình sai thì dừng lại thay vì làm sập site); cài xong chỉ restart đúng những dịch vụ còn nạp thư viện cũ.
+
+## 1.13.1
+
+- **Background service không còn nằm ở `/srv/napp`** — mã nguồn chuyển về **chung `/var/www`** với app web để khỏi phân mảnh thư mục, khỏi phải đi tìm ở nhiều nơi. Phân biệt bằng **hậu tố tên thư mục**: app web giữ nguyên tên domain (`/var/www/api.example.com`), background service thêm `-service` (`/var/www/queue-email-service`). Nằm trong `/var/www` **không** làm service public: nginx chỉ phục vụ thư mục nào có vhost trỏ tới, mà service thì không có vhost — user hệ thống (`nas_*`) và unit systemd (`napp-svc-*`) vẫn tách biệt hoàn toàn với app web.
+- Áp dụng cho service **tạo mới**. Service tạo bằng bản cũ vẫn chạy đúng thư mục cũ vì napp đọc đường dẫn từ registry (`/etc/napp/state.json`). Muốn dời sang layout mới:
+
+  ```bash
+  sudo systemctl stop napp-svc-<name>
+  sudo mv /srv/napp/<name> /var/www/<name>-service
+  sudo sed -i 's#/srv/napp/<name>#/var/www/<name>-service#g' \
+    /etc/napp/state.json /etc/systemd/system/napp-svc-<name>.service
+  sudo systemctl daemon-reload && sudo systemctl start napp-svc-<name>
+  ```
+
+- **Chặn tên service kết thúc bằng `-service`** (napp tự thêm hậu tố, nếu không sẽ có hai service tranh nhau cùng một thư mục) và **chặn tạo service trùng thư mục** với một app web đang có trong registry.
+
+## 1.13.0
+
+- **Thêm BACKGROUND SERVICE** — ứng dụng Node.js/Bun chạy **ngầm** (worker, bot, queue consumer, cron poller): không domain, không nginx/SSL. Nhóm lệnh mới `napp service` (`create`/`deploy`/`remove`/`list`/`restart`/`stop`/`start`/`logs`/`env-set`), cũng có trong menu tương tác. Mỗi service có user hệ thống riêng, unit systemd (hardening + tự restart), tuỳ chọn `--db`/`--redis`, và clone repo private qua `--token`/`--ssh-key` y như app web.
+- **Cổng là tuỳ chọn** cho service: mặc định không cấp cổng (worker thuần không listen gì). Truyền `--port` khi service tự bind (health-check/socket) — vẫn không public qua nginx.
+- **Lệnh khởi động tự do** qua `--start-cmd` cho các framework khác nhau (Express `node src/index.js`, SvelteKit adapter-node `node build/index.js`, worker `node worker.js`). Mặc định `npm start` theo `package.json`.
+- **Heap V8 chia cho tổng số đơn vị chạy Node** (app web + service) để tổng heap không vượt RAM khi có thêm worker; tự cân đối lại khi tạo/xoá service và khi `napp tune apply`.
+
 ## 1.12.2
 
 - **Sửa lỗi tạo app runtime `bun` thất bại khi repo mang lockfile của trình khác** (`pnpm-lock.yaml` / `package-lock.json` / `yarn.lock`). `bun install` migrate lockfile ngoại sang `bun.lock` — tức **thay đổi lockfile** — rồi bị chặn `lockfile had changes, but lockfile is frozen` nếu frozen được bật (qua `bunfig.toml` `frozenLockfile = true`, biến `CI`, ...). Nay lệnh cài của bun đã **lockfile-aware**: có `bun.lock`/`bun.lockb` → cài `--frozen-lockfile` (tất định), fallback ghi lại nếu lock lệch; **không có** → ép `--no-frozen-lockfile` để bun được phép ghi lockfile migrate. Đồng bộ cách làm với pnpm/yarn/npm.

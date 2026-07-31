@@ -7,12 +7,15 @@ const isTTY = process.stdout.isTTY === true;
 
 const COLORS = {
   red: "\x1b[0;31m",
+  redBold: "\x1b[1;31m",
   green: "\x1b[0;32m",
   yellow: "\x1b[0;33m",
   blue: "\x1b[0;34m",
   dim: "\x1b[2m",
   reset: "\x1b[0m",
 };
+
+export type LogColor = keyof Omit<typeof COLORS, "reset">;
 
 function paint(color: keyof typeof COLORS, text: string): string {
   if (!isTTY) return text;
@@ -36,6 +39,19 @@ export function ok(msg: string): void {
 
 export function warn(msg: string): void {
   console.log(`${paint("yellow", "[CẢNH BÁO]")} ${sanitize(msg)}`);
+}
+
+// Mức cao hơn warn: rủi ro BẢO MẬT cần xử lý, tô ĐỎ ĐẬM để không thể lướt qua
+// giữa một màn hình đầy chữ (bản vá đang chờ, dịch vụ chạy thư viện cũ, phần
+// mềm hết hạn hỗ trợ, lỗ hổng mức cao trong dependencies).
+export function danger(msg: string): void {
+  console.log(`${paint("redBold", "[NGUY HIỂM]")} ${paint("red", sanitize(msg))}`);
+}
+
+// Tô màu một đoạn văn bản để caller tự ghép dòng (vd: nhãn mức độ của doctor).
+// Tự bỏ màu khi không xuất ra terminal — log chuyển tiếp vào file/journal vẫn sạch.
+export function colorText(color: LogColor, text: string): string {
+  return paint(color, text);
 }
 
 export function step(msg: string): void {

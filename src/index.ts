@@ -4,6 +4,7 @@ import { printDie, NappError } from "./lib/log";
 import { NAPP_VERSION } from "./version";
 
 import { cmdCheck } from "./commands/check";
+import { cmdDoctor, cmdDoctorSystem, cmdDoctorDeps, cmdDoctorUpgrade } from "./commands/doctor";
 import {
   cmdAppCreate,
   cmdAppDeploy,
@@ -61,6 +62,51 @@ program
   .option("--fix", "tự cài đặt/khởi động các thành phần còn thiếu (cần sudo)")
   .option("-y, --yes", "không hỏi xác nhận khi dùng --fix")
   .action(async (opts) => cmdCheck({ fix: Boolean(opts.fix), yes: Boolean(opts.yes) }));
+
+// ----------------------------------------------------------------- doctor ---
+// Khác 'check' (môi trường ĐỦ chưa) — 'doctor' hỏi môi trường AN TOÀN chưa:
+// bản vá đang chờ, dịch vụ còn chạy thư viện cũ, CVE nổi bật, và rủi ro chuỗi
+// cung ứng trong dependencies của từng app/service.
+const doctor = program
+  .command("doctor")
+  .description("soi rủi ro bảo mật: bản vá hệ thống đang chờ + rủi ro chuỗi cung ứng của dependencies")
+  .option("--no-refresh", "không chạy 'apt-get update' trước khi kiểm tra")
+  .option("--no-audit", "bỏ qua audit lỗ hổng của package manager (không cần mạng)")
+  .option("--deep", "tra thêm tuổi bản phát hành của dependency trực tiếp trên registry npm (cần mạng)")
+  .action(async (opts) => cmdDoctor({ refresh: opts.refresh !== false, audit: opts.audit !== false, deep: Boolean(opts.deep) }));
+
+doctor
+  .command("system")
+  .description("kiểm tra bản vá bảo mật đang chờ, dịch vụ còn nạp thư viện cũ, CVE nginx, vòng đời Node.js")
+  .option("--no-refresh", "không chạy 'apt-get update' trước khi kiểm tra")
+  .action(async (opts) => {
+    cmdDoctorSystem({ refresh: opts.refresh !== false });
+  });
+
+doctor
+  .command("deps [target]")
+  .description("quét rủi ro chuỗi cung ứng trong dependencies (bỏ trống target = quét mọi app + service)")
+  .option("--no-audit", "bỏ qua audit lỗ hổng của package manager (không cần mạng)")
+  .option("--deep", "tra thêm tuổi bản phát hành của dependency trực tiếp trên registry npm (cần mạng)")
+  .action(async (target, opts) => {
+    await cmdDoctorDeps({ target, audit: opts.audit !== false, deep: Boolean(opts.deep) });
+  });
+
+doctor
+  .command("upgrade")
+  .description("cài bản vá (mặc định CHỈ bản vá bảo mật) rồi khởi động lại dịch vụ để bản vá có hiệu lực")
+  .option("--all", "cài mọi bản cập nhật đang chờ, không chỉ bản vá bảo mật")
+  .option("--only <pkg...>", "chỉ nâng cấp các gói này (vd: --only nginx)")
+  .option("--no-restart", "không tự khởi động lại dịch vụ sau khi cài (chỉ in hướng dẫn)")
+  .option("-y, --yes", "không hỏi xác nhận")
+  .action(async (opts) =>
+    cmdDoctorUpgrade({
+      all: Boolean(opts.all),
+      only: opts.only ?? [],
+      yes: Boolean(opts.yes),
+      restart: opts.restart !== false,
+    })
+  );
 
 // ------------------------------------------------------------------ app ---
 const app = program.command("app").description("quản lý các ứng dụng Node.js/Bun");

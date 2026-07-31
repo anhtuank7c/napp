@@ -1,6 +1,6 @@
 {
   "name": "napp",
-  "version": "1.13.0",
+  "version": "1.14.0",
   "description": "napp — Node.js multi-app server manager (domains, SSL, systemd, MariaDB, Redis, nginx, fail2ban, UFW, Cloudflare, backups, hardware tuning, OTA update)",
   "private": true,
   "type": "commonjs",
