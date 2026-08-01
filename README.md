@@ -77,6 +77,12 @@ Gõ số rồi Enter, `0` để quay lại/thoát.
 | `sudo napp doctor deps [<domain\|name>]` | Chỉ quét rủi ro chuỗi cung ứng của dependencies |
 | `sudo napp doctor upgrade [--all] [--only nginx] [-y]` | Cài bản vá (mặc định chỉ bản vá **bảo mật**) + restart dịch vụ liên quan |
 | `sudo napp app create <domain> [--repo <url>] [--branch <b>] [--runtime node\|bun] [--db] [--redis] [--port <n>] [--env K=V...]` | Tạo app mới |
+| ↳ `[--app-dir apps/backend]` | Monorepo: app nằm trong thư mục con (WorkingDirectory + `.env` trỏ vào đó) |
+| ↳ `[--static-root <dir> --static-prefix /_app/]` | Cho **nginx** trả asset build thay vì Node |
+| ↳ `[--upload-dir <dir>]` | Thư mục file **tải lên lúc chạy** — không phải asset build, xem cảnh báo dưới |
+| ↳ `[--hotlink-protect]` `[--hotlink-allow <domain>]` | Chỉ cho nhúng ảnh từ domain của site |
+| ↳ `[--max-body 100M]` | `client_max_body_size` (mặc định `20M`) |
+| ↳ `[--share-redis-with <domain>]` \| `[--redis-db <n>]` | Dùng **chung** Redis DB với đơn vị khác |
 | `sudo napp app deploy <domain>` | git pull + cài deps + build + restart |
 | `sudo napp app list` | Liệt kê app đang quản lý |
 | `sudo napp app restart\|stop\|start <domain>` | Điều khiển service |
@@ -86,6 +92,8 @@ Gõ số rồi Enter, `0` để quay lại/thoát.
 | `sudo napp app remove <domain> --all` | Gỡ app + xoá tất cả (nginx, ssl, mã nguồn, database) |
 | `sudo napp app remove <domain> --source --db` | Xoá thêm mã nguồn và/hoặc database (`--keep-nginx`/`--keep-ssl` để giữ) |
 | `sudo napp service create <name> [--repo <url>] [--start-cmd <cmd>] [--runtime node\|bun] [--db] [--redis] [--port <n>] [--env K=V...]` | Tạo **background service** (chạy ngầm, không domain/nginx) |
+| ↳ `[--share-redis-with <domain>]` | **Bắt buộc** nếu service tiêu thụ hàng đợi của một web app |
+| ↳ `[--app-dir apps/worker]` | Monorepo: worker nằm trong thư mục con |
 | `sudo napp service deploy <name>` | git pull + cài deps + build + restart service |
 | `sudo napp service list` | Liệt kê background service đang quản lý |
 | `sudo napp service restart\|stop\|start <name>` | Điều khiển service |
@@ -193,6 +201,47 @@ sudo napp service create metrics-agent --port 3500 --start-cmd "node agent.js"
 
 - Tạo user hệ thống `nas_<name>`, mã nguồn ở `/var/www/<name>-service`, systemd
   `napp-svc-<name>` (namespace tách biệt với app web).
+
+> **Worker của một web app phải dùng CHUNG Redis DB với web app đó.** `--redis`
+> cấp cho mỗi đơn vị một DB riêng — đúng với hai sản phẩm khác nhau, sai với hai
+> nửa của cùng một sản phẩm. Hàng đợi chỉ chạy khi bên đẩy việc và bên tiêu thụ
+> nhìn cùng một keyspace; khác DB thì web đẩy job vào `#1` còn worker nghe `#2`,
+> **không bên nào báo lỗi** và mọi việc nền lặng lẽ không bao giờ chạy:
+>
+> ```bash
+> sudo napp app create shop.example.com --repo ... --redis
+> sudo napp service create shop-worker  --repo ... --share-redis-with shop.example.com
+> ```
+>
+> Ngoài Redis, hai bên còn phải khớp **mọi bí mật dùng chung** (khoá mã hoá,
+> tiền tố hàng đợi/cache). napp không sinh những biến đó — truyền bằng `--env`
+> với **cùng giá trị** cho cả hai.
+
+> **File tải lên cần `--upload-dir`, không dùng `--static-root` được.** Với
+> SvelteKit adapter-node (và tương tự), `static/` được **sao chép vào
+> `build/client/` lúc build** và lúc chạy server chỉ phục vụ `build/client`. Ảnh
+> admin tải lên **sau** khi build nằm ở `static/uploads`, không có trong
+> `build/client`, nên trả **404 dù file có thật trên đĩa** — rồi tự nhiên hiện
+> ra sau lần deploy kế tiếp vì build lại sao chép `static/`. Trông y như lỗi
+> chập chờn:
+>
+> ```bash
+> sudo napp app create pghotel.vn --repo ... \
+>   --upload-dir /var/www/pghotel.vn/apps/backend/static/uploads
+> ```
+
+> **`--hotlink-protect` chặn hotlink TUỲ TIỆN, không phải kiểm soát truy cập.**
+> `Referer` do trình duyệt tự khai — trang hotlink chỉ cần
+> `<meta name="referrer" content="no-referrer">` là đi qua. Và nếu có CDN đứng
+> trước, CDN cache theo URL và **không quan tâm `Referer`**: ảnh đã vào cache
+> edge được trả cho mọi referer mà không hỏi origin, nên cấu hình này chỉ tác
+> dụng với lần cache MISS — muốn chặn thật thì bật ở tầng CDN (Cloudflare có
+> sẵn Hotlink Protection trong Scrape Shield). Đừng "chữa" bằng `Vary: Referer`,
+> nó biến mỗi referer thành một bản cache riêng.
+>
+> `none` (không có `Referer`) được phép có chủ đích: bot lấy ảnh xem trước khi
+> chia sẻ link — Facebook, Zalo, Telegram — thường không gửi `Referer`, chặn nó
+> là **mọi link chia sẻ mất ảnh preview**.
 - **Mọi mã nguồn nằm chung `/var/www`**: app web giữ tên domain
   (`/var/www/api.example.com`), service có hậu tố `-service`
   (`/var/www/queue-email-service`) — khỏi phân mảnh thư mục, dễ tìm. Nằm trong

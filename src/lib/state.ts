@@ -44,6 +44,21 @@ export interface AppRecord {
   dbName?: string;
   dbUser?: string;
   redisDbIndex?: number;
+  // Thư mục con chứa ứng dụng thật, TƯƠNG ĐỐI so với webRoot. Chỉ dùng cho
+  // monorepo (vd "apps/backend"): mã nguồn vẫn clone nguyên repo vào webRoot,
+  // nhưng WorkingDirectory và .env của systemd trỏ vào thư mục con này.
+  appDir?: string;
+  // client_max_body_size của nginx. Bỏ trống -> 20M.
+  maxBodySize?: string;
+  // Asset build được nginx trả thẳng từ đĩa (xem NginxAppOptions).
+  staticRoot?: string;
+  staticPrefixes?: string[];
+  // Thư mục file tải lên lúc CHẠY (khác staticRoot — xem NginxAppOptions).
+  uploadDir?: string;
+  uploadPrefix?: string;
+  // Chặn hotlink ảnh (chỉ cho nhúng từ domain của site). Xem NginxAppOptions.
+  hotlinkProtect?: boolean;
+  hotlinkAllow?: string[];
   createdAt: string;
   updatedAt: string;
 }
@@ -69,6 +84,8 @@ export interface ServiceRecord {
   dbName?: string;
   dbUser?: string;
   redisDbIndex?: number;
+  // Như AppRecord.appDir — monorepo: WorkingDirectory/.env trỏ vào thư mục con.
+  appDir?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -153,15 +170,32 @@ export function upsertApp(app: AppRecord): void {
   saveState(s);
 }
 
+/**
+ * Trả một Redis DB về danh sách trống — CHỈ KHI không còn app/service nào dùng.
+ *
+ * Một index có thể được nhiều đơn vị dùng CHUNG (web + worker của cùng sản phẩm
+ * BẮT BUỘC nằm chung keyspace, xem --redis-db). Nếu cứ xoá đơn vị nào là gỡ
+ * index đó ra khỏi usedRedisDb thì DB vẫn đang được đơn vị còn lại sử dụng lại
+ * bị coi là trống, và lần `napp app create --redis` kế tiếp sẽ cấp trùng — hai
+ * sản phẩm khác nhau ghi đè key của nhau, không có lỗi nào được báo.
+ *
+ * Gọi SAU khi đã xoá đơn vị khỏi state.
+ */
+function releaseRedisDbIfUnused(s: NappState, index: number | undefined): void {
+  if (index === undefined) return;
+  const stillUsed =
+    Object.values(s.apps).some((a) => a.redisDbIndex === index) ||
+    Object.values(s.services).some((v) => v.redisDbIndex === index);
+  if (!stillUsed) s.usedRedisDb = s.usedRedisDb.filter((d) => d !== index);
+}
+
 export function removeApp(domain: string): AppRecord | undefined {
   const s = loadState();
   const app = s.apps[domain];
   if (!app) return undefined;
   delete s.apps[domain];
   s.usedPorts = s.usedPorts.filter((p) => p !== app.port);
-  if (app.redisDbIndex !== undefined) {
-    s.usedRedisDb = s.usedRedisDb.filter((d) => d !== app.redisDbIndex);
-  }
+  releaseRedisDbIfUnused(s, app.redisDbIndex);
   saveState(s);
   return app;
 }
@@ -187,6 +221,51 @@ export function allocateRedisDb(): number | undefined {
     if (!s.usedRedisDb.includes(i)) return i;
   }
   return undefined; // hết chỗ — caller sẽ cảnh báo dùng key-prefix thay vì DB riêng
+}
+
+/**
+ * Redis DB cho một đơn vị sắp tạo: index chỉ định (dùng chung) hoặc cấp mới.
+ *
+ * Vì sao phải cho dùng CHUNG: napp coi mỗi app/service là một hệ độc lập và cấp
+ * cho mỗi bên một DB riêng. Điều đó đúng với hai sản phẩm khác nhau, nhưng SAI
+ * với web + worker của CÙNG một sản phẩm — hàng đợi (BullMQ, Sidekiq, Celery...)
+ * chỉ hoạt động khi bên đẩy việc và bên tiêu thụ nhìn vào cùng một keyspace.
+ * Khác DB thì web đẩy job vào DB #1, worker ngồi nghe DB #2; KHÔNG bên nào báo
+ * lỗi, job cứ chất đống và mọi tác dụng phụ (email, thông báo, resize ảnh) im
+ * lặng không bao giờ chạy.
+ *
+ * Index chỉ định CỐ Ý không bị từ chối khi đã có đơn vị khác dùng — dùng chung
+ * chính là mục đích. Đổi lại, `releaseRedisDbIfUnused` phải đếm tham chiếu khi
+ * xoá, nếu không DB đang dùng sẽ bị cấp lại cho sản phẩm khác.
+ */
+export function resolveRedisDb(preferred?: number): number | undefined {
+  if (preferred === undefined) return allocateRedisDb();
+  if (!Number.isInteger(preferred) || preferred < 0 || preferred >= REDIS_DB_MAX) {
+    die(`--redis-db không hợp lệ: ${preferred} (hợp lệ: 0-${REDIS_DB_MAX - 1})`);
+  }
+  return preferred;
+}
+
+/**
+ * Redis DB mà một app (theo domain) hoặc service (theo name) đang dùng.
+ * Dùng cho `--share-redis-with`, để không phải tra tay rồi gõ lại số.
+ */
+export function redisDbOf(identifier: string): number {
+  const s = loadState();
+  const unit = s.apps[identifier] ?? s.services[identifier];
+  if (!unit) {
+    die(
+      `--share-redis-with: không tìm thấy app/service '${identifier}' trong registry (${STATE_PATH}).\n` +
+        `  Xem danh sách: napp app list · napp service list`
+    );
+  }
+  if (unit.redisDbIndex === undefined) {
+    die(
+      `--share-redis-with: '${identifier}' không được cấp Redis DB nào nên không có gì để dùng chung.\n` +
+        `  Hãy tạo nó với --redis, hoặc chỉ định thẳng --redis-db <n>.`
+    );
+  }
+  return unit.redisDbIndex;
 }
 
 export function slugFor(domain: string): string {
@@ -254,9 +333,7 @@ export function removeService(name: string): ServiceRecord | undefined {
   if (!svc) return undefined;
   delete s.services[name];
   if (svc.port !== undefined) s.usedPorts = s.usedPorts.filter((p) => p !== svc.port);
-  if (svc.redisDbIndex !== undefined) {
-    s.usedRedisDb = s.usedRedisDb.filter((d) => d !== svc.redisDbIndex);
-  }
+  releaseRedisDbIfUnused(s, svc.redisDbIndex);
   saveState(s);
   return svc;
 }

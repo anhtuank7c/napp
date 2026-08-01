@@ -16,6 +16,57 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.15.0
+- CẶP WEB + WORKER DÙNG CHUNG REDIS DB: '--share-redis-with <domain|name>' và
+  '--redis-db <n>'. Trước đây '--redis' luôn cấp index rảnh kế tiếp, nên web app
+  và worker ra HAI DB khác nhau. Hàng đợi chỉ chạy khi bên đẩy và bên tiêu thụ
+  nhìn CÙNG keyspace: khác DB thì web đẩy job vào #1, worker nghe #2, KHÔNG BÊN
+  NÀO BÁO LỖI — job chất đống, email/thông báo/resize im lặng không chạy. Tạo
+  service với '--redis' mà không chỉ định dùng chung thì napp cảnh báo tại chỗ.
+  Xoá một đơn vị KHÔNG còn trả index về danh sách trống khi đơn vị khác vẫn dùng.
+- '--static-root <dir>' + '--static-prefix <path...>': để NGINX trả asset thay vì
+  Node. Vhost trước đây không có 'root' nào nên MỌI file (.js/.css/.woff2) đều đi
+  qua Node — một trang SSR/SPA kéo hàng trăm chunk, tất cả xếp hàng trên event
+  loop đơn luồng và tranh với chính việc render. Chỉ phục vụ theo TIỀN TỐ khai
+  báo (SvelteKit /_app/ · Next.js /_next/static/ · Vite /assets/), không dùng
+  try_files chung cho 'location /'.
+- '--upload-dir <dir>' (+ '--upload-prefix', mặc định /uploads/): FILE NGƯỜI
+  DÙNG TẢI LÊN không phải asset build, '--static-root' KHÔNG thay được. Với
+  SvelteKit adapter-node, 'static/' được SAO CHÉP vào build/client LÚC BUILD và
+  lúc chạy server chỉ phục vụ build/client — nên ảnh tải lên SAU khi build trả
+  404 dù file có thật trên đĩa, rồi TỰ NHIÊN hiện ra sau lần deploy kế tiếp (vì
+  build lại sao chép static/), trông như lỗi chập chờn chứ không như lỗi cấu
+  hình. Cache-Control ở đây cố ý NGẮN (1 ngày) và KHÔNG 'immutable': tên file
+  tải lên không băm nội dung nên cùng một URL có thể đổi nội dung.
+- '--hotlink-protect' (+ '--hotlink-allow <domain...>'): chỉ cho nhúng ảnh
+  trong --upload-dir từ domain của site. Dùng 'valid_referers ... server_names'
+  nên thêm domain phụ là tự động được phép. 'none' và 'blocked' ĐƯỢC PHÉP có
+  chủ đích: 'none' gồm cả bot lấy ảnh xem trước khi chia sẻ link (Facebook/
+  Zalo/Telegram thường không gửi Referer) — chặn nó là mất ảnh preview ở mọi
+  link chia sẻ. GIỚI HẠN: Referer do trình duyệt tự khai (trang hotlink đặt
+  <meta name="referrer" content="no-referrer"> là qua được) nên đây chặn
+  hotlink TUỲ TIỆN chứ không phải kiểm soát truy cập; và nếu có CDN đứng trước
+  thì CDN cache theo URL, không quan tâm Referer, nên chỉ tác dụng với lần
+  cache MISS — muốn chặn thật phải bật ở tầng CDN.
+- '--max-body <size>' THỰC SỰ có tác dụng: client_max_body_size vẫn luôn là 20M
+  vì không chỗ gọi nào truyền tham số đã có sẵn -> upload lớn hơn bị chặn 413
+  trước khi tới app. Nay giá trị nằm trong bản ghi app, template đọc thẳng từ đó.
+- '--app-dir <path>': chạy được app trong MONOREPO. WorkingDirectory và
+  EnvironmentFile trỏ vào thư mục con thay vì gốc repo. Với pnpm, chạy từ gốc
+  repo khiến một gói CÓ THẬT vẫn báo ERR_MODULE_NOT_FOUND (Node đi ngược lên từ
+  file gọi, pnpm chỉ symlink vào node_modules của package đó); và vì
+  EnvironmentFile có tiền tố '-', .env sai chỗ khiến app khởi động RỖNG biến môi
+  trường mà không in lỗi. ReadWritePaths vẫn là GỐC mã nguồn.
+- 'gzip_proxied any' trong napp-tuning.conf. Chỉ thị này áp dụng khi REQUEST CỦA
+  CLIENT mang header 'Via' (không phải "phản hồi từ upstream"). Đo trên trang
+  132 KB: không Via thì cả hai đều nén; CÓ Via thì thiếu dòng này trả nguyên
+  132 KB. Cloudflare không gửi Via, nhưng Fastly/Varnish/squid thì có.
+- Bộ đệm proxy đủ cho trang SSR: proxy_buffer_size 8k->16k, proxy_buffers
+  8x8k -> 16x16k. Phần vượt bộ đệm bị nginx ghi ra FILE TẠM trên đĩa rồi đọc
+  lại, mỗi request một lần.
+- App/service ĐÃ TẠO không đổi hành vi. Áp phần nginx cho app đang chạy:
+  'napp nginx sync'.
+
 ## 1.14.0
 - Thêm 'napp doctor' — soi RỦI RO BẢO MẬT (khác 'napp check' vốn chỉ hỏi môi
   trường đã ĐỦ chưa). Có trong menu tương tác, mục 9.

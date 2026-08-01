@@ -11,7 +11,8 @@ import {
   upsertService,
   removeService as removeServiceFromState,
   allocatePort,
-  allocateRedisDb,
+  resolveRedisDb,
+  redisDbOf,
   serviceUserFor,
   svcSystemdName,
   serviceWorkDirFor,
@@ -22,7 +23,7 @@ import {
 import { acquireLock } from "../lib/lock";
 import { createDatabase, dropDatabase } from "../lib/mysql";
 import { mergeEnvFile } from "../lib/envfile";
-import { renderServiceSystemdService, execStartLine } from "../templates/systemd";
+import { renderServiceSystemdService, execStartLine, unitWorkDir } from "../templates/systemd";
 import { detectHardware } from "../lib/hardware";
 import { nodeMaxOldSpaceMB } from "../templates/tuning";
 import { GIT_NONINTERACTIVE_ENV, prepareRepoAuth, setupRepoAuth } from "../lib/repo";
@@ -40,9 +41,12 @@ export interface CreateServiceOptions {
   startCmd?: string;
   db: boolean;
   redis: boolean;
+  redisDb?: number; // index cụ thể — dùng CHUNG keyspace với web app của cùng sản phẩm
+  shareRedisWith?: string; // domain/name của đơn vị muốn dùng chung Redis DB
   env: string[]; // "KEY=VALUE"
   token?: string; // PAT clone repo PRIVATE qua HTTPS
   sshKey?: string; // deploy key clone repo PRIVATE qua SSH
+  appDir?: string; // monorepo: thư mục con chứa worker, tương đối so với workDir
 }
 
 function serviceExists(name: string): boolean {
@@ -211,12 +215,25 @@ EOF`,
 
     // --- redis (tuỳ chọn) ---
     let redisDbIndex: number | undefined;
-    if (opts.redis) {
-      redisDbIndex = allocateRedisDb();
+    if (opts.redis || opts.redisDb !== undefined || opts.shareRedisWith) {
+      const preferred = opts.shareRedisWith ? redisDbOf(opts.shareRedisWith) : opts.redisDb;
+      redisDbIndex = resolveRedisDb(preferred);
       if (redisDbIndex === undefined) {
         warn("Đã hết database Redis riêng (0-15). Bỏ qua cấp DB riêng — hãy dùng key-prefix trong service thay vì DB riêng.");
+      } else if (preferred !== undefined) {
+        ok(`Dùng CHUNG Redis DB #${redisDbIndex}${opts.shareRedisWith ? ` với '${opts.shareRedisWith}'` : ""}`);
       } else {
+        // Một worker gần như luôn là NỬA KIA của một web app: hàng đợi chỉ chạy
+        // khi bên đẩy và bên tiêu thụ nhìn cùng một keyspace. Cấp DB riêng ở đây
+        // là mặc định an toàn cho worker độc lập, nhưng SAI cho cặp web+worker —
+        // và cái sai đó hoàn toàn im lặng, nên phải nói ra tại chỗ.
         ok(`Đã cấp Redis DB #${redisDbIndex} cho service này`);
+        warn(
+          `Service này dùng Redis DB RIÊNG (#${redisDbIndex}).\n` +
+            `  Nếu nó là worker xử lý hàng đợi của một web app, hai bên PHẢI dùng chung DB —\n` +
+            `  khác DB thì job được đẩy vào một nơi còn worker nghe ở nơi khác, KHÔNG BÊN NÀO BÁO LỖI.\n` +
+            `  Tạo lại với: --share-redis-with <domain-cua-web-app>`
+        );
       }
     }
 
@@ -247,15 +264,19 @@ EOF`,
       validateEnvKey(key);
       envUpdates[key] = kv.slice(eq + 1);
     }
-    mergeEnvFile(`${workDir}/.env`, envUpdates, 0o600);
-    runCmd("chown", [`${user}:${user}`, `${workDir}/.env`]);
+    // Phải ĐÚNG chỗ systemd đọc (EnvironmentFile = <workDir>/.env). Xem app.ts.
+    const svcWorkDir = unitWorkDir(workDir, opts.appDir);
+    if (svcWorkDir !== workDir) ensureDir(svcWorkDir);
+    const envPath = `${svcWorkDir}/.env`;
+    mergeEnvFile(envPath, envUpdates, 0o600);
+    runCmd("chown", [`${user}:${user}`, envPath]);
     ok("Đã ghi cấu hình vào .env (quyền 600, chỉ user của service đọc được)");
 
     // --- phân quyền chuẩn ---
     runCmd("chown", ["-R", `${user}:${user}`, workDir]);
     runCmd("find", [workDir, "-type", "d", "-exec", "chmod", "750", "{}", "+"]);
     runCmd("find", [workDir, "-type", "f", "-exec", "chmod", "640", "{}", "+"]);
-    runCmd("chmod", ["600", `${workDir}/.env`]);
+    runCmd("chmod", ["600", envPath]);
 
     // --- systemd service ---
     ensureDir("/var/log/napp", 0o750);
@@ -274,6 +295,7 @@ EOF`,
       dbName: dbInfo?.name,
       dbUser: dbInfo?.user,
       redisDbIndex,
+      appDir: opts.appDir,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -349,7 +371,7 @@ export async function cmdServiceDeploy(name: string): Promise<void> {
     }
 
     runCmd("chown", ["-R", `${svc.user}:${svc.user}`, svc.workDir]);
-    runCmd("chmod", ["600", `${svc.workDir}/.env`], { silentFail: true });
+    runCmd("chmod", ["600", `${unitWorkDir(svc.workDir, svc.appDir)}/.env`], { silentFail: true });
 
     runCmd("systemctl", ["restart", svcSystemdName(name)]);
     svc.updatedAt = new Date().toISOString();
@@ -536,8 +558,10 @@ export function cmdServiceEnvSet(name: string, pairs: string[]): void {
     validateEnvKey(key);
     updates[key] = kv.slice(eq + 1);
   }
-  mergeEnvFile(`${svc.workDir}/.env`, updates, 0o600);
-  runCmd("chown", [`${svc.user}:${svc.user}`, `${svc.workDir}/.env`]);
-  runCmd("chmod", ["600", `${svc.workDir}/.env`]);
+  // Cùng đường dẫn systemd đọc — ghi ở gốc repo thì unit của monorepo không thấy.
+  const svcEnv = `${unitWorkDir(svc.workDir, svc.appDir)}/.env`;
+  mergeEnvFile(svcEnv, updates, 0o600);
+  runCmd("chown", [`${svc.user}:${svc.user}`, svcEnv]);
+  runCmd("chmod", ["600", svcEnv]);
   ok(`Đã cập nhật .env cho service '${name}'. Chạy 'napp service restart ${name}' để áp dụng.`);
 }

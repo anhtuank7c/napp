@@ -11,7 +11,8 @@ import {
   upsertApp,
   removeApp as removeAppFromState,
   allocatePort,
-  allocateRedisDb,
+  resolveRedisDb,
+  redisDbOf,
   userFor,
   serviceNameFor,
   svcSystemdName,
@@ -26,7 +27,7 @@ import { createDatabase, dropDatabase } from "../lib/mysql";
 import { mergeEnvFile } from "../lib/envfile";
 import { renderAppNginxConf } from "../templates/nginx";
 import { ensureNappProxyConf } from "./nginx";
-import { renderAppSystemdService, renderServiceSystemdService, execStartLine } from "../templates/systemd";
+import { renderAppSystemdService, renderServiceSystemdService, execStartLine, unitWorkDir } from "../templates/systemd";
 import { detectHardware } from "../lib/hardware";
 import { nodeMaxOldSpaceMB } from "../templates/tuning";
 import { ipv6Available } from "../lib/network";
@@ -44,9 +45,19 @@ export interface CreateAppOptions {
   startCmd?: string;
   db: boolean;
   redis: boolean;
+  redisDb?: number; // index cụ thể (dùng chung keyspace với đơn vị khác)
+  shareRedisWith?: string; // domain/name của đơn vị muốn dùng chung Redis DB
   env: string[]; // "KEY=VALUE"
   token?: string; // Personal Access Token để clone repo PRIVATE qua HTTPS
   sshKey?: string; // đường dẫn deploy key (SSH private key) để clone repo PRIVATE qua SSH
+  appDir?: string; // monorepo: thư mục con chứa app, tương đối so với webRoot
+  maxBody?: string; // client_max_body_size của nginx
+  staticRoot?: string; // thư mục asset build để nginx trả thẳng
+  staticPrefix?: string[]; // tiền tố URL phục vụ từ staticRoot
+  uploadDir?: string; // thư mục file tải lên lúc chạy
+  uploadPrefix?: string; // tiền tố URL của thư mục trên
+  hotlinkProtect?: boolean; // chỉ cho nhúng ảnh từ domain của site
+  hotlinkAllow?: string[]; // domain ngoài cũng được phép nhúng
 }
 
 // Cân đối heap V8 giữa TẤT CẢ đơn vị chạy Node trên máy — web app VÀ background
@@ -268,10 +279,13 @@ EOF`,
 
     // --- redis (tuỳ chọn) ---
     let redisDbIndex: number | undefined;
-    if (opts.redis) {
-      redisDbIndex = allocateRedisDb();
+    if (opts.redis || opts.redisDb !== undefined || opts.shareRedisWith) {
+      const preferred = opts.shareRedisWith ? redisDbOf(opts.shareRedisWith) : opts.redisDb;
+      redisDbIndex = resolveRedisDb(preferred);
       if (redisDbIndex === undefined) {
         warn("Đã hết database Redis riêng (0-15). Bỏ qua cấp DB riêng — hãy dùng key-prefix trong app thay vì DB riêng.");
+      } else if (preferred !== undefined) {
+        ok(`Dùng CHUNG Redis DB #${redisDbIndex}${opts.shareRedisWith ? ` với '${opts.shareRedisWith}'` : ""}`);
       } else {
         ok(`Đã cấp Redis DB #${redisDbIndex} cho app này`);
       }
@@ -329,14 +343,21 @@ EOF`,
       validateEnvKey(key);
       envUpdates[key] = kv.slice(eq + 1);
     }
-    mergeEnvFile(`${webRoot}/.env`, envUpdates, 0o600);
+    // `.env` phải nằm ĐÚNG chỗ systemd đọc (EnvironmentFile = <workDir>/.env).
+    // Với monorepo, workDir là thư mục con — ghi .env ở gốc repo thì unit sẽ
+    // không thấy, và vì EnvironmentFile có tiền tố `-` (bỏ qua nếu thiếu) nên
+    // app khởi động RỖNG biến môi trường mà không có lỗi nào được in ra.
+    const appWorkDir = unitWorkDir(webRoot, opts.appDir);
+    if (appWorkDir !== webRoot) ensureDir(appWorkDir);
+    const envPath = `${appWorkDir}/.env`;
+    mergeEnvFile(envPath, envUpdates, 0o600);
     // Khối GỢI Ý (comment) về CSRF của SvelteKit — mergeEnvFile chỉ ghi KEY=VALUE
     // và lược bỏ comment, nên phải append riêng ở đây. Chỉ có trong .env "mẫu"
     // lúc tạo app; lần `napp app env set` sau sẽ ghi lại file và bỏ khối này —
     // không sao, nó chỉ là hướng dẫn, PROTOCOL_HEADER/HOST_HEADER ở trên mới là
     // phần thực sự làm CSRF chạy đúng.
     appendFile(
-      `${webRoot}/.env`,
+      envPath,
       [
         "",
         "# --- SvelteKit · kiểm tra CSRF khi chạy sau reverse proxy ---------------",
@@ -352,14 +373,14 @@ EOF`,
         "",
       ].join("\n")
     );
-    runCmd("chown", [`${user}:${user}`, `${webRoot}/.env`]);
+    runCmd("chown", [`${user}:${user}`, envPath]);
     ok("Đã ghi cấu hình vào .env (quyền 600, chỉ user của app đọc được)");
 
     // --- phân quyền chuẩn ---
     runCmd("chown", ["-R", `${user}:${user}`, webRoot]);
     runCmd("find", [webRoot, "-type", "d", "-exec", "chmod", "750", "{}", "+"]);
     runCmd("find", [webRoot, "-type", "f", "-exec", "chmod", "640", "{}", "+"]);
-    runCmd("chmod", ["600", `${webRoot}/.env`]);
+    runCmd("chmod", ["600", envPath]);
 
     // --- systemd service ---
     ensureDir("/var/log/napp", 0o750);
@@ -379,6 +400,14 @@ EOF`,
       dbName: dbInfo?.name,
       dbUser: dbInfo?.user,
       redisDbIndex,
+      appDir: opts.appDir,
+      maxBodySize: opts.maxBody,
+      staticRoot: opts.staticRoot,
+      staticPrefixes: opts.staticPrefix,
+      uploadDir: opts.uploadDir,
+      uploadPrefix: opts.uploadPrefix,
+      hotlinkProtect: opts.hotlinkProtect,
+      hotlinkAllow: opts.hotlinkAllow,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -473,7 +502,7 @@ export async function cmdAppDeploy(domain: string): Promise<void> {
     }
 
     runCmd("chown", ["-R", `${app.user}:${app.user}`, app.webRoot]);
-    runCmd("chmod", ["600", `${app.webRoot}/.env`], { silentFail: true });
+    runCmd("chmod", ["600", `${unitWorkDir(app.webRoot, app.appDir)}/.env`], { silentFail: true });
 
     runCmd("systemctl", ["restart", serviceNameFor(domain)]);
     app.updatedAt = new Date().toISOString();
@@ -720,8 +749,10 @@ export function cmdAppEnvSet(domain: string, pairs: string[]): void {
     validateEnvKey(key);
     updates[key] = kv.slice(eq + 1);
   }
-  mergeEnvFile(`${app.webRoot}/.env`, updates, 0o600);
-  runCmd("chown", [`${app.user}:${app.user}`, `${app.webRoot}/.env`]);
-  runCmd("chmod", ["600", `${app.webRoot}/.env`]);
+  // Cùng đường dẫn systemd đọc — xem chú thích ở cmdAppCreate.
+  const appEnv = `${unitWorkDir(app.webRoot, app.appDir)}/.env`;
+  mergeEnvFile(appEnv, updates, 0o600);
+  runCmd("chown", [`${app.user}:${app.user}`, appEnv]);
+  runCmd("chmod", ["600", appEnv]);
   ok(`Đã cập nhật .env cho '${domain}'. Chạy 'napp app restart ${domain}' để áp dụng.`);
 }

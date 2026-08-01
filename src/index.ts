@@ -126,6 +126,26 @@ app
   .option("--start-cmd <cmd>", "lệnh khởi động (mặc định theo runtime, vd: 'npm start')")
   .option("--db", "tạo kèm database MariaDB riêng cho app")
   .option("--redis", "cấp Redis DB riêng cho app (0-15)")
+  .option("--redis-db <n>", "dùng Redis DB CHỈ ĐỊNH (cho phép dùng CHUNG với đơn vị khác)", (v) => parseInt(v, 10))
+  .option("--share-redis-with <domain|name>", "dùng CHUNG Redis DB với app/service đã có (bắt buộc cho cặp web + worker)")
+  .option("--app-dir <path>", "monorepo: thư mục con chứa app, tương đối so với mã nguồn (vd 'apps/backend')")
+  .option("--max-body <size>", "client_max_body_size của nginx (mặc định 20M; tăng nếu app cho upload file lớn)")
+  .option("--static-root <dir>", "thư mục asset build để NGINX trả thẳng thay vì qua Node (vd '<webRoot>/build/client')")
+  .option("--upload-dir <dir>", "thư mục file NGƯỜI DÙNG TẢI LÊN lúc chạy — KHÁC --static-root, xem README (vd '<webRoot>/static/uploads')")
+  .option("--upload-prefix <path>", "tiền tố URL của --upload-dir (mặc định '/uploads/')")
+  .option("--hotlink-protect", "chỉ cho nhúng ảnh trong --upload-dir từ domain của site (chặn hotlink tuỳ tiện)")
+  .option(
+    "--hotlink-allow <domain...>",
+    "domain NGOÀI cũng được phép nhúng, lặp lại được (vd 'partner.com' hoặc '*.cdn.net')",
+    (v, prev: string[]) => [...prev, v],
+    [] as string[]
+  )
+  .option(
+    "--static-prefix <path...>",
+    "tiền tố URL phục vụ từ --static-root, lặp lại được (SvelteKit: /_app/ · Next.js: /_next/static/)",
+    (v, prev: string[]) => [...prev, v],
+    [] as string[]
+  )
   .option("--env <KEY=VALUE...>", "biến môi trường bổ sung, có thể lặp lại nhiều lần", (v, prev: string[]) => [...prev, v], [] as string[])
   .action(async (domain, opts) => {
     await cmdAppCreate(domain, {
@@ -141,6 +161,16 @@ app
       startCmd: opts.startCmd,
       db: Boolean(opts.db),
       redis: Boolean(opts.redis),
+      redisDb: opts.redisDb,
+      shareRedisWith: opts.shareRedisWith,
+      appDir: opts.appDir,
+      maxBody: opts.maxBody,
+      staticRoot: opts.staticRoot,
+      staticPrefix: (opts.staticPrefix ?? []).length > 0 ? opts.staticPrefix : undefined,
+      uploadDir: opts.uploadDir,
+      uploadPrefix: opts.uploadPrefix,
+      hotlinkProtect: Boolean(opts.hotlinkProtect),
+      hotlinkAllow: (opts.hotlinkAllow ?? []).length > 0 ? opts.hotlinkAllow : undefined,
       env: opts.env ?? [],
     });
   });
@@ -207,6 +237,9 @@ service
   .option("--start-cmd <cmd>", "lệnh khởi động (mặc định 'npm start' theo package.json; vd: 'node worker.js')")
   .option("--db", "tạo kèm database MariaDB riêng cho service")
   .option("--redis", "cấp Redis DB riêng cho service (0-15)")
+  .option("--redis-db <n>", "dùng Redis DB CHỈ ĐỊNH (cho phép dùng CHUNG với đơn vị khác)", (v) => parseInt(v, 10))
+  .option("--share-redis-with <domain|name>", "dùng CHUNG Redis DB với app/service đã có — BẮT BUỘC nếu service này tiêu thụ hàng đợi của một web app")
+  .option("--app-dir <path>", "monorepo: thư mục con chứa worker, tương đối so với mã nguồn (vd 'apps/worker')")
   .option("--env <KEY=VALUE...>", "biến môi trường bổ sung, có thể lặp lại nhiều lần", (v, prev: string[]) => [...prev, v], [] as string[])
   .action(async (name, opts) => {
     await cmdServiceCreate(name, {
@@ -222,6 +255,9 @@ service
       startCmd: opts.startCmd,
       db: Boolean(opts.db),
       redis: Boolean(opts.redis),
+      redisDb: opts.redisDb,
+      shareRedisWith: opts.shareRedisWith,
+      appDir: opts.appDir,
       env: opts.env ?? [],
     });
   });

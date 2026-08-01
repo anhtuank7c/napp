@@ -2,6 +2,69 @@
 
 Tất cả thay đổi đáng chú ý của `napp` được ghi lại ở đây.
 
+## 1.15.0
+
+- **Cặp web + worker dùng CHUNG Redis DB được rồi — `--share-redis-with` / `--redis-db`.** Trước đây `--redis` luôn cấp index rảnh kế tiếp, nên tạo web app rồi tạo worker sẽ ra **hai DB khác nhau**. Hàng đợi (BullMQ, Sidekiq, Celery...) chỉ chạy khi bên đẩy việc và bên tiêu thụ nhìn cùng một keyspace: khác DB thì web đẩy job vào `#1`, worker ngồi nghe `#2`, **không bên nào báo lỗi** — job chất đống còn mọi tác dụng phụ (email, thông báo, resize ảnh) im lặng không bao giờ chạy. Nay:
+
+  ```bash
+  sudo napp app create shop.example.com --repo ... --redis
+  sudo napp service create shop-worker  --repo ... --share-redis-with shop.example.com
+  ```
+
+  Tạo service với `--redis` mà **không** chỉ định dùng chung thì napp in cảnh báo tại chỗ, vì đây là cái sai không có triệu chứng. Khi nhiều đơn vị dùng chung một index, xoá một đơn vị **không** trả index về danh sách trống nữa (trước đây trả, khiến DB đang dùng bị cấp lại cho sản phẩm khác và hai bên ghi đè key của nhau).
+
+- **`--static-root` + `--static-prefix`: để NGINX trả asset thay vì Node.** Vhost trước đây không có `root` nào, nên **mọi** file — từng chunk `.js`, `.css`, `.woff2` — đều đi qua tiến trình Node. Một trang của app SSR/SPA hiện đại kéo hàng trăm chunk, tất cả xếp hàng trên event loop đơn luồng và tranh chấp với chính việc render trang. Đây là nguyên nhân phổ biến nhất của "vào dashboard thấy giựt" dù đo server vẫn nhanh.
+
+  ```bash
+  sudo napp app create app.example.com --repo ... \
+    --static-root /var/www/app.example.com/build/client \
+    --static-prefix /_app/
+  ```
+
+  CỐ Ý chỉ phục vụ theo **tiền tố khai báo**, không dùng `try_files $uri` chung cho `location /`: một try_files chung sẽ đem cả cây thư mục ra đường và có thể trả `index.html` tĩnh thay vì để app tự render. Tiền tố có tên băm nội dung thì không bao giờ đụng route của app — SvelteKit `/_app/`, Next.js `/_next/static/`, Vite `/assets/`. Ba header bảo mật được lặp lại trong location tĩnh vì chỉ cần một `add_header` ở location con là nginx **bỏ toàn bộ** `add_header` kế thừa từ khối server — không lặp thì riêng file tĩnh mất `nosniff`.
+
+- **`--upload-dir`: file người dùng tải lên KHÔNG phải asset build.** Đây là cái bẫy riêng, `--static-root` không giải quyết được. Với SvelteKit adapter-node (và tương tự), thư mục `static/` được **sao chép vào `build/client/` lúc build**, còn lúc chạy server chỉ phục vụ `build/client`. Nên một ảnh admin tải lên **sau** khi build — nằm ở `static/uploads` — không có trong `build/client` và server trả **404 dù file có thật trên đĩa**. Đo trên một bản build thật: file có sẵn lúc build → `200`; file tải lên sau đó → `404`.
+
+  Triệu chứng rất dễ đọc nhầm: ảnh vừa tải lên bị vỡ, rồi **tự nhiên hiện ra sau lần deploy kế tiếp** (vì build lại sao chép `static/`), nên nó giống lỗi chập chờn hoặc lỗi cache hơn là lỗi cấu hình.
+
+  ```bash
+  sudo napp app create pghotel.vn --repo ... \
+    --upload-dir /var/www/pghotel.vn/apps/backend/static/uploads
+  ```
+
+  Mặc định tiền tố URL là `/uploads/`, đổi bằng `--upload-prefix`. `Cache-Control` ở đây cố ý **ngắn** (1 ngày) và **không** `immutable`: tên file tải lên không băm nội dung nên cùng một URL có thể đổi nội dung, `immutable` sẽ khoá bản cũ trong cache trình duyệt hàng năm trời.
+
+- **`--hotlink-protect`: chỉ cho nhúng ảnh từ domain của mình.** Áp lên `--upload-dir`, dùng `valid_referers … server_names` nên thêm domain phụ vào site là tự động được phép, không phải sửa hai nơi. Thêm domain ngoài bằng `--hotlink-allow` (lặp lại được).
+
+  ```bash
+  sudo napp app create pghotel.vn --repo ... \
+    --upload-dir /var/www/pghotel.vn/apps/backend/static/uploads \
+    --hotlink-protect --hotlink-allow partner.example.com
+  ```
+
+  **`none` và `blocked` được phép có chủ đích** — đây là phần dễ làm sai nhất. `none` là request không có `Referer`: gõ thẳng URL ảnh, trình duyệt cắt `Referer` vì quyền riêng tư, và quan trọng nhất là **bot lấy ảnh xem trước khi chia sẻ link** (Facebook, Zalo, Telegram, Slack) — chúng thường không gửi `Referer`. Chặn `none` nghĩa là mọi link chia sẻ mất ảnh preview, thiệt hại lớn hơn nhiều so với hotlink ngăn được. `blocked` là `Referer` bị proxy doanh nghiệp xoá — chặn nhóm này là chặn nhầm người dùng thật.
+
+  **Hai giới hạn phải biết trước khi tin vào nó.** (1) `Referer` do trình duyệt tự khai: trang hotlink chỉ cần đặt `<meta name="referrer" content="no-referrer">` là rơi vào nhóm `none` và đi qua — đây là biện pháp chặn hotlink **tuỳ tiện**, không phải kiểm soát truy cập, đừng dùng để bảo vệ ảnh riêng tư. (2) Nếu có CDN đứng trước (Cloudflare…), CDN cache theo URL và **không quan tâm `Referer`**: ảnh đã vào cache edge sẽ được trả cho mọi referer mà không hỏi origin, nên cấu hình này chỉ tác dụng với lần cache MISS — muốn chặn thật thì bật ở tầng CDN. Đừng "chữa" bằng `Vary: Referer`: nó biến mỗi referer thành một bản cache riêng và phá nát hiệu quả cache.
+
+  Đã kiểm chứng bằng nginx thật: không `Referer` / `pghotel.vn` / `www.pghotel.vn` / domain trong `--hotlink-allow` → `200`; domain lạ → `403`; và `pghotel.vn.evil.com` → `403` (cái bẫy mà rule viết bằng regex hay lọt).
+
+- **`--max-body` thực sự có tác dụng.** `client_max_body_size` vẫn luôn là `20M` dù `NginxAppOptions` đã có sẵn tham số — **không chỗ gọi nào truyền nó**. Upload lớn hơn thế bị nginx chặn bằng `413` trước khi tới app. Nay giá trị nằm trong bản ghi app và template đọc thẳng từ đó, nên thêm chỗ gọi mới cũng không thể quên.
+
+- **`--app-dir`: chạy được app trong MONOREPO.** `WorkingDirectory` và `EnvironmentFile` luôn trỏ vào gốc mã nguồn, đúng với repo một-package nhưng sai với monorepo. Hệ quả với pnpm: Node phân giải import trần bằng cách đi ngược lên từ file gọi, mà pnpm chỉ symlink gói vào `node_modules` của *package đó* — chạy từ gốc repo thì một gói có thật vẫn báo `ERR_MODULE_NOT_FOUND`. Và vì `EnvironmentFile` có tiền tố `-` (bỏ qua nếu thiếu), `.env` ghi sai chỗ khiến app khởi động **rỗng biến môi trường mà không có lỗi nào được in ra**.
+
+  ```bash
+  sudo napp app create pghotel.vn --repo ... \
+    --app-dir apps/backend --build-cmd "cd apps/backend && pnpm build"
+  ```
+
+  `ReadWritePaths` vẫn là **gốc mã nguồn** chứ không phải thư mục con: `ProtectSystem=strict` biến mọi đường dẫn ngoài danh sách thành chỉ-đọc, mà thư mục ứng dụng ghi ra ngoài phạm vi của mình là chuyện bình thường (uploads, cache dùng chung), và lỗi khi đó là `EROFS` lúc chạy chứ không phải lúc khởi động.
+
+- **`gzip_proxied any` trong `napp-tuning.conf`.** Chỉ thị này quyết định có nén hay không khi **request của client mang header `Via`** — nginx đọc `Via` là "request này đã đi qua một proxy". Đây *không* phải "phản hồi đến từ upstream": không có `Via` thì nginx nén bình thường bất kể có `proxy_pass` hay không. Đo trên một trang 132 KB với `Accept-Encoding: gzip`: không `Via` thì cả hai cấu hình đều nén; **có `Via` thì thiếu dòng này trả nguyên 132 KB**. Cloudflare không gửi `Via` nên site sau Cloudflare thường không dính, nhưng Fastly, Varnish, squid và phần lớn proxy doanh nghiệp thì có — và khi dính thì triệu chứng là "chậm với một số người dùng", gần như không lần ra được.
+
+- **Bộ đệm proxy đủ cho một trang SSR**: `proxy_buffer_size` 8k → 16k và `proxy_buffers` 8×8k → 16×16k. 64 KB đủ cho API trả JSON nhỏ, nhưng phần vượt quá bộ đệm bị nginx **ghi ra file tạm trên đĩa rồi đọc lại**, mỗi request một lần — một trang admin 300 KB nghĩa là ~240 KB ghi/đọc đĩa cho mỗi lượt xem.
+
+- App/service **đã tạo** không đổi hành vi (napp đọc mọi đường dẫn từ registry). Muốn áp phần nginx cho app đang chạy: `napp nginx sync`.
+
 ## 1.14.0
 
 - **Thêm `napp doctor` — soi rủi ro bảo mật.** `napp check` hỏi *"môi trường đã ĐỦ chưa"*; `doctor` hỏi *"môi trường có ĐANG AN TOÀN không"*. Có trong menu tương tác (mục 9).

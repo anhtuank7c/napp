@@ -14,10 +14,23 @@ interface UnitSpec {
   description: string; // Description= trong [Unit]
   user: string;
   workDir: string;
+  // Gốc mã nguồn được phép GHI. Thường trùng workDir; khác nhau khi app nằm
+  // trong thư mục con của monorepo (workDir = <root>/apps/backend) — lúc đó
+  // quyền ghi vẫn phải cấp cho CẢ gốc repo, vì thư mục ứng dụng ghi ra ngoài
+  // phạm vi của mình là chuyện bình thường (uploads, cache, log dùng chung).
+  // ProtectSystem=strict khiến mọi đường dẫn ngoài danh sách này thành chỉ-đọc,
+  // và lỗi khi đó là EROFS lúc chạy chứ không phải lỗi lúc khởi động.
+  rootDir?: string;
   logBase: string; // tiền tố file log: <logBase>.out.log / <logBase>.error.log
   execStart: string;
   nodeOptions?: string; // MẶC ĐỊNH (đặt trước EnvironmentFile, .env ghi đè được)
   forcedEnv: string[]; // napp ÉP (đặt sau EnvironmentFile, .env KHÔNG ghi đè được)
+}
+
+/** Thư mục làm việc thật: gốc repo, hoặc thư mục con khi là monorepo. */
+export function unitWorkDir(root: string, appDir?: string): string {
+  const sub = (appDir ?? "").trim().replace(/^\/+|\/+$/g, "");
+  return sub ? `${root}/${sub}` : root;
 }
 
 // Renderer nền dùng chung. Thứ tự biến môi trường CÓ CHỦ ĐÍCH:
@@ -56,7 +69,7 @@ ProtectSystem=strict
 # home (bun ~/.bun, node ~/.npm) mà không lộ dữ liệu người dùng.
 ProtectHome=tmpfs
 PrivateTmp=yes
-ReadWritePaths=${spec.workDir}
+ReadWritePaths=${spec.rootDir ?? spec.workDir}
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
@@ -83,7 +96,12 @@ export function renderAppSystemdService(app: AppRecord, execStart: string, opts:
     headerComment: `# Managed by napp — site: ${app.domain}`,
     description: `napp application - ${app.domain}`,
     user: app.user,
-    workDir: app.webRoot,
+    // Monorepo: chạy TỪ thư mục con chứa ứng dụng. Quan trọng vì Node phân giải
+    // import trần bằng cách đi ngược lên từ file gọi, mà pnpm chỉ symlink gói
+    // vào node_modules của package đó — chạy từ gốc repo thì một gói có thật
+    // vẫn báo ERR_MODULE_NOT_FOUND. `.env` cũng nằm cạnh ứng dụng, không ở gốc.
+    workDir: unitWorkDir(app.webRoot, app.appDir),
+    rootDir: app.webRoot,
     logBase: `/var/log/napp/${app.domain}`,
     execStart,
     nodeOptions: opts.nodeOptions,
@@ -101,7 +119,8 @@ export function renderServiceSystemdService(svc: ServiceRecord, execStart: strin
     headerComment: `# Managed by napp — service: ${svc.name}`,
     description: `napp background service - ${svc.name}`,
     user: svc.user,
-    workDir: svc.workDir,
+    workDir: unitWorkDir(svc.workDir, svc.appDir),
+    rootDir: svc.workDir,
     logBase: `/var/log/napp/${svc.name}`,
     execStart,
     nodeOptions: opts.nodeOptions,
