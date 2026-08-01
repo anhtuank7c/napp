@@ -84,6 +84,7 @@ Gõ số rồi Enter, `0` để quay lại/thoát.
 | ↳ `[--max-body 100M]` | `client_max_body_size` (mặc định `20M`) |
 | ↳ `[--share-redis-with <domain>]` \| `[--redis-db <n>]` | Dùng **chung** Redis DB với đơn vị khác |
 | `sudo napp app deploy <domain>` | git pull + cài deps + build + restart |
+| `sudo napp app set <domain> [--static-root <dir>] [--static-prefix /_app/] [--upload-dir <dir>] [--hotlink-protect] [--max-body 100M]` | **Đổi cấu hình nginx của app ĐÃ TẠO** — giữ nguyên khối SSL của certbot |
 | `sudo napp app list` | Liệt kê app đang quản lý |
 | `sudo napp app restart\|stop\|start <domain>` | Điều khiển service |
 | `napp app logs <domain> [-f] [-n 200]` | Xem log (journalctl) |

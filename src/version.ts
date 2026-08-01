@@ -16,6 +16,28 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.16.0
+- 'napp app set <domain>': ĐỔI CẤU HÌNH NGINX CỦA APP ĐÃ TẠO. Các tuỳ chọn thêm
+  ở 1.15.0 (--static-root/--upload-dir/--hotlink-protect/--max-body) trước đó
+  chỉ áp dụng lúc TẠO app; 'napp nginx sync' không giúp được vì nó chỉ vá đúng
+  một chuỗi chứ không render lại vhost — cố ý như vậy, vì certbot chèn khối SSL
+  thẳng vào vhost nên render lại là xoá HTTPS đang chạy.
+- Location riêng của app chuyển sang FILE INCLUDE
+  (/etc/nginx/napp-locations/<domain>.conf): vhost chỉ mang ĐÚNG MỘT dòng
+  include, nên mọi lần đổi cấu hình về sau chỉ ghi lại một file và KHÔNG BAO
+  GIỜ chạm vào vhost. Dòng include được chèn vào khối server đang proxy tới
+  upstream của app (dò bằng đếm ngoặc), một lần duy nhất, idempotent, có sao
+  lưu + hoàn tác nếu 'nginx -t' trượt.
+- SỬA: 'napp domain add/remove' âm thầm làm MẤT HTTPS — regenerateNginxConf ghi
+  đè toàn bộ vhost nên khối SSL của certbot biến mất, site tụt về HTTP mà không
+  báo gì. Nay có cảnh báo rõ kèm lệnh cấp lại, và sao lưu + hoàn tác.
+- SỬA: app tạo bằng bản cũ có thể làm SẬP NGINX TOÀN MÁY — vhost nay include
+  file location, mà nginx từ chối khởi động nếu include trỏ vào file không tồn
+  tại. 'app create' và 'napp domain' đều ghi file này TRƯỚC khi ghi vhost, kể cả
+  khi app không bật tuỳ chọn nào. 'app remove' và rollback đều dọn file.
+- NginxAppOptions không còn bản sao của staticRoot/uploadDir/hotlink* — chúng
+  chỉ nằm trên AppRecord, tránh dựng lại cái bẫy "tham số không ai đọc".
+
 ## 1.15.0
 - CẶP WEB + WORKER DÙNG CHUNG REDIS DB: '--share-redis-with <domain|name>' và
   '--redis-db <n>'. Trước đây '--redis' luôn cấp index rảnh kế tiếp, nên web app

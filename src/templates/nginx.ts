@@ -9,6 +9,20 @@ export const NGINX_HARDENING_CONF = "/etc/nginx/conf.d/napp-hardening.conf";
 // bên trong `server {}` nên phải nằm ở file conf.d riêng như thế này.
 export const NGINX_PROXY_CONF = "/etc/nginx/conf.d/00-napp-proxy.conf";
 
+// Các `location` riêng của từng app (asset build, file tải lên, chặn hotlink)
+// nằm ở file RIÊNG, được vhost `include` vào bằng ĐÚNG MỘT dòng.
+//
+// Vì sao không viết thẳng vào vhost: certbot chèn khối SSL vào chính file vhost
+// khi cấp chứng chỉ, nên render lại vhost là XOÁ HTTPS của site đang chạy. Tách
+// ra file riêng thì đổi cấu hình về sau chỉ là ghi đè MỘT file mà napp sở hữu
+// trọn vẹn — không cần chạm vào vhost lần nào nữa, không có gì của certbot để
+// làm hỏng. Đây cũng là lý do `napp nginx sync` chỉ dám vá bằng thay chuỗi.
+export const NGINX_LOCATIONS_DIR = "/etc/nginx/napp-locations";
+
+export function appLocationsPath(domain: string): string {
+  return `${NGINX_LOCATIONS_DIR}/${domain}.conf`;
+}
+
 // Biến $napp_connection_upgrade: chỉ gửi 'Connection: upgrade' cho request
 // WebSocket THẬT SỰ. Tên có tiền tố napp_ để không đụng map $connection_upgrade
 // mà người dùng có thể đã tự khai báo ở nơi khác (trùng tên -> nginx báo lỗi).
@@ -109,44 +123,30 @@ export interface NginxAppOptions {
   extraServerNames?: string[];
   clientMaxBodySize?: string;
   ipv6?: boolean; // mặc định true; đặt false trên máy không có ngăn xếp IPv6
-  // Thư mục chứa asset đã build, để NGINX trả file thẳng từ đĩa thay vì bắt
-  // tiến trình Node làm việc đó. Ví dụ SvelteKit: <webRoot>/build/client.
-  staticRoot?: string;
-  // Các tiền tố URL được phục vụ từ staticRoot. Chỉ nên là những đường dẫn mà
-  // framework sinh ra với tên có băm nội dung — chúng không bao giờ trùng route
-  // của ứng dụng. SvelteKit: /_app/ · Next.js: /_next/static/ · Vite: /assets/
-  staticPrefixes?: string[];
-  // Thư mục file NGƯỜI DÙNG TẢI LÊN lúc chạy. KHÁC HẲN staticRoot: staticRoot là
-  // kết quả build (bất biến giữa hai lần deploy), còn thư mục này thay đổi liên
-  // tục trong lúc chạy và KHÔNG được build sinh ra.
-  uploadDir?: string;
-  // Tiền tố URL của thư mục trên. Mặc định "/uploads/".
-  uploadPrefix?: string;
-  // Chặn hotlink: chỉ cho nhúng ảnh từ chính domain của site.
-  hotlinkProtect?: boolean;
-  // Domain NGOÀI cũng được phép nhúng (đối tác, CDN, trang xem trước...).
-  hotlinkAllow?: string[];
+  // KHÔNG có staticRoot/uploadDir/hotlink* ở đây: chúng nằm trên AppRecord và
+  // được `renderAppLocationsConf` dựng thành file include riêng. Để lại bản sao
+  // ở đây là dựng lại đúng cái bẫy vừa sửa cho clientMaxBodySize — một tham số
+  // trông như có tác dụng nhưng không chỗ gọi nào đọc.
 }
 
-// Vhost reverse-proxy CHỈ HTTP (giống lara.sh: certbot sẽ tự sửa file này để
-// thêm khối SSL khi 'napp cert issue' chạy `certbot --nginx`).
-export function renderAppNginxConf(app: AppRecord, opts: NginxAppOptions = {}): string {
-  const allNames = [app.domain, `www.${app.domain}`, ...app.aliasDomains, ...(opts.extraServerNames ?? [])];
-  const serverNames = Array.from(new Set(allNames)).join(" ");
-  // Đọc từ AppRecord trước, opts chỉ để ghi đè. Trước đây các giá trị này CHỈ
-  // đến từ opts, mà cả hai chỗ gọi (`app create` và `domain`) đều không truyền
-  // — nên client_max_body_size luôn rơi về 20M dù người dùng có cấu hình gì đi
-  // nữa, và upload lớn hơn thế bị nginx chặn bằng 413 trước khi tới app. Lấy
-  // nguồn sự thật là bản ghi thì thêm một chỗ gọi mới cũng không thể quên.
-  const maxBody = opts.clientMaxBodySize ?? app.maxBodySize ?? "20M";
-  const staticRoot = opts.staticRoot ?? app.staticRoot;
-  const staticPrefixes = opts.staticPrefixes ?? app.staticPrefixes;
-  const uploadDir = opts.uploadDir ?? app.uploadDir;
-  const uploadPrefix = opts.uploadPrefix ?? app.uploadPrefix ?? "/uploads/";
-  const hotlinkProtect = opts.hotlinkProtect ?? app.hotlinkProtect ?? false;
-  const hotlinkAllow = opts.hotlinkAllow ?? app.hotlinkAllow;
-  const ipv6Line = opts.ipv6 === false ? "" : "\n    listen [::]:80;";
 
+/**
+ * Các `location` riêng của một app, để vhost `include` vào.
+ *
+ * Tách khỏi `renderAppNginxConf` để `app create` và `app set` dùng CHUNG một
+ * nguồn: nếu mỗi bên tự dựng lấy thì cấu hình của app tạo mới và app sửa sau sẽ
+ * trôi khỏi nhau mà không ai phát hiện.
+ *
+ * Trả về chuỗi RỖNG khi app không bật tuỳ chọn nào — file vẫn được ghi (rỗng),
+ * vì `include` trỏ vào file không tồn tại làm nginx từ chối khởi động.
+ */
+export function renderAppLocationsConf(app: AppRecord): string {
+  const staticRoot = app.staticRoot;
+  const staticPrefixes = app.staticPrefixes;
+  const uploadDir = app.uploadDir;
+  const uploadPrefix = app.uploadPrefix ?? "/uploads/";
+  const hotlinkProtect = app.hotlinkProtect ?? false;
+  const hotlinkAllow = app.hotlinkAllow;
   // --- asset tĩnh (tuỳ chọn) ------------------------------------------------
   // Không có staticRoot thì MỌI request — kể cả từng file .js/.css/.woff2 — đều
   // đi qua tiến trình Node. Một trang của app SPA/SSR hiện đại kéo hàng trăm
@@ -255,6 +255,26 @@ ${hotlinkBlock}
 `
     : "";
 
+
+  const out = `${staticBlock}${uploadBlock}`;
+  return out.trim().length === 0
+    ? `# Managed by napp — site: ${app.domain}\n# Chưa bật tuỳ chọn nào (--static-root / --upload-dir). File giữ lại vì vhost include nó.\n`
+    : `# Managed by napp — location riêng của ${app.domain}. TỰ SINH, đừng sửa tay.\n# Cập nhật bằng: napp app set ${app.domain} ...\n${out}`;
+}
+
+// Vhost reverse-proxy CHỈ HTTP (giống lara.sh: certbot sẽ tự sửa file này để
+// thêm khối SSL khi 'napp cert issue' chạy `certbot --nginx`).
+export function renderAppNginxConf(app: AppRecord, opts: NginxAppOptions = {}): string {
+  const allNames = [app.domain, `www.${app.domain}`, ...app.aliasDomains, ...(opts.extraServerNames ?? [])];
+  const serverNames = Array.from(new Set(allNames)).join(" ");
+  // Đọc từ AppRecord trước, opts chỉ để ghi đè. Trước đây các giá trị này CHỈ
+  // đến từ opts, mà cả hai chỗ gọi (`app create` và `domain`) đều không truyền
+  // — nên client_max_body_size luôn rơi về 20M dù người dùng có cấu hình gì đi
+  // nữa, và upload lớn hơn thế bị nginx chặn bằng 413 trước khi tới app. Lấy
+  // nguồn sự thật là bản ghi thì thêm một chỗ gọi mới cũng không thể quên.
+  const maxBody = opts.clientMaxBodySize ?? app.maxBodySize ?? "20M";
+  const ipv6Line = opts.ipv6 === false ? "" : "\n    listen [::]:80;";
+
   return `# Managed by napp — site: ${app.domain}
 # Chỉ HTTP. Chạy 'napp cert issue ${app.domain}' để thêm HTTPS (certbot tự sửa file này).
 upstream napp_${sanitizeUpstreamName(app.domain)} {
@@ -274,7 +294,12 @@ server {
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-${staticBlock}${uploadBlock}
+
+    # Location riêng của app (asset build / file tải lên / chặn hotlink).
+    # Nằm ở file riêng để đổi cấu hình về sau KHÔNG phải render lại vhost này —
+    # certbot chèn khối SSL vào đây, render lại là mất HTTPS. Sửa bằng:
+    #   napp app set ${app.domain} --static-root ... --upload-dir ...
+    include ${appLocationsPath(app.domain)};
     location = /favicon.ico { access_log off; log_not_found off; }
     location = /robots.txt  { access_log off; log_not_found off; }
 

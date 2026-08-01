@@ -15,6 +15,7 @@ import {
   cmdAppStart,
   cmdAppLogs,
   cmdAppEnvSet,
+  cmdAppSet,
 } from "./commands/app";
 import {
   cmdServiceCreate,
@@ -211,6 +212,42 @@ app
   .option("-f, --follow", "theo dõi log liên tục")
   .option("-n, --lines <n>", "số dòng log", (v) => parseInt(v, 10), 100)
   .action((domain, opts) => cmdAppLogs(domain, { follow: Boolean(opts.follow), lines: opts.lines }));
+
+app
+  .command("set <domain>")
+  .description("đổi cấu hình NGINX của app ĐÃ TẠO (asset tĩnh, file tải lên, chặn hotlink, giới hạn upload)")
+  .option("--static-root <dir>", "thư mục asset build để NGINX trả thẳng thay vì qua Node")
+  .option(
+    "--static-prefix <path...>",
+    "tiền tố URL phục vụ từ --static-root, lặp lại được (SvelteKit: /_app/ · Next.js: /_next/static/)",
+    (v, prev: string[]) => [...prev, v],
+    [] as string[]
+  )
+  .option("--upload-dir <dir>", "thư mục file NGƯỜI DÙNG TẢI LÊN lúc chạy (khác --static-root)")
+  .option("--upload-prefix <path>", "tiền tố URL của --upload-dir (mặc định '/uploads/')")
+  .option("--hotlink-protect", "chỉ cho nhúng ảnh trong --upload-dir từ domain của site")
+  .option("--no-hotlink-protect", "tắt chặn hotlink")
+  .option(
+    "--hotlink-allow <domain...>",
+    "domain NGOÀI cũng được phép nhúng, lặp lại được",
+    (v, prev: string[]) => [...prev, v],
+    [] as string[]
+  )
+  .option("--max-body <size>", "client_max_body_size của nginx (vd '100M')")
+  .action((domain, opts) =>
+    cmdAppSet(domain, {
+      staticRoot: opts.staticRoot,
+      staticPrefix: (opts.staticPrefix ?? []).length > 0 ? opts.staticPrefix : undefined,
+      uploadDir: opts.uploadDir,
+      uploadPrefix: opts.uploadPrefix,
+      // commander đặt hotlinkProtect=true khi có --hotlink-protect và false khi
+      // có --no-hotlink-protect; KHÔNG truyền cờ nào thì nó là undefined nhờ
+      // không khai báo default -> cmdAppSet bỏ qua, không ghi đè giá trị cũ.
+      hotlinkProtect: opts.hotlinkProtect,
+      hotlinkAllow: (opts.hotlinkAllow ?? []).length > 0 ? opts.hotlinkAllow : undefined,
+      maxBody: opts.maxBody,
+    })
+  );
 
 app
   .command("env-set <domain> <pairs...>")

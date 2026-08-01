@@ -2,6 +2,25 @@
 
 Tất cả thay đổi đáng chú ý của `napp` được ghi lại ở đây.
 
+## 1.16.0
+
+- **`napp app set <domain>` — đổi cấu hình nginx của app ĐÃ TẠO.** Các tuỳ chọn thêm ở 1.15.0 (`--static-root`, `--upload-dir`, `--hotlink-protect`, `--max-body`) trước đó chỉ áp dụng lúc **tạo app**. `napp nginx sync` không giúp được: nó chỉ vá đúng một chuỗi (`Connection "upgrade"`) chứ không render lại vhost — và cố ý như vậy, vì **certbot chèn khối SSL thẳng vào vhost**, render lại là xoá HTTPS của site đang chạy.
+
+  ```bash
+  sudo napp app set pghotel.vn \
+    --static-root /var/www/pghotel.vn/apps/backend/build/client --static-prefix /_app/ \
+    --upload-dir /var/www/pghotel.vn/apps/backend/static/uploads \
+    --hotlink-protect --max-body 100M
+  ```
+
+- **Location riêng của app chuyển sang file include.** `/etc/nginx/napp-locations/<domain>.conf` do napp sở hữu trọn vẹn; vhost chỉ mang **đúng một dòng** `include`. Nhờ vậy mọi lần đổi cấu hình về sau chỉ ghi lại một file, **không bao giờ chạm vào vhost** nên không có gì của certbot để làm hỏng. Dòng `include` được chèn vào **khối server đang proxy tới upstream của app** (dò bằng đếm ngoặc, không phải regex), một lần duy nhất và idempotent — đã kiểm chứng trên vhost certbot đã sửa: 8/8 dòng `managed by Certbot` giữ nguyên, `ssl_certificate` còn nguyên, khối redirect `:80` không bị chèn. Có sao lưu + hoàn tác nếu `nginx -t` trượt.
+
+- **Sửa: `napp domain add/remove` âm thầm làm mất HTTPS.** `regenerateNginxConf` ghi đè **toàn bộ** vhost, nên khối SSL certbot chèn vào đó biến mất và site tụt về HTTP — không thông báo gì, chỉ lộ ra khi có người truy cập bằng `https://`. Nay có **cảnh báo rõ ràng kèm lệnh cấp lại** (`napp cert issue …`), và thêm sao lưu + hoàn tác khi `nginx -t` trượt. (Render lại vẫn là hành vi hiện có; cảnh báo là phần còn thiếu.)
+
+- **Sửa: app tạo bằng bản cũ có thể làm sập nginx TOÀN MÁY.** Vhost nay `include` file location, mà nginx **từ chối khởi động** nếu include trỏ vào file không tồn tại. `app create` và `napp domain` đều ghi file này trước khi ghi vhost, kể cả khi app không bật tuỳ chọn nào (khi đó file chỉ chứa chú thích). `app remove` và rollback lúc tạo lỗi đều dọn file.
+
+- **`NginxAppOptions` không còn bản sao của `staticRoot`/`uploadDir`/`hotlink*`** — chúng chỉ nằm trên `AppRecord`. Để lại bản sao ở cả hai nơi là dựng lại đúng cái bẫy vừa sửa cho `clientMaxBodySize`: một tham số trông như có tác dụng nhưng không chỗ gọi nào đọc.
+
 ## 1.15.0
 
 - **Cặp web + worker dùng CHUNG Redis DB được rồi — `--share-redis-with` / `--redis-db`.** Trước đây `--redis` luôn cấp index rảnh kế tiếp, nên tạo web app rồi tạo worker sẽ ra **hai DB khác nhau**. Hàng đợi (BullMQ, Sidekiq, Celery...) chỉ chạy khi bên đẩy việc và bên tiêu thụ nhìn cùng một keyspace: khác DB thì web đẩy job vào `#1`, worker ngồi nghe `#2`, **không bên nào báo lỗi** — job chất đống còn mọi tác dụng phụ (email, thông báo, resize ảnh) im lặng không bao giờ chạy. Nay:

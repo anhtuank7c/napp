@@ -1,4 +1,4 @@
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, rmSync, readFileSync } from "node:fs";
 import { execCapture, runCmd, runAs, ensureDir, requireRoot, commandExists, writeFile, appendFile } from "../lib/exec";
 import { info, ok, warn, die, section } from "../lib/log";
 import { validateDomain, validatePort, validateRepoUrl, validateBranch, validateEnvKey } from "../lib/validate";
@@ -16,6 +16,7 @@ import {
   userFor,
   serviceNameFor,
   svcSystemdName,
+  slugFor,
   WWW_ROOT,
   NGINX_AVAILABLE,
   NGINX_ENABLED,
@@ -25,7 +26,7 @@ import {
 import { acquireLock } from "../lib/lock";
 import { createDatabase, dropDatabase } from "../lib/mysql";
 import { mergeEnvFile } from "../lib/envfile";
-import { renderAppNginxConf } from "../templates/nginx";
+import { renderAppNginxConf, renderAppLocationsConf, appLocationsPath, NGINX_LOCATIONS_DIR } from "../templates/nginx";
 import { ensureNappProxyConf } from "./nginx";
 import { renderAppSystemdService, renderServiceSystemdService, execStartLine, unitWorkDir } from "../templates/systemd";
 import { detectHardware } from "../lib/hardware";
@@ -157,7 +158,7 @@ export async function cmdAppCreate(domain: string, opts: CreateAppOptions): Prom
     if (!rollbackActive) return;
     warn("Tạo app thất bại — đang hoàn tác các thay đổi đã thực hiện...");
     try {
-      runCmd("rm", ["-f", `${NGINX_ENABLED}/${domain}.conf`, `${NGINX_AVAILABLE}/${domain}.conf`], { silentFail: true });
+      runCmd("rm", ["-f", `${NGINX_ENABLED}/${domain}.conf`, `${NGINX_AVAILABLE}/${domain}.conf`, appLocationsPath(domain)], { silentFail: true });
       runCmd("bash", ["-lc", "nginx -t >/dev/null 2>&1 && systemctl reload nginx || true"], { silentFail: true });
       runCmd("systemctl", ["stop", serviceName], { silentFail: true });
       runCmd("systemctl", ["disable", serviceName], { silentFail: true });
@@ -429,6 +430,11 @@ EOF`,
     // thiếu file này thì `nginx -t` sẽ trượt vì biến chưa được định nghĩa.
     ensureNappProxyConf();
     const ngxConf = `${NGINX_AVAILABLE}/${domain}.conf`;
+    // PHẢI ghi trước vhost: vhost `include` file này, và nginx TỪ CHỐI KHỞI ĐỘNG
+    // nếu include trỏ vào file không tồn tại. Ghi cả khi app không bật tuỳ chọn
+    // nào — khi đó file chỉ chứa chú thích.
+    ensureDir(NGINX_LOCATIONS_DIR, 0o755);
+    writeFile(appLocationsPath(domain), renderAppLocationsConf(record), 0o644);
     writeFile(ngxConf, renderAppNginxConf(record, { ipv6: ipv6Available() }), 0o644);
     runCmd("ln", ["-sf", ngxConf, `${NGINX_ENABLED}/${domain}.conf`]);
     const test = execCapture("nginx", ["-t"]);
@@ -611,7 +617,7 @@ export async function cmdAppRemove(domain: string, opts: AppRemoveOptions): Prom
 
     // --- nginx vhost ---
     if (opts.nginx) {
-      runCmd("rm", ["-f", `${NGINX_ENABLED}/${domain}.conf`, `${NGINX_AVAILABLE}/${domain}.conf`], { silentFail: true });
+      runCmd("rm", ["-f", `${NGINX_ENABLED}/${domain}.conf`, `${NGINX_AVAILABLE}/${domain}.conf`, appLocationsPath(domain)], { silentFail: true });
       runCmd("bash", ["-lc", "nginx -t >/dev/null 2>&1 && systemctl reload nginx || true"], { silentFail: true });
       ok(`Đã xoá cấu hình nginx của '${domain}'.`);
     } else {
@@ -755,4 +761,160 @@ export function cmdAppEnvSet(domain: string, pairs: string[]): void {
   runCmd("chown", [`${app.user}:${app.user}`, appEnv]);
   runCmd("chmod", ["600", appEnv]);
   ok(`Đã cập nhật .env cho '${domain}'. Chạy 'napp app restart ${domain}' để áp dụng.`);
+}
+
+// --- napp app set --------------------------------------------------------
+
+/** Chèn `include <file>;` vào MỌI khối server đang proxy tới upstream của app. */
+export function injectLocationsInclude(conf: string, upstreamMarker: string, includeLine: string): string {
+  if (conf.includes(includeLine)) return conf; // đã có -> idempotent
+  const out: string[] = [];
+  let i = 0;
+  while (i < conf.length) {
+    const at = conf.indexOf("server", i);
+    if (at === -1) {
+      out.push(conf.slice(i));
+      break;
+    }
+    const open = conf.indexOf("{", at);
+    if (open === -1) {
+      out.push(conf.slice(i));
+      break;
+    }
+    // Tìm dấu } đóng khối bằng cách đếm ngoặc — không thể dùng regex vì khối
+    // server chứa các khối location lồng bên trong.
+    let depth = 0;
+    let end = -1;
+    for (let k = open; k < conf.length; k++) {
+      if (conf[k] === "{") depth++;
+      else if (conf[k] === "}") {
+        depth--;
+        if (depth === 0) {
+          end = k;
+          break;
+        }
+      }
+    }
+    if (end === -1) {
+      out.push(conf.slice(i));
+      break;
+    }
+    const block = conf.slice(at, end + 1);
+    out.push(conf.slice(i, at));
+    if (block.includes(upstreamMarker)) {
+      // Chèn NGAY TRƯỚC dấu đóng khối. Cuối khối chứ không phải đầu: một số
+      // chỉ thị đơn (client_max_body_size...) lấy lần khai báo SAU CÙNG, nên
+      // chèn ở đầu sẽ bị chính vhost ghi đè lại ngay bên dưới.
+      out.push(block.slice(0, -1).replace(/\s*$/, "\n") + `\n    ${includeLine}\n}`);
+    } else {
+      out.push(block);
+    }
+    i = end + 1;
+  }
+  return out.join("");
+}
+
+export interface SetAppOptions {
+  staticRoot?: string;
+  staticPrefix?: string[];
+  uploadDir?: string;
+  uploadPrefix?: string;
+  hotlinkProtect?: boolean;
+  hotlinkAllow?: string[];
+  maxBody?: string;
+}
+
+/**
+ * Đổi cấu hình nginx của một app ĐÃ TẠO.
+ *
+ * `napp nginx sync` KHÔNG làm được việc này: nó chỉ vá đúng một chuỗi
+ * (`Connection "upgrade"`) chứ không render lại vhost — và cố ý như vậy, vì
+ * certbot chèn khối SSL thẳng vào vhost nên render lại là xoá HTTPS đang chạy.
+ * Nên các tuỳ chọn thêm ở 1.15.0 chỉ áp dụng cho app tạo mới; app đang chạy cần
+ * lệnh này.
+ *
+ * Cách làm: ghi/ghi đè file location riêng của app (napp sở hữu trọn vẹn, không
+ * có gì của certbot trong đó), rồi chèn ĐÚNG MỘT dòng `include` vào vhost nếu
+ * chưa có. Từ lần sau trở đi chỉ còn ghi lại file include, vhost không bị chạm.
+ */
+export function cmdAppSet(domain: string, opts: SetAppOptions): void {
+  requireRoot();
+  validateDomain(domain);
+  if (!commandExists("nginx")) die("nginx chưa được cài.");
+  const app = requireApp(domain);
+
+  const changed: string[] = [];
+  const set = <K extends keyof AppRecord>(key: K, value: AppRecord[K], label: string) => {
+    if (value === undefined) return;
+    app[key] = value;
+    changed.push(label);
+  };
+  set("staticRoot", opts.staticRoot as AppRecord["staticRoot"], `static-root=${opts.staticRoot}`);
+  if ((opts.staticPrefix?.length ?? 0) > 0) set("staticPrefixes", opts.staticPrefix, `static-prefix=${opts.staticPrefix!.join(",")}`);
+  set("uploadDir", opts.uploadDir as AppRecord["uploadDir"], `upload-dir=${opts.uploadDir}`);
+  set("uploadPrefix", opts.uploadPrefix as AppRecord["uploadPrefix"], `upload-prefix=${opts.uploadPrefix}`);
+  set("hotlinkProtect", opts.hotlinkProtect as AppRecord["hotlinkProtect"], `hotlink-protect=${opts.hotlinkProtect}`);
+  if ((opts.hotlinkAllow?.length ?? 0) > 0) set("hotlinkAllow", opts.hotlinkAllow, `hotlink-allow=${opts.hotlinkAllow!.join(",")}`);
+  set("maxBodySize", opts.maxBody as AppRecord["maxBodySize"], `max-body=${opts.maxBody}`);
+
+  if (changed.length === 0) {
+    die(
+      `Không có gì để đổi. Truyền ít nhất một tuỳ chọn, ví dụ:\n` +
+        `  napp app set ${domain} --static-root ${app.webRoot}/build/client --static-prefix /_app/`
+    );
+  }
+
+  section(`Cập nhật cấu hình nginx cho ${domain}`);
+  info(`Thay đổi: ${changed.join(" · ")}`);
+
+  const conf = `${NGINX_AVAILABLE}/${domain}.conf`;
+  if (!existsSync(conf)) die(`Không thấy vhost ${conf}. App này có được napp tạo không?`);
+
+  // Sao lưu TRƯỚC mọi thay đổi, để `nginx -t` hỏng thì hoàn tác được về đúng
+  // trạng thái cũ — kể cả file location (có thể đã tồn tại từ lần set trước).
+  const confBak = `${conf}.napp-bak`;
+  const locPath = appLocationsPath(domain);
+  const locBak = `${locPath}.napp-bak`;
+  runCmd("cp", ["-a", conf, confBak]);
+  const locExisted = existsSync(locPath);
+  if (locExisted) runCmd("cp", ["-a", locPath, locBak]);
+
+  ensureDir(NGINX_LOCATIONS_DIR, 0o755);
+  writeFile(locPath, renderAppLocationsConf(app), 0o644);
+
+  let text = readFileSync(conf, "utf8");
+  // client_max_body_size là chỉ thị ĐƠN đã có sẵn trong vhost — vá tại chỗ thay
+  // vì thêm bản thứ hai, để không phụ thuộc vào thứ tự khai báo.
+  if (opts.maxBody) {
+    text = text.replace(/client_max_body_size\s+[^;]+;/, `client_max_body_size ${opts.maxBody};`);
+  }
+  const includeLine = `include ${locPath};`;
+  const before = text;
+  text = injectLocationsInclude(text, `proxy_pass http://napp_${slugFor(domain)}`, includeLine);
+  writeFile(conf, text, 0o644);
+
+  const rollback = () => {
+    runCmd("cp", ["-a", confBak, conf], { silentFail: true });
+    if (locExisted) runCmd("cp", ["-a", locBak, locPath], { silentFail: true });
+    else runCmd("rm", ["-f", locPath], { silentFail: true });
+  };
+
+  const test = execCapture("nginx", ["-t"]);
+  if (test.code !== 0) {
+    rollback();
+    runCmd("rm", ["-f", confBak, locBak], { silentFail: true });
+    die(`Cấu hình nginx sau khi sửa có lỗi — ĐÃ HOÀN TÁC toàn bộ:\n${test.stderr}`);
+  }
+  runCmd("systemctl", ["reload", "nginx"]);
+  runCmd("rm", ["-f", confBak, locBak], { silentFail: true });
+
+  app.updatedAt = new Date().toISOString();
+  upsertApp(app);
+
+  ok(`Đã cập nhật và reload nginx.`);
+  info(`• Location riêng: ${locPath}`);
+  if (text !== before) info(`• Đã chèn '${includeLine}' vào vhost (một lần duy nhất; lần sau chỉ ghi lại file trên).`);
+  if (app.staticRoot) info(`• Asset build giờ do NGINX trả, không qua Node.`);
+  if (app.uploadDir) info(`• File tải lên phục vụ từ ${app.uploadDir} (không phụ thuộc lần build gần nhất).`);
+  if (app.hotlinkProtect) info(`• Chặn hotlink: chỉ domain của site (+ ${app.hotlinkAllow?.join(", ") || "không có domain ngoài"}).`);
 }
