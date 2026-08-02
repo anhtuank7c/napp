@@ -2,6 +2,18 @@
 
 Tất cả thay đổi đáng chú ý của `napp` được ghi lại ở đây.
 
+## 1.18.0
+
+- **Sửa: Redis `maxmemory-policy` `volatile-lru` → `noeviction`.** BullMQ kiểm tra ngay lúc kết nối và báo `IMPORTANT! Eviction policy is volatile-lru. It should be "noeviction"`. Cảnh báo đó không phải chuyện thẩm mỹ: dữ liệu hàng đợi **không phải cache** — job đang chờ, khoá, kết quả chỉ tồn tại một bản. Với chính sách `*-lru`, khi chạm `maxmemory` Redis **tự trục xuất key** để nhường chỗ, job bốc hơi giữa chừng và **không bên nào báo lỗi** (BullMQ chỉ thấy job "không còn tồn tại").
+
+  `volatile-lru` — thứ napp đặt từ 1.5.0 — không hề an toàn hơn ở đây: BullMQ **có** đặt TTL cho khoá, rate-limit và job đã hoàn tất, nên "chỉ trục xuất key có TTL" vẫn ăn thẳng vào dữ liệu của hàng đợi. `noeviction` khiến Redis **từ chối lệnh ghi** (báo OOM) khi đầy: hỏng lộ liễu, thấy ngay, còn hơn mất việc trong im lặng.
+
+  Lý do cũ (nhiều app chung một Redis, sợ cache app này trục xuất session app kia) nay được giải quyết đúng chỗ: **không trục xuất gì cả**. Chính sách này áp cho **cả instance**, không tách theo DB index được — chỉ cần một app dùng queue là cả server phải `noeviction`.
+
+  Đánh đổi: Redis đầy thì ghi mới lỗi OOM chứ không tự dọn. Hãy **đặt TTL cho key cache** (key hết hạn vẫn bị xoá bình thường — `noeviction` chỉ tắt việc trục xuất key **chưa** hết hạn) và theo dõi `napp redis info` (`used_memory` so với `maxmemory`).
+
+- **`napp check` kiểm tra `maxmemory-policy` đang chạy.** Server đã chạy `napp tune apply` bằng bản cũ vẫn đang để `volatile-lru` — sinh lại template thôi thì không chạm tới chúng. `napp check` nay đọc `CONFIG GET maxmemory-policy` của **instance đang chạy** và báo nếu khác `noeviction`; `napp check --fix` áp ngay bằng `CONFIG SET` **và** ghi vào `/etc/redis/conf.d/napp-tuning.conf` để bền qua restart — **không restart Redis** (restart là mất mọi job còn trong bộ nhớ chưa kịp vào AOF).
+
 ## 1.17.0
 
 - **`ADDRESS_HEADER` / `XFF_DEPTH` giờ là TUỲ CHỌN (`--address-header`), không còn mặc định.** Hai biến này đổi thứ mà `getClientAddress()` của adapter-node trả về: từ **địa chỉ socket** của bên gọi sang một giá trị **parse ra từ header**. Tiện cho app chỉ cần "IP khách là gì", nhưng **phá app tự làm lấy việc đó** — cách làm chuẩn là lấy socket peer, đối chiếu danh sách proxy tin cậy, *rồi* mới tin header. Đặt `ADDRESS_HEADER` là đưa cho phép kiểm tra ấy một giá trị do client cung cấp: nó không bao giờ khớp, app spam log `ignoring forwarding headers from untrusted peer …` mỗi request, và rơi về tin bất cứ thứ gì `XFF_DEPTH` chọn.

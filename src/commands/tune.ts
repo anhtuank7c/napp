@@ -27,7 +27,7 @@ export function cmdTuneShow(): void {
   section("Kế hoạch tối ưu (chưa áp dụng — dùng `napp tune apply`)");
   console.log(`  InnoDB buffer pool : ${plan.innodbBufferPoolMB} MB`);
   console.log(`  MariaDB max_connections : ${plan.maxConnections}`);
-  console.log(`  Redis maxmemory    : ${plan.redisMaxMemoryMB} MB (volatile-lru)`);
+  console.log(`  Redis maxmemory    : ${plan.redisMaxMemoryMB} MB (maxmemory-policy: noeviction — bắt buộc cho BullMQ)`);
   console.log(`  nginx worker_connections : ${plan.workerConnections}`);
   console.log(`  Node heap mỗi đơn vị : --max-old-space-size=${plan.nodeMaxOldSpaceMB} (chia cho ${Math.max(1, appCount)} đơn vị node: app + service; chỉ runtime=node)`);
 }
@@ -71,7 +71,7 @@ export async function cmdTuneApply(opts: TuneApplyOptions): Promise<void> {
   console.log(formatHardware(hw));
   console.log();
   console.log(`  InnoDB buffer pool -> ${plan.innodbBufferPoolMB} MB`);
-  console.log(`  Redis maxmemory    -> ${plan.redisMaxMemoryMB} MB (volatile-lru)`);
+  console.log(`  Redis maxmemory    -> ${plan.redisMaxMemoryMB} MB (maxmemory-policy: noeviction — bắt buộc cho BullMQ)`);
   console.log(`  nginx worker_connections -> ${plan.workerConnections}`);
   console.log(`  Node heap mỗi đơn vị -> --max-old-space-size=${plan.nodeMaxOldSpaceMB} (chia cho ${Math.max(1, appCount)} đơn vị node: app + service)`);
   if (hw.diskFreeGB > 0 && hw.diskFreeGB < 5) {

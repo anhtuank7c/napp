@@ -16,6 +16,22 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.18.0
+- SỬA: Redis maxmemory-policy volatile-lru -> noeviction. BullMQ kiểm tra lúc
+  kết nối và báo 'IMPORTANT! Eviction policy is volatile-lru. It should be
+  "noeviction"'. Dữ liệu hàng đợi KHÔNG phải cache: job đang chờ, khoá, kết quả
+  chỉ có một bản. Với chính sách *-lru, chạm maxmemory là Redis TỰ TRỤC XUẤT
+  key — job bốc hơi giữa chừng, KHÔNG bên nào báo lỗi. volatile-lru cũng không
+  thoát: BullMQ CÓ đặt TTL cho khoá, rate-limit, job đã xong. noeviction khiến
+  Redis TỪ CHỐI lệnh ghi (OOM) khi đầy — hỏng lộ liễu hơn là mất việc trong im
+  lặng. Chính sách áp cho CẢ INSTANCE, không tách theo DB index.
+  Đánh đổi: Redis đầy thì ghi mới lỗi OOM chứ không tự dọn -> đặt TTL cho key
+  cache (key hết hạn vẫn bị xoá) và theo dõi 'napp redis info'.
+- 'napp check' đọc maxmemory-policy ĐANG CHẠY và báo nếu khác noeviction —
+  server đã tune bằng bản cũ vẫn đang để volatile-lru, sinh lại template không
+  chạm tới chúng. 'napp check --fix' áp ngay bằng CONFIG SET và ghi vào
+  /etc/redis/conf.d/napp-tuning.conf (bền qua restart), KHÔNG restart Redis.
+
 ## 1.17.0
 - ADDRESS_HEADER/XFF_DEPTH giờ là TUỲ CHỌN ('--address-header'), không còn mặc
   định. Chúng đổi thứ getClientAddress() của adapter-node trả về: từ ĐỊA CHỈ

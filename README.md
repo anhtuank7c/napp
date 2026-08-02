@@ -384,6 +384,24 @@ sudo napp tune apply    # áp: nginx worker/gzip, MariaDB innodb_buffer_pool, Re
 Chạy `napp tune apply` **bất cứ khi nào nâng cấp phần cứng server** (thêm
 RAM/CPU) để tự động tính lại và áp cấu hình phù hợp — không cần tính tay.
 
+> **Redis `maxmemory-policy` = `noeviction`.** BullMQ kiểm tra ngay lúc kết nối
+> và báo `IMPORTANT! Eviction policy is volatile-lru. It should be "noeviction"`.
+> Dữ liệu hàng đợi không phải cache: khi chạm `maxmemory`, chính sách `*-lru`
+> cho phép Redis **tự trục xuất key** và job bốc hơi giữa chừng mà không bên nào
+> báo lỗi (`volatile-lru` cũng không thoát — BullMQ có đặt TTL cho khoá, rate
+> limit và job đã hoàn tất). `noeviction` khiến Redis **từ chối lệnh ghi** khi
+> đầy, hỏng lộ liễu thay vì mất việc trong im lặng. Chính sách này áp cho **cả
+> instance**, không tách theo DB index, nên hãy đặt TTL cho key cache của app và
+> theo dõi `napp redis info`.
+>
+> Server đã chạy `napp tune apply` bằng bản napp **cũ hơn 1.18.0** đang để
+> `volatile-lru`. `napp check` nay phát hiện việc này; sửa bằng một trong hai:
+>
+> ```bash
+> sudo napp check --fix    # áp ngay, không restart Redis
+> sudo napp tune apply     # sinh lại toàn bộ cấu hình (có restart Redis)
+> ```
+
 ---
 
 ## 🔄 Tự lưu trữ Gist + OTA update

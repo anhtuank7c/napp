@@ -119,13 +119,28 @@ export function renderRedisTuning(hw: HardwareProfile, plan: TuningPlan): string
   return `# Managed by napp — TỰ ĐỘNG SINH RA bởi \`napp tune apply\`
 # Phần cứng phát hiện: ${(hw.totalMemMB / 1024).toFixed(1)} GB RAM, tier=${hw.tier}
 maxmemory ${plan.redisMaxMemoryMB}mb
-# volatile-lru (KHÔNG phải allkeys-lru): chỉ loại bỏ các key CÓ đặt TTL khi đầy
-# bộ nhớ. Vì napp dùng CHUNG một Redis cho nhiều app (mỗi app một DB index), nếu
-# dùng allkeys-lru thì cache của app này đầy lên có thể trục xuất session/hàng
-# đợi (queue) KHÔNG-TTL của app khác. Với volatile-lru, hãy đặt TTL cho các key
-# cache; key không TTL (session bền, job) được giữ lại. Nếu Redis của bạn CHỈ
-# làm cache thuần và không đặt TTL, đổi lại thành allkeys-lru.
-maxmemory-policy volatile-lru
+# noeviction — BẮT BUỘC khi có app dùng BullMQ (hoặc hàng đợi Redis nói chung).
+# BullMQ tự kiểm tra lúc kết nối và cảnh báo: "IMPORTANT! Eviction policy is
+# volatile-lru. It should be noeviction".
+#
+# Lý do: dữ liệu hàng đợi KHÔNG phải cache — đó là job đang chờ/đang chạy, khoá,
+# kết quả, thứ chỉ tồn tại một bản duy nhất. Với mọi chính sách lru/lfu/random,
+# khi chạm maxmemory Redis sẽ TỰ TRỤC XUẤT key để nhường chỗ: job bốc hơi giữa
+# chừng, KHÔNG bên nào báo lỗi (BullMQ chỉ thấy job "không còn tồn tại"). Kể cả
+# volatile-lru cũng không an toàn: BullMQ có đặt TTL cho một số key (job đã
+# xong, khoá, rate-limit), nên "chỉ trục xuất key có TTL" vẫn ăn đúng vào dữ
+# liệu của hàng đợi. Với noeviction, Redis TỪ CHỐI lệnh ghi (báo OOM) thay vì âm
+# thầm xoá — hỏng lộ liễu còn hơn mất việc trong im lặng.
+#
+# napp dùng CHUNG một Redis cho nhiều app (mỗi app một DB index), nên chỉ cần
+# MỘT app dùng queue là cả instance phải noeviction — chính sách này áp cho toàn
+# server, không tách theo DB index được.
+#
+# Đánh đổi: khi Redis đầy, lệnh ghi sẽ lỗi OOM chứ không tự dọn dẹp. Hãy ĐẶT TTL
+# cho key cache của app (Redis vẫn xoá key hết hạn bình thường — noeviction chỉ
+# tắt việc trục xuất key CHƯA hết hạn) và theo dõi 'napp redis info'
+# (used_memory so với maxmemory).
+maxmemory-policy noeviction
 
 # Bền vững nhẹ (AOF everysec) — cân bằng giữa an toàn dữ liệu (session/cache
 # của các app node) và hiệu năng. Nếu Redis chỉ dùng làm cache thuần tuý, có

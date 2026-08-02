@@ -1,6 +1,7 @@
 import { readFileSync, existsSync } from "node:fs";
-import { execCapture, runCmd, commandExists, requireRoot, isServiceActive } from "../lib/exec";
+import { execCapture, runCmd, commandExists, requireRoot, isServiceActive, writeFile, ensureDir } from "../lib/exec";
 import { info, ok, warn, section, die } from "../lib/log";
+import { REDIS_TUNING_PATH } from "../templates/tuning";
 
 export interface CheckOptions {
   fix: boolean;
@@ -68,6 +69,58 @@ function installRedis(): void {
   runCmd("apt-get", ["install", "-y", "redis-server"]);
   runCmd("systemctl", ["enable", "--now", "redis-server"]);
   ok("Đã cài Redis");
+}
+
+// Đọc maxmemory-policy ĐANG CHẠY (không phải trong file cấu hình) — trả về null
+// nếu không hỏi được (redis-cli thiếu, cần auth, socket không mở...).
+function redisEvictionPolicy(): string | null {
+  if (!commandExists("redis-cli")) return null;
+  const res = execCapture("redis-cli", ["CONFIG", "GET", "maxmemory-policy"]);
+  if (res.code !== 0) return null;
+  // Kết quả dạng 2 dòng: "maxmemory-policy" rồi tới giá trị. Chỉ chấp nhận một
+  // trong các chính sách Redis biết — redis-cli có lúc in "(error) NOAUTH ..."
+  // mà vẫn thoát 0, và đoán bừa ở đây là báo động giả cho người dùng.
+  const lines = res.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
+  const value = lines[lines.length - 1] ?? "";
+  const known = new Set(["noeviction", "volatile-lru", "allkeys-lru", "volatile-lfu", "allkeys-lfu", "volatile-random", "allkeys-random", "volatile-ttl"]);
+  return known.has(value) ? value : null;
+}
+
+// Đặt noeviction cả ở RUNTIME lẫn trong file cấu hình của napp, để không mất
+// sau khi restart Redis. Chỉ chạm file do napp sở hữu (conf.d), không sửa
+// redis.conf gốc ngoài dòng `include`.
+function fixRedisEvictionPolicy(): void {
+  ensureDir("/etc/redis/conf.d", 0o755);
+  const line = "maxmemory-policy noeviction";
+  if (existsSync(REDIS_TUNING_PATH)) {
+    const content = readFileSync(REDIS_TUNING_PATH, "utf8");
+    const next = /^\s*maxmemory-policy\s+.*$/m.test(content)
+      ? content.replace(/^\s*maxmemory-policy\s+.*$/m, line)
+      : `${content.replace(/\n*$/, "\n")}${line}\n`;
+    writeFile(REDIS_TUNING_PATH, next, 0o644);
+  } else {
+    writeFile(
+      REDIS_TUNING_PATH,
+      `# Managed by napp — đặt bởi \`napp check --fix\`\n` +
+        `# BullMQ và mọi hàng đợi Redis YÊU CẦU noeviction: dữ liệu hàng đợi không\n` +
+        `# phải cache, để Redis tự trục xuất là mất job mà không bên nào báo lỗi.\n` +
+        `# Chạy 'napp tune apply' để sinh đầy đủ cấu hình Redis theo phần cứng.\n` +
+        `${line}\n`,
+      0o644
+    );
+  }
+  // Ubuntu package redis-server thường không tự include conf.d/*.conf.
+  const mainConf = "/etc/redis/redis.conf";
+  if (existsSync(mainConf)) {
+    const content = readFileSync(mainConf, "utf8");
+    if (!content.includes("conf.d/*.conf")) {
+      writeFile(mainConf, content + "\ninclude /etc/redis/conf.d/*.conf\n", 0o640);
+    }
+  }
+  // CONFIG SET áp ngay, không phải restart Redis (restart là mất toàn bộ job
+  // đang nằm trong bộ nhớ nếu chưa kịp ghi AOF).
+  if (commandExists("redis-cli")) runCmd("redis-cli", ["CONFIG", "SET", "maxmemory-policy", "noeviction"], { silentFail: true });
+  ok("Đã đặt maxmemory-policy=noeviction (áp ngay + ghi vào /etc/redis/conf.d/napp-tuning.conf).");
 }
 
 function installFail2ban(): void {
@@ -192,6 +245,21 @@ export async function cmdCheck(opts: CheckOptions): Promise<void> {
   // Redis
   if (isServiceActive("redis-server") || isServiceActive("redis")) {
     ok("Redis đang chạy");
+    const policy = redisEvictionPolicy();
+    if (policy === null) {
+      warn("Không đọc được maxmemory-policy của Redis (redis-cli thiếu hoặc cần mật khẩu) — hãy tự kiểm tra: redis-cli CONFIG GET maxmemory-policy (phải là 'noeviction').");
+    } else if (policy === "noeviction") {
+      ok("Redis maxmemory-policy = noeviction (đúng cho BullMQ/hàng đợi)");
+    } else {
+      findings.push({
+        name: "redis-policy",
+        ok: false,
+        message:
+          `Redis maxmemory-policy = '${policy}', BullMQ (và mọi hàng đợi Redis) yêu cầu 'noeviction'. ` +
+          `Job đang chờ không phải cache: khi chạm maxmemory, Redis sẽ tự trục xuất key và job biến mất giữa chừng mà KHÔNG bên nào báo lỗi.`,
+        fix: fixRedisEvictionPolicy,
+      });
+    }
   } else if (commandExists("redis-server")) {
     findings.push({
       name: "redis",
