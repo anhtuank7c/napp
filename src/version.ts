@@ -16,6 +16,22 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.17.0
+- ADDRESS_HEADER/XFF_DEPTH giờ là TUỲ CHỌN ('--address-header'), không còn mặc
+  định. Chúng đổi thứ getClientAddress() của adapter-node trả về: từ ĐỊA CHỈ
+  SOCKET sang giá trị PARSE TỪ HEADER — phá app nào tự phân giải IP khách (lấy
+  socket peer, đối chiếu proxy tin cậy, RỒI mới tin header). Hệ quả: app spam
+  log "ignoring forwarding headers from untrusted peer ..." mỗi request và rơi
+  về tin bất cứ thứ gì XFF_DEPTH chọn. IP thường vẫn ra ĐÚNG, nên nguy hiểm:
+  tính đúng đắn phụ thuộc hoàn toàn vào XFF_DEPTH khớp số hop thật, thêm một
+  hop sau này là lặng lẽ đọc phải mục CLIENT GIẢ MẠO ĐƯỢC. Giá trị đó thường là
+  khoá rate limiter -> hỏng nghĩa là đăng nhập sai KHÔNG GIỚI HẠN.
+  App đã tạo không đổi gì; muốn gỡ thì xoá 2 dòng khỏi .env rồi 'napp app
+  restart <domain>'.
+- Sửa chú thích SAI về XFF_DEPTH: bản cũ ghi "có CDN trước nginx thì tăng lên
+  2". Sai khi nginx đã bật Cloudflare real-IP — $remote_addr ĐÃ là IP khách
+  thật nên $proxy_add_x_forwarded_for nối thêm chính nó, vẫn là 1.
+
 ## 1.16.0
 - 'napp app set <domain>': ĐỔI CẤU HÌNH NGINX CỦA APP ĐÃ TẠO. Các tuỳ chọn thêm
   ở 1.15.0 (--static-root/--upload-dir/--hotlink-protect/--max-body) trước đó

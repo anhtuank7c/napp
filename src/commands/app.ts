@@ -59,6 +59,7 @@ export interface CreateAppOptions {
   uploadPrefix?: string; // tiền tố URL của thư mục trên
   hotlinkProtect?: boolean; // chỉ cho nhúng ảnh từ domain của site
   hotlinkAllow?: string[]; // domain ngoài cũng được phép nhúng
+  addressHeader?: boolean; // đặt ADDRESS_HEADER/XFF_DEPTH cho adapter-node
 }
 
 // Cân đối heap V8 giữa TẤT CẢ đơn vị chạy Node trên máy — web app VÀ background
@@ -318,11 +319,36 @@ EOF`,
       // (Gợi ý bật ORIGIN thủ công được ghi dạng comment vào .env bên dưới.)
       PROTOCOL_HEADER: "x-forwarded-proto",
       HOST_HEADER: "host",
-      ADDRESS_HEADER: "x-forwarded-for",
-      // Số proxy TIN CẬY đứng trước app, đếm từ phải qua trong X-Forwarded-For.
-      // 1 = chỉ có nginx. Nếu đặt thêm CDN/WAF trước nginx thì tăng lên 2.
-      XFF_DEPTH: "1",
     };
+
+    // ADDRESS_HEADER + XFF_DEPTH: CHỈ đặt khi được yêu cầu (--address-header).
+    //
+    // Chúng đổi thứ mà `getClientAddress()` của adapter-node trả về: từ ĐỊA CHỈ
+    // SOCKET của bên gọi sang một giá trị PARSE RA TỪ HEADER. Tiện cho app chỉ
+    // cần "IP khách là gì", nhưng phá app tự làm lấy việc đó — cách làm chuẩn là
+    // lấy socket peer, đối chiếu với danh sách proxy tin cậy, RỒI mới tin header.
+    // Đặt ADDRESS_HEADER là đưa cho phép kiểm tra ấy một giá trị do client cung
+    // cấp: nó không bao giờ khớp, app spam log kiểu "ignoring forwarding headers
+    // from untrusted peer ..." và rơi về tin bất cứ thứ gì XFF_DEPTH chọn.
+    //
+    // IP thường vẫn ra ĐÚNG, và đó mới là chỗ nguy hiểm: tính đúng đắn khi đó
+    // phụ thuộc hoàn toàn vào XFF_DEPTH khớp với số hop THẬT. Thêm một hop sau
+    // này (CDN, load balancer thứ hai) là nó lặng lẽ đọc phải một mục CLIENT
+    // GIẢ MẠO ĐƯỢC — trong khi phép kiểm tra lẽ ra bắt được đã bị vô hiệu từ
+    // trước. Giá trị đó thường là khoá của rate limiter, nên hỏng ở đây nghĩa là
+    // đăng nhập sai không giới hạn, không phải một dòng log sai.
+    //
+    // Không đặt thì `getClientAddress()` trả 127.0.0.1 — sai một cách LỘ LIỄU,
+    // dễ phát hiện, thay vì sai một cách im lặng.
+    if (opts.addressHeader) {
+      envUpdates.ADDRESS_HEADER = "x-forwarded-for";
+      // Đếm từ phải qua trong X-Forwarded-For. 1 = chỉ nginx đứng trước.
+      // LƯU Ý: khi nginx đã bật Cloudflare real-IP (napp cloudflare sync),
+      // $remote_addr ĐÃ LÀ IP khách thật nên $proxy_add_x_forwarded_for nối
+      // thêm chính nó — vẫn là 1, KHÔNG phải 2. Chỉ tăng khi thực sự có thêm
+      // một proxy mà nginx không khôi phục real-IP giúp.
+      envUpdates.XFF_DEPTH = "1";
+    }
     if (dbInfo) {
       envUpdates.DB_CONNECTION = "mysql";
       envUpdates.DB_HOST = "127.0.0.1";

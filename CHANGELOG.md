@@ -2,6 +2,18 @@
 
 Tất cả thay đổi đáng chú ý của `napp` được ghi lại ở đây.
 
+## 1.17.0
+
+- **`ADDRESS_HEADER` / `XFF_DEPTH` giờ là TUỲ CHỌN (`--address-header`), không còn mặc định.** Hai biến này đổi thứ mà `getClientAddress()` của adapter-node trả về: từ **địa chỉ socket** của bên gọi sang một giá trị **parse ra từ header**. Tiện cho app chỉ cần "IP khách là gì", nhưng **phá app tự làm lấy việc đó** — cách làm chuẩn là lấy socket peer, đối chiếu danh sách proxy tin cậy, *rồi* mới tin header. Đặt `ADDRESS_HEADER` là đưa cho phép kiểm tra ấy một giá trị do client cung cấp: nó không bao giờ khớp, app spam log `ignoring forwarding headers from untrusted peer …` mỗi request, và rơi về tin bất cứ thứ gì `XFF_DEPTH` chọn.
+
+  IP thường vẫn ra **đúng**, và đó mới là chỗ nguy hiểm: tính đúng đắn khi đó phụ thuộc hoàn toàn vào `XFF_DEPTH` khớp số hop THẬT. Thêm một hop sau này (CDN, load balancer thứ hai) là nó lặng lẽ đọc phải một mục **client giả mạo được**, trong khi phép kiểm tra lẽ ra bắt được đã bị vô hiệu từ trước. Giá trị đó thường là khoá của rate limiter, nên hỏng ở đây nghĩa là **đăng nhập sai không giới hạn**, không phải một dòng log sai.
+
+  Không đặt thì `getClientAddress()` trả `127.0.0.1` — sai một cách **lộ liễu** và dễ sửa, thay vì sai một cách im lặng. App nào thật sự cần thì bật lại bằng `--address-header`.
+
+  App **đã tạo** không đổi gì (napp không sửa `.env` có sẵn). Muốn gỡ: xoá hai dòng đó khỏi `.env` rồi `napp app restart <domain>`.
+
+- **Sửa chú thích sai về `XFF_DEPTH`.** Bản cũ ghi "có CDN/WAF trước nginx thì tăng lên 2". Sai khi nginx đã bật Cloudflare real-IP (`napp cloudflare sync`): lúc đó `$remote_addr` **đã là** IP khách thật nên `$proxy_add_x_forwarded_for` nối thêm chính nó — vẫn là **1**. Làm theo lời khuyên cũ sẽ đọc lùi một hop và lấy nhầm IP.
+
 ## 1.16.0
 
 - **`napp app set <domain>` — đổi cấu hình nginx của app ĐÃ TẠO.** Các tuỳ chọn thêm ở 1.15.0 (`--static-root`, `--upload-dir`, `--hotlink-protect`, `--max-body`) trước đó chỉ áp dụng lúc **tạo app**. `napp nginx sync` không giúp được: nó chỉ vá đúng một chuỗi (`Connection "upgrade"`) chứ không render lại vhost — và cố ý như vậy, vì **certbot chèn khối SSL thẳng vào vhost**, render lại là xoá HTTPS của site đang chạy.

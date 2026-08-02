@@ -125,6 +125,10 @@ app
   .option("--install-cmd <cmd>", "lệnh cài dependencies (mặc định theo package manager)")
   .option("--build-cmd <cmd>", "lệnh build (vd: 'npm run build')")
   .option("--start-cmd <cmd>", "lệnh khởi động (mặc định theo runtime, vd: 'npm start')")
+  .option(
+    "--address-header",
+    "đặt ADDRESS_HEADER/XFF_DEPTH cho SvelteKit adapter-node — CHỈ dùng khi app KHÔNG tự phân giải IP khách (xem README)"
+  )
   .option("--db", "tạo kèm database MariaDB riêng cho app")
   .option("--redis", "cấp Redis DB riêng cho app (0-15)")
   .option("--redis-db <n>", "dùng Redis DB CHỈ ĐỊNH (cho phép dùng CHUNG với đơn vị khác)", (v) => parseInt(v, 10))
@@ -165,6 +169,7 @@ app
       redisDb: opts.redisDb,
       shareRedisWith: opts.shareRedisWith,
       appDir: opts.appDir,
+      addressHeader: Boolean(opts.addressHeader),
       maxBody: opts.maxBody,
       staticRoot: opts.staticRoot,
       staticPrefix: (opts.staticPrefix ?? []).length > 0 ? opts.staticPrefix : undefined,
