@@ -2,6 +2,14 @@
 
 Tất cả thay đổi đáng chú ý của `napp` được ghi lại ở đây.
 
+## 1.20.1
+
+- **`napp --help` có phần ví dụ ở cuối**, gồm mục **"sau khi cập nhật napp"** — danh sách lệnh do commander tự sinh trả lời được "có những lệnh gì" nhưng không nhắc các bước **bắt buộc** sau khi nâng cấp, mà bỏ qua chúng thì server vẫn mang cấu hình cũ đã hỏng (`volatile-lru` làm mất job BullMQ, bộ đệm `16k` làm route SvelteKit sâu trả 502). Chỉ ghi vào changelog là chưa đủ — gần như không ai đọc changelog.
+
+- **Menu tương tác có mục "Đồng bộ cấu hình proxy nginx vào vhost đã có"** (mục 10 của nhóm Hạ tầng). Trước đó `napp nginx sync` **không hề xuất hiện trong menu**, tức là người chỉ dùng menu không có đường nào chạm tới bước sửa 502. ⚠️ Việc chèn này đẩy **"Xem đề xuất tối ưu phần cứng" xuống 11** và **"Áp tối ưu phần cứng" xuống 12**.
+
+- Mô tả lệnh đã cập nhật cho khớp thực tế: `nginx` (cấu hình proxy dùng chung + hardening), `nginx sync` (nói rõ là gỡ bộ đệm cũ, giữ SSL), `check` (nêu cả việc phát hiện cấu hình Redis/nginx lỗi thời), `service create` (nhắc `--run-as`).
+
 ## 1.20.0
 
 - **Sửa: route SvelteKit lồng sâu trả 502 vì bộ đệm proxy quá nhỏ.** `proxy_buffer_size` là bộ đệm chứa **toàn bộ khối header** của response; vượt quá là nginx cắt kết nối, trả 502 và ghi `upstream sent too big header while reading response header from upstream`. App phía sau vẫn khoẻ (curl thẳng vào `127.0.0.1:<port>` ra đúng), nên lỗi này rất dễ bị đổ cho Node.

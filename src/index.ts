@@ -57,10 +57,42 @@ program
     execState.verbose = Boolean(opts.verbose);
   });
 
+// Danh sách lệnh do commander tự sinh trả lời "có những lệnh gì", nhưng không
+// trả lời "gõ gì trước" và nhất là không nhắc các bước BẮT BUỘC sau khi nâng
+// cấp napp — những bước mà bỏ qua thì server vẫn mang cấu hình cũ đã hỏng
+// (Redis volatile-lru làm mất job BullMQ, bộ đệm 16k làm route SvelteKit sâu
+// trả 502). Chỉ changelog nhắc là chưa đủ: gần như không ai đọc changelog.
+program.addHelpText(
+  "after",
+  `
+Bắt đầu nhanh:
+  sudo napp                      mở menu tương tác (gõ số, 0 để quay lại)
+  sudo napp check --fix          kiểm tra + tự cài thành phần còn thiếu
+  sudo napp app create <domain> --repo <url> --db --redis
+  sudo napp cert issue <domain> --email <email>
+  sudo napp tune apply           tối ưu theo phần cứng (chạy lại khi nâng cấp server)
+
+Sau khi cập nhật napp (bản cũ để lại cấu hình đã hỏng, không tự sửa):
+  sudo napp nginx sync           gỡ bộ đệm proxy 16k nội tuyến khỏi vhost cũ
+                                 -> hết 502 'upstream sent too big header' ở
+                                    route SvelteKit lồng sâu
+  sudo napp check                báo Redis còn maxmemory-policy khác noeviction
+                                 (BullMQ mất job) và vhost nào còn bộ đệm cũ
+
+Worker của một app web (hai nửa của cùng một sản phẩm):
+  sudo napp service create <name> --run-as <domain> --share-redis-with <domain>
+       --run-as         chạy bằng user của app -> đọc/ghi được file của app
+       --share-redis-with  chung keyspace -> hàng đợi mới chạy
+  sudo napp service set <name> --run-as <domain>    (đổi cho service ĐÃ TẠO)
+
+Chi tiết từng lệnh: napp <lệnh> --help · lịch sử thay đổi: napp changelog
+`
+);
+
 // ---------------------------------------------------------------- check ---
 program
   .command("check")
-  .description("kiểm tra môi trường máy chủ (Node.js, nginx, certbot, MariaDB, Redis, fail2ban, UFW)")
+  .description("kiểm tra môi trường máy chủ (Node.js, nginx, certbot, MariaDB, Redis, fail2ban, UFW) + phát hiện cấu hình Redis/nginx đã lỗi thời")
   .option("--fix", "tự cài đặt/khởi động các thành phần còn thiếu (cần sudo)")
   .option("-y, --yes", "không hỏi xác nhận khi dùng --fix")
   .action(async (opts) => cmdCheck({ fix: Boolean(opts.fix), yes: Boolean(opts.yes) }));
@@ -267,7 +299,7 @@ const service = program.command("service").description("quản lý ứng dụng 
 
 service
   .command("create <name>")
-  .description("tạo background service: user hệ thống riêng, clone repo, systemd service (không nginx/domain)")
+  .description("tạo background service: user hệ thống riêng (hoặc mượn user app web bằng --run-as), clone repo, systemd service (không nginx/domain)")
   .option("--port <port>", "cổng nội bộ (mặc định: KHÔNG cấp; chỉ đặt khi service tự bind, vd health-check)", (v) => parseInt(v, 10))
   .option("--repo <url>", "git repo để clone (bỏ trống để tạo worker mẫu rỗng)")
   .option("--branch <branch>", "branch git", "main")
@@ -522,7 +554,7 @@ cloudflare
 cloudflare.command("unschedule").description("gỡ lịch tự động đồng bộ IP Cloudflare").action(() => cmdCloudflareUnschedule());
 
 // ---------------------------------------------------------------- nginx ---
-const nginx = program.command("nginx").description("bảo vệ / hardening nginx");
+const nginx = program.command("nginx").description("cấu hình proxy dùng chung + hardening nginx");
 nginx
   .command("harden")
   .description("chặn truy cập thẳng IP / Host lạ (default_server trả 444) + ẩn phiên bản nginx")
@@ -530,7 +562,7 @@ nginx
 nginx.command("unharden").description("gỡ cấu hình hardening nginx (khôi phục hành vi mặc định)").action(() => cmdNginxUnharden());
 nginx
   .command("sync")
-  .description("cập nhật cấu hình proxy dùng chung + vá vhost cũ (sửa header Connection/WebSocket) — giữ nguyên SSL")
+  .description("áp cấu hình proxy dùng chung cho vhost đã có: BỘ ĐỆM đủ cho route SvelteKit sâu (hết 502) + header Connection/WebSocket — giữ nguyên SSL của certbot")
   .action(() => cmdNginxSync());
 
 // ------------------------------------------------------- update/version ---

@@ -16,6 +16,17 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.20.1
+- 'napp --help' có phần VÍ DỤ ở cuối, gồm mục "sau khi cập nhật napp": danh
+  sách lệnh tự sinh trả lời được "có lệnh gì" nhưng không nhắc các bước BẮT
+  BUỘC sau nâng cấp, mà bỏ qua thì server vẫn mang cấu hình cũ đã hỏng
+  (volatile-lru mất job BullMQ, bộ đệm 16k làm route SvelteKit sâu trả 502).
+- Menu tương tác có mục "Đồng bộ cấu hình proxy nginx vào vhost đã có" (mục 10
+  nhóm Hạ tầng). Trước đó 'napp nginx sync' KHÔNG có trong menu nên người chỉ
+  dùng menu không có đường nào chạm tới bước sửa 502. Lưu ý: "Xem đề xuất tối
+  ưu phần cứng" xuống 11, "Áp tối ưu phần cứng" xuống 12.
+- Mô tả lệnh cập nhật cho khớp thực tế: nginx, nginx sync, check, service create.
+
 ## 1.20.0
 - SỬA: route SvelteKit LỒNG SÂU trả 502 vì bộ đệm proxy quá nhỏ.
   proxy_buffer_size là bộ đệm chứa TOÀN BỘ KHỐI HEADER của response; vượt quá

@@ -22,7 +22,7 @@ import { cmdFirewallSync, cmdFirewallStatus } from "./firewall";
 import { cmdFail2banSetup, cmdFail2banStatus } from "./fail2ban";
 import { cmdTuneApply, cmdTuneShow } from "./tune";
 import { cmdCloudflareSync, cmdCloudflareSchedule, cmdCloudflareUnschedule } from "./cloudflare";
-import { cmdNginxHarden, cmdNginxUnharden } from "./nginx";
+import { cmdNginxHarden, cmdNginxUnharden, cmdNginxSync } from "./nginx";
 import { cmdUpdate, cmdVersion } from "./update";
 import { NAPP_VERSION } from "../version";
 import { section, info, warn } from "../lib/log";
@@ -495,6 +495,7 @@ async function menuInfra(): Promise<void> {
       "Gỡ lịch tự động đồng bộ Cloudflare",
       "Bảo vệ nginx: chặn truy cập IP/Host lạ (harden)",
       "Gỡ bảo vệ nginx (unharden)",
+      "Đồng bộ cấu hình proxy nginx vào vhost đã có (bộ đệm — sửa 502 route sâu)",
       "Xem đề xuất tối ưu phần cứng",
       "Áp tối ưu phần cứng (nginx/MariaDB/Redis/sysctl)",
     ]);
@@ -513,8 +514,9 @@ async function menuInfra(): Promise<void> {
     else if (choice === "7") await guard(() => cmdCloudflareUnschedule());
     else if (choice === "8") await guard(() => cmdNginxHarden());
     else if (choice === "9") await guard(() => cmdNginxUnharden());
-    else if (choice === "10") await guard(() => cmdTuneShow());
-    else if (choice === "11") await guard(() => cmdTuneApply({ yes: false, skipRestart: false }));
+    else if (choice === "10") await guard(() => cmdNginxSync());
+    else if (choice === "11") await guard(() => cmdTuneShow());
+    else if (choice === "12") await guard(() => cmdTuneApply({ yes: false, skipRestart: false }));
   }
 }
 
