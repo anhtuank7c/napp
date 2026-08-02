@@ -39,8 +39,32 @@ map $http_upgrade $napp_connection_upgrade {
     default upgrade;
     ''      '';
 }
-`;
+
+${PROXY_BUFFER_BLOCK}`;
 }
+
+// Bộ đệm proxy — dùng CHUNG cho mọi vhost napp (đặt ở mức http, vhost nào có
+// khối riêng thì khối đó thắng).
+//
+// proxy_buffer_size là bộ đệm chứa TOÀN BỘ KHỐI HEADER của response. Vượt quá
+// là nginx đóng kết nối và trả 502, ghi log 'upstream sent too big header while
+// reading response header from upstream' — trang trắng, còn app phía sau thì
+// hoàn toàn khoẻ mạnh nên rất dễ đổ lỗi nhầm cho Node.
+//
+// SvelteKit đụng trần này ở các route SÂU: mỗi tầng layout/page góp thêm các
+// mục 'Link: </_app/immutable/...>; rel=modulepreload' vào header, tên file lại
+// có hash dài. Route càng lồng nhiều tầng thì khối header càng phình — cùng một
+// app, trang chủ chạy tốt còn '/admin/hotels/1/rooms/2/edit' thì 502. Cộng thêm
+// Set-Cookie phiên đăng nhập là chạm 16k dễ như không.
+//
+// 128k header + 4 x 256k thân là giá trị đã kiểm chứng trên máy thật. Bộ đệm
+// CHỈ được cấp khi có request đang chạy (không phải cấp phát trước), nên chi phí
+// bộ nhớ đi theo tải thực tế chứ không phải theo số vhost.
+const PROXY_BUFFER_BLOCK = `proxy_buffering on;
+proxy_buffer_size 128k;
+proxy_buffers 4 256k;
+proxy_busy_buffers_size 256k;
+`;
 
 // Cấu hình hardening ở mức http (áp cho toàn nginx).
 export function renderNginxHardeningConf(): string {
@@ -332,16 +356,12 @@ server {
         proxy_send_timeout 60s;
         proxy_read_timeout 60s;
 
-        proxy_buffering on;
-        # 8k x 8 = 64 KB là đủ cho API trả JSON nhỏ, nhưng KHÔNG đủ cho một
-        # trang SSR: phần vượt quá bộ đệm bị nginx ghi ra FILE TẠM trên đĩa rồi
-        # đọc lại, mỗi request một lần. Một trang admin 300 KB nghĩa là ~240 KB
-        # ghi/đọc đĩa cho mỗi lượt xem. 16k header + 16 x 16k = 256 KB thân
-        # trang giữ trọn phần lớn trang SSR trong RAM; bộ đệm chỉ được cấp khi
-        # request đang chạy nên chi phí bộ nhớ là theo tải thực tế.
-        proxy_buffer_size 16k;
-        proxy_buffers 16 16k;
-        proxy_busy_buffers_size 32k;
+        # Bộ đệm proxy KHÔNG đặt ở đây nữa: nó nằm ở mức http trong
+        # /etc/nginx/conf.d/00-napp-proxy.conf và được kế thừa xuống. Đặt lại
+        # trong từng vhost nghĩa là mỗi lần đổi giá trị phải sửa lại vhost —
+        # mà vhost là chỗ certbot chèn khối SSL vào, render lại là mất HTTPS.
+        # Muốn riêng cho site này thì thêm proxy_buffer_size/proxy_buffers vào
+        # đây, giá trị trong location luôn thắng giá trị ở mức http.
     }
 
     location ~ /\\.(?!well-known).* {

@@ -116,6 +116,7 @@ Gõ số rồi Enter, `0` để quay lại/thoát.
 | `sudo napp firewall sync [--ssh-port n] [--restrict-cloudflare]` | Đồng bộ UFW (mặc định mở 80/443; `--restrict-cloudflare` để khoá origin theo IP Cloudflare) |
 | `sudo napp fail2ban setup` | Áp cấu hình fail2ban |
 | `sudo napp nginx harden` / `unharden` | Chặn truy cập IP/Host lạ (default_server 444) + ẩn version / gỡ |
+| `sudo napp nginx sync` | Đồng bộ cấu hình proxy dùng chung vào các vhost đã có (bộ đệm, header `Connection`) — **giữ nguyên khối SSL của certbot** |
 | `sudo napp cloudflare sync` | Đồng bộ dải IP Cloudflare vào nginx (real IP) ngay |
 | `sudo napp cloudflare schedule [--time 01:00]` | Lên lịch tự động đồng bộ IP Cloudflare (systemd timer, hàng ngày) |
 | `sudo napp cloudflare unschedule` | Gỡ lịch tự động đồng bộ IP Cloudflare |
@@ -454,6 +455,52 @@ RAM/CPU) để tự động tính lại và áp cấu hình phù hợp — khôn
 > sudo napp check --fix    # áp ngay, không restart Redis
 > sudo napp tune apply     # sinh lại toàn bộ cấu hình (có restart Redis)
 > ```
+
+---
+
+## 🧯 Route SvelteKit lồng sâu trả 502 — bộ đệm proxy
+
+Triệu chứng rất dễ nhận: trang chủ và các route nông chạy tốt, nhưng route lồng
+sâu kiểu `/admin/hotels/1/rooms/2/edit` trả **502**, trong khi `curl` thẳng vào
+`127.0.0.1:<port>` của app lại **đúng**. Log nginx ghi:
+
+```
+upstream sent too big header while reading response header from upstream
+```
+
+`proxy_buffer_size` là bộ đệm chứa **toàn bộ khối header** của response. Vượt
+quá là nginx cắt kết nối và trả 502 — app phía sau hoàn toàn khoẻ mạnh, nên rất
+dễ đổ lỗi nhầm cho Node. SvelteKit đụng trần này ở route sâu vì mỗi tầng
+layout/page góp thêm mục `Link: </_app/immutable/…>; rel=modulepreload` vào
+header, tên file lại có hash dài; cộng thêm `Set-Cookie` phiên đăng nhập là
+chạm trần dễ như không.
+
+Từ **1.20.0** bộ đệm được đặt **một chỗ duy nhất** ở mức `http` trong
+`/etc/nginx/conf.d/00-napp-proxy.conf`:
+
+```nginx
+proxy_buffering on;
+proxy_buffer_size 128k;
+proxy_buffers 4 256k;
+proxy_busy_buffers_size 256k;
+```
+
+Site **đã tạo bằng bản cũ** vẫn mang `proxy_buffer_size 16k` ngay trong
+`location /` của vhost, mà giá trị trong `location` **luôn thắng** giá trị mức
+`http` — nên phải chạy:
+
+```bash
+sudo napp nginx sync
+```
+
+Lệnh này gỡ khối bộ đệm nội tuyến khỏi vhost (cắt theo dòng, **không** render
+lại vhost nên khối SSL certbot chèn vẫn nguyên vẹn), có sao lưu + hoàn tác nếu
+`nginx -t` trượt.
+
+> Bộ đệm chỉ được cấp khi có request đang chạy, không phải cấp phát trước — chi
+> phí bộ nhớ đi theo tải thực tế, không theo số vhost. Cần giá trị riêng cho một
+> site thì thêm `proxy_buffer_size`/`proxy_buffers` vào `location /` của vhost
+> đó; giá trị trong `location` luôn thắng.
 
 ---
 

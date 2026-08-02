@@ -16,6 +16,25 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.20.0
+- SỬA: route SvelteKit LỒNG SÂU trả 502 vì bộ đệm proxy quá nhỏ.
+  proxy_buffer_size là bộ đệm chứa TOÀN BỘ KHỐI HEADER của response; vượt quá
+  là nginx cắt kết nối, trả 502 và ghi 'upstream sent too big header while
+  reading response header from upstream'. App phía sau vẫn khoẻ (curl thẳng
+  127.0.0.1:<port> ra đúng) nên rất dễ đổ lỗi nhầm cho Node. SvelteKit đụng
+  trần ở route sâu vì mỗi tầng layout/page góp thêm mục 'Link: rel=modulepreload'
+  vào header, tên file lại có hash dài; cộng Set-Cookie phiên đăng nhập là chạm
+  16k dễ như không. Giá trị mới: proxy_buffer_size 128k, proxy_buffers 4 256k,
+  proxy_busy_buffers_size 256k.
+- Bộ đệm chuyển lên MỨC HTTP, đặt MỘT CHỖ trong
+  /etc/nginx/conf.d/00-napp-proxy.conf. Trước đây mỗi vhost mang một bản sao
+  trong 'location /' -> mỗi lần đổi phải sửa vhost, mà vhost là chỗ certbot
+  chèn khối SSL, render lại là mất HTTPS.
+- 'napp nginx sync' GỠ khối bộ đệm nội tuyến khỏi vhost cũ — BẮT BUỘC vì giá
+  trị trong 'location' luôn thắng giá trị mức http, không gỡ thì site cũ vẫn
+  16k và vẫn 502. Cắt theo DÒNG, không render lại vhost: khối SSL của certbot
+  còn nguyên. Có sao lưu + hoàn tác nếu 'nginx -t' trượt.
+
 ## 1.19.0
 - 'napp service create --run-as <domain|name>': worker chạy bằng USER CỦA APP
   WEB đã có thay vì user riêng. Cần khi worker đụng FILE của app (nén ảnh trong

@@ -2,6 +2,8 @@ import { readFileSync, existsSync } from "node:fs";
 import { execCapture, runCmd, commandExists, requireRoot, isServiceActive, writeFile, ensureDir } from "../lib/exec";
 import { info, ok, warn, section, die } from "../lib/log";
 import { REDIS_TUNING_PATH } from "../templates/tuning";
+import { loadState, NGINX_AVAILABLE } from "../lib/state";
+import { cmdNginxSync, stripInlineProxyBuffers } from "./nginx";
 
 export interface CheckOptions {
   fix: boolean;
@@ -123,6 +125,20 @@ function fixRedisEvictionPolicy(): void {
   ok("Đã đặt maxmemory-policy=noeviction (áp ngay + ghi vào /etc/redis/conf.d/napp-tuning.conf).");
 }
 
+// Vhost tạo bằng bản trước 1.20.0 mang khối bộ đệm proxy NỘI TUYẾN trong
+// 'location /'. Giá trị trong location luôn thắng giá trị mức http, nên site đó
+// vẫn giữ proxy_buffer_size 16k và vẫn 502 ở route SvelteKit lồng sâu dù file
+// dùng chung đã đúng. Không lệnh nào tự phát hiện giúp — nên check ở đây.
+function vhostsWithInlineProxyBuffers(): string[] {
+  const stale: string[] = [];
+  for (const domain of Object.keys(loadState().apps)) {
+    const conf = `${NGINX_AVAILABLE}/${domain}.conf`;
+    if (!existsSync(conf)) continue;
+    if (stripInlineProxyBuffers(readFileSync(conf, "utf8")).changed) stale.push(domain);
+  }
+  return stale;
+}
+
 function installFail2ban(): void {
   info("Đang cài đặt fail2ban...");
   runCmd("apt-get", ["install", "-y", "fail2ban"]);
@@ -206,6 +222,18 @@ export async function cmdCheck(opts: CheckOptions): Promise<void> {
         ok: false,
         message: "nginx đã cài nhưng chưa chạy.",
         fix: () => runCmd("systemctl", ["enable", "--now", "nginx"]),
+      });
+    }
+    const stale = vhostsWithInlineProxyBuffers();
+    if (stale.length > 0) {
+      findings.push({
+        name: "nginx-proxy-buffers",
+        ok: false,
+        message:
+          `${stale.length} vhost còn khối bộ đệm proxy CŨ ngay trong 'location /' (${stale.join(", ")}). ` +
+          `Giá trị trong location thắng giá trị mức http, nên các site này vẫn dùng proxy_buffer_size 16k ` +
+          `và vẫn trả 502 ('upstream sent too big header') ở route SvelteKit lồng sâu. Sửa: napp nginx sync`,
+        fix: () => cmdNginxSync(),
       });
     }
   } else {

@@ -2,6 +2,29 @@
 
 Tất cả thay đổi đáng chú ý của `napp` được ghi lại ở đây.
 
+## 1.20.0
+
+- **Sửa: route SvelteKit lồng sâu trả 502 vì bộ đệm proxy quá nhỏ.** `proxy_buffer_size` là bộ đệm chứa **toàn bộ khối header** của response; vượt quá là nginx cắt kết nối, trả 502 và ghi `upstream sent too big header while reading response header from upstream`. App phía sau vẫn khoẻ (curl thẳng vào `127.0.0.1:<port>` ra đúng), nên lỗi này rất dễ bị đổ cho Node.
+
+  SvelteKit đụng trần ở **route sâu**: mỗi tầng layout/page góp thêm mục `Link: </_app/immutable/…>; rel=modulepreload` vào header, tên file lại có hash dài — cùng một app, trang chủ chạy tốt còn `/admin/hotels/1/rooms/2/edit` thì 502. Thêm `Set-Cookie` phiên đăng nhập nữa là chạm 16k dễ như không. Giá trị mới (đã kiểm chứng trên máy thật):
+
+  ```nginx
+  proxy_buffering on;
+  proxy_buffer_size 128k;   # trước: 16k
+  proxy_buffers 4 256k;     # trước: 16 16k
+  proxy_busy_buffers_size 256k;
+  ```
+
+- **Bộ đệm chuyển lên mức `http`, đặt MỘT CHỖ trong `/etc/nginx/conf.d/00-napp-proxy.conf`.** Trước đây mỗi vhost mang một bản sao trong `location /`, nghĩa là mỗi lần đổi giá trị phải sửa lại vhost — mà vhost chính là chỗ certbot chèn khối SSL vào, render lại là mất HTTPS của site đang chạy. Nay vhost mới không còn khối bộ đệm, chỉ kế thừa từ file dùng chung.
+
+- **`napp nginx sync` gỡ khối bộ đệm nội tuyến khỏi vhost cũ.** Bắt buộc, vì giá trị trong `location` **luôn thắng** giá trị mức `http`: không gỡ thì site tạo bằng bản cũ vẫn giữ `16k` và vẫn 502. Việc gỡ cắt theo **dòng** (không phải regex nuốt cả khối) và không render lại vhost — đã kiểm chứng trên vhost certbot đã sửa: 4/4 dòng `managed by Certbot` còn nguyên, `ssl_certificate` còn nguyên, chú thích của directive khác không bị đụng, chạy lại lần hai không đổi gì thêm. Vẫn có sao lưu + hoàn tác nếu `nginx -t` trượt.
+
+  ```bash
+  sudo napp nginx sync    # site đã tạo bằng bản cũ PHẢI chạy lệnh này
+  ```
+
+- Bộ đệm chỉ được cấp khi có request đang chạy (không cấp phát trước), nên chi phí bộ nhớ đi theo tải thực tế chứ không theo số vhost. Cần giá trị riêng cho một site thì thêm `proxy_buffer_size`/`proxy_buffers` vào `location /` của vhost đó.
+
 ## 1.19.0
 
 - **`napp service create --run-as <domain|name>` — worker chạy bằng user của app web đã có.** Trước đây mọi background service đều có user riêng `nas_<name>`, đúng cho worker độc lập (bot, cron poller) nhưng **không dùng được** cho worker đụng vào FILE của một app web — nén ảnh trong thư mục upload, sinh thumbnail, dọn cache. Thư mục app là `750`/file `640` của user app, user khác **đọc còn không nổi**; mà nới quyền thư mục ra cho hai user là mở luôn cho mọi thứ khác trên máy.

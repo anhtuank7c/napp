@@ -59,6 +59,61 @@ export function ensureNappProxyConf(): boolean {
 // certbot đã chèn vào vhost, làm sập HTTPS của site đang chạy.
 const LEGACY_CONNECTION_LINE = /proxy_set_header\s+Connection\s+"upgrade"\s*;/g;
 
+/**
+ * Gỡ khối bộ đệm proxy nội tuyến khỏi một vhost cũ.
+ *
+ * Từ 1.20.0 bộ đệm nằm ở mức http trong 00-napp-proxy.conf. Vhost tạo bằng bản
+ * cũ vẫn mang `proxy_buffer_size 16k` ngay trong `location /`, mà giá trị trong
+ * location LUÔN THẮNG giá trị mức http — không gỡ đi thì site cũ vẫn 502 ở các
+ * route sâu dù file dùng chung đã đúng.
+ *
+ * Cắt theo DÒNG chứ không bằng một regex nuốt cả khối: vhost là chỗ certbot
+ * chèn khối SSL vào, một regex tham lam trượt tay ở đây là mất HTTPS của site
+ * đang chạy. Ở đây chỉ những dòng `proxy_buffer*` (và chú thích dính liền
+ * chúng) bị xoá, mọi dòng khác được chép nguyên văn.
+ */
+export function stripInlineProxyBuffers(content: string): { out: string; changed: boolean } {
+  const lines = content.split("\n");
+  const isBufferLine = (l: string) => /^\s*proxy_(buffering|buffer_size|buffers|busy_buffers_size)\s+[^;]*;\s*$/.test(l);
+  const isComment = (l: string) => /^\s*#/.test(l);
+  const keep: string[] = [];
+  let changed = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    if (!isBufferLine(lines[i]!)) {
+      keep.push(lines[i]!);
+      continue;
+    }
+    changed = true;
+    // Chú thích ngay TRÊN khối là chú thích giải thích các con số vừa bị gỡ —
+    // giữ lại là để file nói dối về cấu hình thật.
+    while (keep.length > 0 && isComment(keep[keep.length - 1]!)) keep.pop();
+
+    // Nuốt tiếp phần còn lại của khối: dòng bộ đệm kế tiếp, và chú thích xen
+    // giữa CHỈ KHI sau chúng vẫn còn dòng bộ đệm — nếu không, chú thích đó là
+    // của directive khác và phải giữ nguyên.
+    let j = i + 1;
+    while (j < lines.length) {
+      if (isBufferLine(lines[j]!)) {
+        i = j;
+        j = i + 1;
+        continue;
+      }
+      if (isComment(lines[j]!)) {
+        let k = j;
+        while (k < lines.length && isComment(lines[k]!)) k++;
+        if (k < lines.length && isBufferLine(lines[k]!)) {
+          i = k;
+          j = i + 1;
+          continue;
+        }
+      }
+      break;
+    }
+  }
+  return { out: keep.join("\n"), changed };
+}
+
 export function cmdNginxSync(): void {
   requireRoot();
   if (!commandExists("nginx")) die("nginx chưa được cài. Chạy 'napp check --fix' trước.");
@@ -69,6 +124,7 @@ export function cmdNginxSync(): void {
 
   // Sao lưu trước khi vá để còn hoàn tác nếu nginx -t hỏng.
   const patched: string[] = [];
+  const debuffered: string[] = [];
   const backups = new Map<string, string>();
   for (const domain of Object.keys(loadState().apps)) {
     const conf = `${NGINX_AVAILABLE}/${domain}.conf`;
@@ -77,7 +133,10 @@ export function cmdNginxSync(): void {
       continue;
     }
     const before = readFileSync(conf, "utf8");
-    const after = before.replace(LEGACY_CONNECTION_LINE, "proxy_set_header Connection $napp_connection_upgrade;");
+    const withConnection = before.replace(LEGACY_CONNECTION_LINE, "proxy_set_header Connection $napp_connection_upgrade;");
+    const stripped = stripInlineProxyBuffers(withConnection);
+    if (stripped.changed) debuffered.push(domain);
+    const after = stripped.out;
     if (after === before) continue;
     const bak = `${conf}.napp-bak`;
     copyFileSync(conf, bak);
@@ -87,9 +146,12 @@ export function cmdNginxSync(): void {
   }
 
   if (patched.length === 0) {
-    info("Không có vhost nào cần vá (tất cả đã dùng $napp_connection_upgrade).");
+    info("Không có vhost nào cần vá.");
   } else {
-    info(`Đã vá header Connection cho: ${patched.join(", ")}`);
+    info(`Đã vá vhost: ${patched.join(", ")}`);
+  }
+  if (debuffered.length > 0) {
+    info(`Đã gỡ khối bộ đệm proxy nội tuyến (nay lấy từ ${NGINX_PROXY_CONF}) khỏi: ${debuffered.join(", ")}`);
   }
 
   const test = execCapture("nginx", ["-t"]);
@@ -103,6 +165,7 @@ export function cmdNginxSync(): void {
 
   ok("Đã đồng bộ và reload nginx.");
   info("• 'Connection: upgrade' giờ CHỈ gửi cho request WebSocket thật; request thường dùng keep-alive.");
+  info("• Bộ đệm proxy: 128k header + 4x256k thân, đặt một chỗ ở mức http — đủ cho route SvelteKit lồng sâu (trước đây 502 'upstream sent too big header').");
   info("• Khối SSL do certbot chèn trong vhost được giữ nguyên (vá tại chỗ, không render lại).");
 }
 
