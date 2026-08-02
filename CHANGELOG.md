@@ -2,6 +2,29 @@
 
 Tất cả thay đổi đáng chú ý của `napp` được ghi lại ở đây.
 
+## 1.19.0
+
+- **`napp service create --run-as <domain|name>` — worker chạy bằng user của app web đã có.** Trước đây mọi background service đều có user riêng `nas_<name>`, đúng cho worker độc lập (bot, cron poller) nhưng **không dùng được** cho worker đụng vào FILE của một app web — nén ảnh trong thư mục upload, sinh thumbnail, dọn cache. Thư mục app là `750`/file `640` của user app, user khác **đọc còn không nổi**; mà nới quyền thư mục ra cho hai user là mở luôn cho mọi thứ khác trên máy.
+
+  `--run-as` gỡ **cả hai** lớp chặn — thiếu một lớp là hỏng, và mỗi lớp hỏng một kiểu:
+
+  | Lớp | Triệu chứng khi thiếu | `--run-as` làm gì |
+  |---|---|---|
+  | Quyền Unix | `EACCES` | `User=`/`Group=` của unit là user app |
+  | Sandbox systemd (`ProtectSystem=strict`) | `EROFS` dù `ls -l` trông đúng quyền | thêm thư mục app vào `ReadWritePaths=` |
+
+  Mặc định **không đổi**: không truyền `--run-as` thì service vẫn có user riêng, cô lập hoàn toàn như trước.
+
+- **`--write-dir <path>` (lặp lại được)** — cấp quyền ghi vào đường dẫn ngoài mã nguồn service (kho ảnh dùng chung, thư mục media gắn ngoài). Đường dẫn phải tồn tại sẵn: systemd **từ chối khởi động** unit khi `ReadWritePaths` trỏ vào chỗ không có, và lỗi lúc đó (`Failed to set up mount namespacing`) không nhắc đường dẫn nào sai — nên napp kiểm tra và báo ngay lúc tạo.
+
+- **`napp service set <name>` — đổi danh tính/quyền ghi của service ĐÃ TẠO.** `--run-as <domain|name>` để mượn user, `--standalone` để quay về user riêng, `--write-dir` để đặt lại danh sách ghi thêm. Nhu cầu "worker cần đụng file của app web" gần như luôn lộ ra **sau** khi worker đã chạy, và trước bản này cách duy nhất là xoá đi tạo lại (mất `.env`, dễ lỡ tay mất cả database). Lệnh này `chown` lại mã nguồn sang user mới, ghi lại unit, restart.
+
+- **napp KHÔNG BAO GIỜ xoá user đi mượn.** `napp service remove --source` của một service `--run-as` giữ nguyên user (user thuộc về app web). Ở chiều ngược lại, `napp app remove --source` **từ chối** xoá user khi còn worker đang mượn, kèm danh sách worker phải gỡ trước — xoá user đi thì worker chết ngay lần khởi động sau với lỗi (`Failed to determine user credentials`) không hề nhắc tới app vừa gỡ.
+
+- **Đánh đổi phải biết:** dùng chung user là dùng chung **danh tính Unix**. Worker đọc/ghi được mọi thứ của app web kể cả `.env` (mật khẩu DB, khoá API), và ngược lại; một bên bị chiếm quyền là bên kia mất theo. napp cảnh báo rõ điều này ngay lúc tạo. Chỉ dùng khi hai bên là hai nửa của **cùng một sản phẩm**.
+
+- Menu tương tác hỏi thêm "worker này có đọc/ghi file của một app web không" và tự đề xuất dùng chung Redis DB với app đó. `napp service list` hiện cột `run-as=`.
+
 ## 1.18.0
 
 - **Sửa: Redis `maxmemory-policy` `volatile-lru` → `noeviction`.** BullMQ kiểm tra ngay lúc kết nối và báo `IMPORTANT! Eviction policy is volatile-lru. It should be "noeviction"`. Cảnh báo đó không phải chuyện thẩm mỹ: dữ liệu hàng đợi **không phải cache** — job đang chờ, khoá, kết quả chỉ tồn tại một bản. Với chính sách `*-lru`, khi chạm `maxmemory` Redis **tự trục xuất key** để nhường chỗ, job bốc hơi giữa chừng và **không bên nào báo lỗi** (BullMQ chỉ thấy job "không còn tồn tại").

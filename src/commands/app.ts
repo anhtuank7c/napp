@@ -17,6 +17,7 @@ import {
   serviceNameFor,
   svcSystemdName,
   slugFor,
+  servicesRunningAs,
   WWW_ROOT,
   NGINX_AVAILABLE,
   NGINX_ENABLED,
@@ -660,7 +661,19 @@ export async function cmdAppRemove(domain: string, opts: AppRemoveOptions): Prom
           warn(`Không xoá được thư mục mã nguồn ${app.webRoot} (${(e as Error).message}) — hãy tự xoá sau.`);
         }
       }
-      if (execCapture("id", [app.user]).code === 0) {
+      // Worker tạo với '--run-as <domain>' CHẠY BẰNG user này. Xoá user đi thì
+      // unit của worker chết ngay ở bước khởi động ("Failed to determine user
+      // credentials"), một lỗi không hề nhắc tới app vừa gỡ nên rất khó lần ra.
+      const borrowers = servicesRunningAs(app.domain, app.user);
+      if (borrowers.length > 0) {
+        warn(
+          `GIỮ LẠI user hệ thống '${app.user}' — ${borrowers.length} background service đang chạy bằng user này (--run-as):\n` +
+            borrowers.map((s) => `  - ${s.name}`).join("\n") +
+            `\n  Xoá user đi là các service đó chết ngay lần khởi động sau. Gỡ chúng trước nếu thật sự muốn xoá user:\n` +
+            borrowers.map((s) => `    sudo napp service remove ${s.name} --source`).join("\n") +
+            `\n  Lưu ý: thư mục ${app.webRoot} vừa xoá cũng nằm trong ReadWritePaths của chúng — systemd TỪ CHỐI khởi động unit khi đường dẫn đó không còn.`
+        );
+      } else if (execCapture("id", [app.user]).code === 0) {
         runCmd("userdel", ["-r", app.user], { silentFail: true });
         ok(`Đã xoá user hệ thống '${app.user}'.`);
       }

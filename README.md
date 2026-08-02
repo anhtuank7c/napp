@@ -94,7 +94,10 @@ Gõ số rồi Enter, `0` để quay lại/thoát.
 | `sudo napp app remove <domain> --source --db` | Xoá thêm mã nguồn và/hoặc database (`--keep-nginx`/`--keep-ssl` để giữ) |
 | `sudo napp service create <name> [--repo <url>] [--start-cmd <cmd>] [--runtime node\|bun] [--db] [--redis] [--port <n>] [--env K=V...]` | Tạo **background service** (chạy ngầm, không domain/nginx) |
 | ↳ `[--share-redis-with <domain>]` | **Bắt buộc** nếu service tiêu thụ hàng đợi của một web app |
+| ↳ `[--run-as <domain>]` | Chạy bằng **user của app web đã có** — bắt buộc nếu worker đọc/ghi FILE của app đó |
+| ↳ `[--write-dir <path>]` | Cấp thêm quyền GHI vào đường dẫn ngoài mã nguồn service (lặp lại được) |
 | ↳ `[--app-dir apps/worker]` | Monorepo: worker nằm trong thư mục con |
+| `sudo napp service set <name> [--run-as <domain>\|--standalone] [--write-dir <path>]` | Đổi **danh tính/quyền ghi** của service đã tạo |
 | `sudo napp service deploy <name>` | git pull + cài deps + build + restart service |
 | `sudo napp service list` | Liệt kê background service đang quản lý |
 | `sudo napp service restart\|stop\|start <name>` | Điều khiển service |
@@ -202,6 +205,56 @@ sudo napp service create metrics-agent --port 3500 --start-cmd "node agent.js"
 
 - Tạo user hệ thống `nas_<name>`, mã nguồn ở `/var/www/<name>-service`, systemd
   `napp-svc-<name>` (namespace tách biệt với app web).
+
+### Worker đụng vào FILE của một app web — `--run-as`
+
+Worker nén ảnh, sinh thumbnail hay dọn cache **trong thư mục của app web** thì
+user riêng không dùng được: thư mục app là `750`, file `640`, thuộc user của app
+— user khác đọc còn không nổi. Nới quyền thư mục ra cho hai user là mở luôn cho
+mọi thứ khác trên máy. Cách đúng là cho worker **chạy bằng chính user của app**:
+
+```bash
+sudo napp app create shop.example.com --repo ... --redis
+sudo napp service create shop-images \
+  --repo git@github.com:you/image-worker.git \
+  --run-as shop.example.com \
+  --share-redis-with shop.example.com \
+  --start-cmd "node compress.js"
+```
+
+`--run-as` làm hai việc, và **thiếu một trong hai là hỏng**:
+
+| Lớp chặn | Triệu chứng khi thiếu | `--run-as` xử lý |
+|---|---|---|
+| Quyền Unix (`750`/`640` của user app) | `EACCES` | `User=`/`Group=` của unit là user app |
+| Sandbox systemd (`ProtectSystem=strict`) | `EROFS` dù `ls -l` trông đúng quyền | Thêm thư mục app vào `ReadWritePaths=` |
+
+Cần ghi vào chỗ **khác** nữa (thư mục dùng chung, kho ảnh ngoài `/var/www`) thì
+thêm `--write-dir /đường/dẫn` — lặp lại được. Đường dẫn phải **tồn tại sẵn**:
+systemd từ chối khởi động unit nếu `ReadWritePaths` trỏ vào chỗ không có, và
+thông báo lỗi lúc đó (`Failed to set up mount namespacing`) không hề nói đường
+dẫn nào sai.
+
+> **Đánh đổi: mất cô lập.** Worker và app web là **cùng một danh tính Unix** —
+> worker đọc/ghi được mọi thứ của app, kể cả `.env` (mật khẩu DB, khoá API), và
+> ngược lại. Một bên bị chiếm quyền là bên kia mất theo. Chỉ dùng khi hai bên là
+> hai nửa của **cùng một sản phẩm**; worker độc lập (bot, cron poller, worker
+> của sản phẩm khác) thì **bỏ `--run-as`** để giữ user riêng — đó vẫn là mặc định.
+>
+> Đổi lại, napp **không bao giờ xoá user đi mượn**: `napp service remove --source`
+> giữ nguyên user, và `napp app remove --source` từ chối xoá user khi còn worker
+> đang mượn (kèm danh sách worker cần gỡ trước).
+
+Nhu cầu này thường lộ ra **sau** khi worker đã chạy được vài tuần, nên không phải
+xoá đi tạo lại:
+
+```bash
+sudo napp service set shop-images --run-as shop.example.com   # mượn user app web
+sudo napp service set shop-images --standalone                # quay về user riêng
+sudo napp service set shop-images --write-dir /mnt/media      # đặt lại danh sách ghi thêm
+```
+
+Lệnh này `chown` lại mã nguồn sang user mới, ghi lại unit và restart service.
 
 > **Worker của một web app phải dùng CHUNG Redis DB với web app đó.** `--redis`
 > cấp cho mỗi đơn vị một DB riêng — đúng với hai sản phẩm khác nhau, sai với hai

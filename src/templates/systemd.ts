@@ -21,6 +21,11 @@ interface UnitSpec {
   // ProtectSystem=strict khiến mọi đường dẫn ngoài danh sách này thành chỉ-đọc,
   // và lỗi khi đó là EROFS lúc chạy chứ không phải lỗi lúc khởi động.
   rootDir?: string;
+  // Đường dẫn GHI ĐƯỢC nằm ngoài rootDir — worker chạy bằng user của một app
+  // web (`--run-as`) cần ghi vào thư mục của app đó (nén ảnh, dọn cache, sinh
+  // thumbnail). Quyền Unix thôi không đủ: ProtectSystem=strict khiến mọi thứ
+  // ngoài ReadWritePaths là chỉ-đọc, và lỗi là EROFS lúc chạy.
+  extraWritePaths?: string[];
   logBase: string; // tiền tố file log: <logBase>.out.log / <logBase>.error.log
   execStart: string;
   nodeOptions?: string; // MẶC ĐỊNH (đặt trước EnvironmentFile, .env ghi đè được)
@@ -41,6 +46,9 @@ export function unitWorkDir(root: string, appDir?: string): string {
 function renderUnit(spec: UnitSpec): string {
   const nodeOptionsLine = spec.nodeOptions ? `Environment=NODE_OPTIONS=${spec.nodeOptions}\n` : "";
   const forcedEnvLines = spec.forcedEnv.map((e) => `Environment=${e}`).join("\n");
+  // Nhiều đường dẫn cách nhau bằng dấu cách trên MỘT dòng ReadWritePaths. Bỏ
+  // trùng để không lặp lại rootDir khi ai đó truyền đúng nó qua --write-dir.
+  const writePaths = [...new Set([spec.rootDir ?? spec.workDir, ...(spec.extraWritePaths ?? [])])];
   return `${spec.headerComment}
 [Unit]
 Description=${spec.description}
@@ -69,7 +77,7 @@ ProtectSystem=strict
 # home (bun ~/.bun, node ~/.npm) mà không lộ dữ liệu người dùng.
 ProtectHome=tmpfs
 PrivateTmp=yes
-ReadWritePaths=${spec.rootDir ?? spec.workDir}
+ReadWritePaths=${writePaths.join(" ")}
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
@@ -116,11 +124,12 @@ export function renderServiceSystemdService(svc: ServiceRecord, execStart: strin
   const forcedEnv = [`NODE_ENV=production`];
   if (svc.port !== undefined) forcedEnv.push(`PORT=${svc.port}`);
   return renderUnit({
-    headerComment: `# Managed by napp — service: ${svc.name}`,
+    headerComment: `# Managed by napp — service: ${svc.name}${svc.runAsUnit ? ` (chạy bằng user của '${svc.runAsUnit}')` : ""}`,
     description: `napp background service - ${svc.name}`,
     user: svc.user,
     workDir: unitWorkDir(svc.workDir, svc.appDir),
     rootDir: svc.workDir,
+    extraWritePaths: svc.writePaths,
     logBase: `/var/log/napp/${svc.name}`,
     execStart,
     nodeOptions: opts.nodeOptions,

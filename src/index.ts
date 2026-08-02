@@ -27,6 +27,7 @@ import {
   cmdServiceStart,
   cmdServiceLogs,
   cmdServiceEnvSet,
+  cmdServiceSet,
 } from "./commands/service";
 import { cmdDomainAdd, cmdDomainRemove, cmdDomainList } from "./commands/domain";
 import { cmdCertIssue, cmdCertRenew, cmdCertRevoke, cmdCertList, cmdCertStatus } from "./commands/cert";
@@ -282,6 +283,16 @@ service
   .option("--redis-db <n>", "dùng Redis DB CHỈ ĐỊNH (cho phép dùng CHUNG với đơn vị khác)", (v) => parseInt(v, 10))
   .option("--share-redis-with <domain|name>", "dùng CHUNG Redis DB với app/service đã có — BẮT BUỘC nếu service này tiêu thụ hàng đợi của một web app")
   .option("--app-dir <path>", "monorepo: thư mục con chứa worker, tương đối so với mã nguồn (vd 'apps/worker')")
+  .option(
+    "--run-as <domain|name>",
+    "chạy worker bằng user hệ thống của app/service ĐÃ CÓ (thay vì user riêng) — cần khi worker đọc/ghi FILE của app đó, vd nén ảnh trong thư mục upload"
+  )
+  .option(
+    "--write-dir <path>",
+    "cấp thêm quyền GHI vào đường dẫn tuyệt đối ngoài mã nguồn service (ReadWritePaths), lặp lại được",
+    (v, prev: string[]) => [...prev, v],
+    [] as string[]
+  )
   .option("--env <KEY=VALUE...>", "biến môi trường bổ sung, có thể lặp lại nhiều lần", (v, prev: string[]) => [...prev, v], [] as string[])
   .action(async (name, opts) => {
     await cmdServiceCreate(name, {
@@ -300,6 +311,8 @@ service
       redisDb: opts.redisDb,
       shareRedisWith: opts.shareRedisWith,
       appDir: opts.appDir,
+      runAs: opts.runAs,
+      writeDirs: opts.writeDir ?? [],
       env: opts.env ?? [],
     });
   });
@@ -308,6 +321,26 @@ service
   .command("deploy <name>")
   .description("git pull + cài dependencies + build + restart service")
   .action(async (name) => cmdServiceDeploy(name));
+
+service
+  .command("set <name>")
+  .description("đổi DANH TÍNH/QUYỀN GHI của service đã tạo (chạy bằng user app web, hoặc quay về user riêng)")
+  .option("--run-as <domain|name>", "chuyển sang chạy bằng user hệ thống của app/service đã có")
+  .option("--standalone", "quay về user hệ thống RIÊNG của service (cô lập hoàn toàn)")
+  // prev có thể KHÔNG phải mảng: '--no-write-dir --write-dir /x' đặt giá trị
+  // thành false trước rồi mới gọi reducer -> [...false] ném TypeError thô ra
+  // màn hình. Bỏ qua false và để --write-dir đứng sau thắng.
+  .option("--write-dir <path>", "đặt lại danh sách đường dẫn được GHI thêm (lặp lại được, thay thế danh sách cũ)", (v, prev: string[] | false) => [...(Array.isArray(prev) ? prev : []), v], [] as string[])
+  .option("--no-write-dir", "bỏ hết đường dẫn ghi thêm")
+  .action(async (name, opts) =>
+    cmdServiceSet(name, {
+      runAs: opts.runAs,
+      standalone: Boolean(opts.standalone),
+      // commander: --no-write-dir biến opts.writeDir thành false
+      writeDirs: Array.isArray(opts.writeDir) ? opts.writeDir : [],
+      clearWriteDirs: opts.writeDir === false,
+    })
+  );
 
 service
   .command("remove <name>")

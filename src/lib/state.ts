@@ -86,6 +86,15 @@ export interface ServiceRecord {
   redisDbIndex?: number;
   // Như AppRecord.appDir — monorepo: WorkingDirectory/.env trỏ vào thư mục con.
   appDir?: string;
+  // Đơn vị (domain web app hoặc name service) mà service này MƯỢN user hệ thống
+  // (`--run-as`). Bỏ trống = service có user riêng do napp tạo, cô lập hoàn toàn.
+  // Có giá trị = user thuộc về đơn vị kia, nên napp KHÔNG BAO GIỜ được xoá user
+  // đó khi gỡ service này (xoá là app web mất luôn danh tính đang chạy).
+  runAsUnit?: string;
+  // Đường dẫn NGOÀI workDir mà unit được phép ghi. Cần vì ProtectSystem=strict
+  // biến toàn bộ filesystem thành chỉ-đọc: worker nén ảnh trong thư mục của app
+  // web có đúng quyền Unix vẫn ăn EROFS nếu đường dẫn không nằm ở đây.
+  writePaths?: string[];
   createdAt: string;
   updatedAt: string;
 }
@@ -266,6 +275,39 @@ export function redisDbOf(identifier: string): number {
     );
   }
   return unit.redisDbIndex;
+}
+
+/**
+ * Một đơn vị napp đang quản lý, tra bằng domain (app web) HOẶC name (service).
+ * `root` là gốc mã nguồn của nó — cũng chính là thứ cần cấp quyền ghi cho
+ * worker mượn user (xem ServiceRecord.writePaths).
+ */
+export interface UnitRef {
+  kind: "app" | "service";
+  id: string; // domain hoặc name
+  user: string;
+  root: string;
+  redisDbIndex?: number;
+}
+
+export function findUnit(identifier: string): UnitRef | undefined {
+  const s = loadState();
+  const app = s.apps[identifier];
+  if (app) return { kind: "app", id: app.domain, user: app.user, root: app.webRoot, redisDbIndex: app.redisDbIndex };
+  const svc = s.services[identifier];
+  if (svc) return { kind: "service", id: svc.name, user: svc.user, root: svc.workDir, redisDbIndex: svc.redisDbIndex };
+  return undefined;
+}
+
+/**
+ * Các service đang MƯỢN user của đơn vị `identifier` (hoặc mượn đúng user đó).
+ *
+ * Dùng để chặn `napp app remove --source` xoá mất user mà worker đang chạy
+ * bằng: user biến mất thì unit của worker chết ngay ở bước khởi động, và lỗi
+ * đó không liên quan gì tới lệnh vừa gõ nên rất khó lần ra.
+ */
+export function servicesRunningAs(identifier: string, user?: string): ServiceRecord[] {
+  return Object.values(loadState().services).filter((s) => s.runAsUnit === identifier || (user !== undefined && s.runAsUnit !== undefined && s.user === user));
 }
 
 export function slugFor(domain: string): string {

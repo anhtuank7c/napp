@@ -13,7 +13,7 @@ import {
 } from "./service";
 import type { Runtime, PackageManager } from "../lib/state";
 import { cmdCertIssue, cmdCertRenew, cmdCertList, cmdCertRevoke } from "./cert";
-import { getAcmeEmail } from "../lib/state";
+import { getAcmeEmail, findUnit } from "../lib/state";
 import { cmdDbCreate, cmdDbList, cmdDbBackup } from "./db";
 import { cmdRedisAllocations, cmdRedisInfo } from "./redis";
 import { cmdBackupRun, cmdBackupSchedule, cmdBackupList, cmdBackupUnschedule, DEFAULT_RETENTION_DAYS } from "./backup";
@@ -326,8 +326,24 @@ async function menuService(): Promise<void> {
           const p = parseInt((await ask("Cổng nội bộ (Enter = tự cấp 3000-3999): ")).trim(), 10);
           if (Number.isInteger(p)) port = p;
         }
+        // Worker "nửa kia của một app web" (nén ảnh, sinh thumbnail, dọn cache)
+        // phải chạy BẰNG user của app đó mới đọc/ghi được file của nó — thư mục
+        // app là 750 của user riêng, user khác không vào nổi.
+        let runAs: string | undefined;
+        if (await askYesNo("Worker này có đọc/ghi FILE của một app web đã có không (nén ảnh, thumbnail, dọn cache)?")) {
+          runAs = await askAppDomain("chạy chung user hệ thống (worker sẽ ghi được vào thư mục của app này)");
+        }
         const db = await askYesNo("Tạo database MariaDB riêng cho service này?");
         const redis = await askYesNo("Cấp Redis DB riêng cho service này?");
+        // Dùng chung user gần như luôn đi kèm dùng chung hàng đợi. Chỉ hỏi khi
+        // app kia thật sự có Redis DB, tránh dẫn người dùng vào lựa chọn chết.
+        const sharedRedis = runAs ? findUnit(runAs)?.redisDbIndex : undefined;
+        let shareRedisWith: string | undefined;
+        if (redis && runAs && sharedRedis !== undefined) {
+          if (await askYesNo(`Dùng CHUNG Redis DB #${sharedRedis} với '${runAs}' (BẮT BUỘC nếu worker tiêu thụ hàng đợi của app đó)?`, true)) {
+            shareRedisWith = runAs;
+          }
+        }
         await cmdServiceCreate(name, {
           repo: repo || undefined,
           branch: "main",
@@ -339,6 +355,9 @@ async function menuService(): Promise<void> {
           port,
           db,
           redis,
+          shareRedisWith,
+          runAs,
+          writeDirs: [],
           env: [],
         });
       });

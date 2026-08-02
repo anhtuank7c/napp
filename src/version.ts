@@ -16,6 +16,27 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.19.0
+- 'napp service create --run-as <domain|name>': worker chạy bằng USER CỦA APP
+  WEB đã có thay vì user riêng. Cần khi worker đụng FILE của app (nén ảnh trong
+  thư mục upload, thumbnail, dọn cache): thư mục app là 750 / file 640 của user
+  app nên user riêng ĐỌC CÒN KHÔNG NỔI, mà nới quyền ra cho hai user là mở luôn
+  cho mọi thứ khác. --run-as gỡ CẢ HAI lớp chặn: quyền Unix (thiếu -> EACCES)
+  và sandbox systemd ProtectSystem=strict (thiếu -> EROFS dù ls -l trông đúng).
+  Không truyền thì service vẫn có user riêng, cô lập như cũ.
+- '--write-dir <path>' (lặp lại được): cấp quyền ghi vào đường dẫn ngoài mã
+  nguồn service. Đường dẫn phải TỒN TẠI — systemd từ chối khởi động unit nếu
+  ReadWritePaths trỏ vào chỗ không có, nên napp kiểm tra ngay lúc tạo.
+- 'napp service set <name> [--run-as <u>|--standalone] [--write-dir <p>]': đổi
+  danh tính/quyền ghi của service ĐÃ TẠO (chown mã nguồn, ghi lại unit,
+  restart). Trước đây phải xoá đi tạo lại, mất .env.
+- napp KHÔNG BAO GIỜ xoá user đi mượn: 'service remove --source' giữ user, và
+  'app remove --source' từ chối xoá user khi còn worker đang mượn (kèm danh
+  sách worker phải gỡ trước).
+- ĐÁNH ĐỔI: dùng chung user = dùng chung DANH TÍNH UNIX. Worker đọc/ghi được
+  mọi thứ của app web kể cả .env; một bên bị chiếm quyền là bên kia mất theo.
+  Chỉ dùng cho hai nửa của CÙNG một sản phẩm.
+
 ## 1.18.0
 - SỬA: Redis maxmemory-policy volatile-lru -> noeviction. BullMQ kiểm tra lúc
   kết nối và báo 'IMPORTANT! Eviction policy is volatile-lru. It should be
