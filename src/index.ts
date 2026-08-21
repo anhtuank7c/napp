@@ -78,6 +78,11 @@ Sau khi cập nhật napp (bản cũ để lại cấu hình đã hỏng, không
                                     route SvelteKit lồng sâu
   sudo napp check                báo Redis còn maxmemory-policy khác noeviction
                                  (BullMQ mất job) và vhost nào còn bộ đệm cũ
+  sudo napp tune apply --sync-units
+                                 đẩy hardening mới xuống unit systemd tạo từ bản
+                                 napp cũ. Không có cờ này, tune apply chỉ sửa
+                                 đúng dòng --max-old-space-size và không đụng
+                                 ExecStart/Standard*/User/Group bạn sửa tay
 
 Worker của một app web (hai nửa của cùng một sản phẩm):
   sudo napp service create <name> --run-as <domain> --share-redis-with <domain>
@@ -537,7 +542,19 @@ tune
   .option("--db-ram-percent <n>", "ghi đè % RAM dành cho InnoDB buffer pool", (v) => parseInt(v, 10))
   .option("-y, --yes", "không hỏi xác nhận")
   .option("--skip-restart", "chỉ ghi file cấu hình, không restart service")
-  .action(async (opts) => cmdTuneApply({ dbRamPercent: opts.dbRamPercent, yes: Boolean(opts.yes), skipRestart: Boolean(opts.skipRestart) }));
+  .option(
+    "--sync-units",
+    "render lại TOÀN BỘ unit systemd từ template (đồng bộ hardening mới xuống unit cũ). " +
+      "Mặc định chỉ sửa đúng dòng --max-old-space-size; directive bạn sửa tay vẫn được giữ trong cả hai chế độ"
+  )
+  .action(async (opts) =>
+    cmdTuneApply({
+      dbRamPercent: opts.dbRamPercent,
+      yes: Boolean(opts.yes),
+      skipRestart: Boolean(opts.skipRestart),
+      syncUnits: Boolean(opts.syncUnits),
+    })
+  );
 
 // ----------------------------------------------------------- cloudflare ---
 const cloudflare = program.command("cloudflare").description("đồng bộ Cloudflare");

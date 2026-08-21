@@ -1,5 +1,5 @@
 import { existsSync, rmSync } from "node:fs";
-import { execCapture, runCmd, runAs, ensureDir, requireRoot, writeFile } from "../lib/exec";
+import { execCapture, runCmd, runAs, ensureDir, requireRoot } from "../lib/exec";
 import { info, ok, warn, die, section } from "../lib/log";
 import { validateServiceName, validatePort, validateRepoUrl, validateBranch, validateEnvKey } from "../lib/validate";
 import {
@@ -26,12 +26,12 @@ import {
 import { acquireLock } from "../lib/lock";
 import { createDatabase, dropDatabase } from "../lib/mysql";
 import { mergeEnvFile } from "../lib/envfile";
-import { renderServiceSystemdService, execStartLine, unitWorkDir } from "../templates/systemd";
+import { unitWorkDir } from "../templates/systemd";
 import { detectHardware } from "../lib/hardware";
 import { nodeMaxOldSpaceMB } from "../templates/tuning";
 import { GIT_NONINTERACTIVE_ENV, prepareRepoAuth, setupRepoAuth } from "../lib/repo";
 import { defaultPackageManager, defaultInstallCmd, defaultStartCmd, ensurePackageManager, ensureRuntime } from "../lib/provision";
-import { applyNodeHeaps } from "./app";
+import { applyNodeHeaps, writeServiceUnit, currentHeapMB } from "./app";
 
 export interface CreateServiceOptions {
   port?: number; // KHÔNG cấp cổng trừ khi truyền — service thuần worker không listen gì
@@ -363,14 +363,15 @@ EOF`,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
-    const unitPath = `${SYSTEMD_DIR}/${unitName}.service`;
     // Heap V8 chỉ đặt cho runtime node. Chia theo TỔNG số đơn vị node (app + service)
     // SAU khi thêm service này để cân đối RAM; user có thể ghi đè NODE_OPTIONS trong .env.
     const st = loadState();
     const totalUnitsAfter = Object.keys(st.apps).length + Object.keys(st.services).length + 1;
-    const nodeOptions = opts.runtime === "node" ? `--max-old-space-size=${nodeMaxOldSpaceMB(detectHardware(), totalUnitsAfter)}` : undefined;
-    writeFile(unitPath, renderServiceSystemdService(record, execStartLine(startCmd), { nodeOptions }), 0o644);
-    if (nodeOptions) info(`NODE_OPTIONS=${nodeOptions} (heap V8 chia cho ${totalUnitsAfter} đơn vị node; đổi trong .env nếu cần)`);
+    const heapMB = nodeMaxOldSpaceMB(detectHardware(), totalUnitsAfter);
+    // Service mới -> unit chưa có, writeServiceUnit ghi thẳng bản template kèm
+    // fingerprint để lần sửa tay đầu tiên của người dùng được nhận ra và giữ lại.
+    writeServiceUnit(record, heapMB);
+    if (opts.runtime === "node") info(`NODE_OPTIONS=--max-old-space-size=${heapMB} (heap V8 chia cho ${totalUnitsAfter} đơn vị node; đổi trong .env nếu cần)`);
     runCmd("systemctl", ["daemon-reload"]);
     runCmd("systemctl", ["enable", unitName]);
     runCmd("systemctl", ["restart", unitName]);
@@ -526,9 +527,12 @@ export async function cmdServiceSet(name: string, opts: ServiceSetOptions): Prom
     svc.updatedAt = new Date().toISOString();
     upsertService(svc);
 
-    // applyNodeHeaps ghi lại unit của MỌI đơn vị (kèm heap V8 đúng) rồi
-    // daemon-reload — dùng luôn thay vì render riêng một unit ở đây.
-    applyNodeHeaps({ restart: false });
+    // User/Group/ReadWritePaths trong unit vừa đổi theo registry -> phải render
+    // lại unit NÀY. `authoritative` nói rõ User/Group lần này do napp quyết
+    // định: đây chính là thứ người dùng vừa yêu cầu đổi, giữ bản sửa tay cũ ở
+    // đây là làm ngược lại ý họ. Các directive khác họ sửa vẫn được giữ nguyên.
+    writeServiceUnit(svc, currentHeapMB(), ["User", "Group"]);
+    runCmd("systemctl", ["daemon-reload"]);
     runCmd("systemctl", ["restart", svcSystemdName(name)]);
 
     if (svc.runAsUnit) {

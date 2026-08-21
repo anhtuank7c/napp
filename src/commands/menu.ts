@@ -516,7 +516,7 @@ async function menuInfra(): Promise<void> {
     else if (choice === "9") await guard(() => cmdNginxUnharden());
     else if (choice === "10") await guard(() => cmdNginxSync());
     else if (choice === "11") await guard(() => cmdTuneShow());
-    else if (choice === "12") await guard(() => cmdTuneApply({ yes: false, skipRestart: false }));
+    else if (choice === "12") await guard(() => cmdTuneApply({ yes: false, skipRestart: false, syncUnits: false }));
   }
 }
 

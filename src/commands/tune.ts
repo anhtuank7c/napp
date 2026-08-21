@@ -12,7 +12,7 @@ import {
 } from "../templates/tuning";
 import { renderNginxTuningConf, NGINX_TUNING_CONF } from "../templates/nginx";
 import { loadState } from "../lib/state";
-import { applyNodeHeaps } from "./app";
+import { applyNodeHeaps, syncAllUnits } from "./app";
 import { readFileSync, existsSync } from "node:fs";
 
 export function cmdTuneShow(): void {
@@ -36,6 +36,11 @@ export interface TuneApplyOptions {
   dbRamPercent?: number;
   yes: boolean;
   skipRestart: boolean;
+  // Render lại TOÀN BỘ unit systemd từ template thay vì chỉ vá con số heap.
+  // Mặc định TẮT: đường chạy này đổi nhiều dòng, và unit là nơi người dùng hay
+  // sửa tay nhất (ExecStart, StandardOutput/Error, User, Group) — chạm vào nó
+  // phải là một quyết định của người dùng, không phải tác dụng phụ của lệnh tune.
+  syncUnits: boolean;
 }
 
 // Patch worker_processes/worker_connections trong khối `events {}` /
@@ -158,15 +163,25 @@ export async function cmdTuneApply(opts: TuneApplyOptions): Promise<void> {
     warn("Redis chưa cài — bỏ qua.");
   }
 
-  // Các app: ghi lại unit systemd để (1) cập nhật NODE_OPTIONS heap V8 (chia theo
-  // số app) cho app node, (2) đồng bộ hardening mới (ProtectHome=tmpfs) sang cả
-  // app cũ. Ghi file luôn (idempotent); chỉ restart khi không --skip-restart.
+  // Các app: cân đối lại heap V8 (chia theo tổng số đơn vị node). Mặc định CHỈ
+  // vá đúng con số trong --max-old-space-size, không đụng dòng nào khác của unit
+  // — xem applyNodeHeaps. Muốn đẩy cả phần template mới xuống unit cũ thì dùng
+  // --sync-units. Chỉ restart khi không --skip-restart.
   if (appCount > 0) {
-    const heapMB = applyNodeHeaps({ restart: !opts.skipRestart });
-    if (!opts.skipRestart) {
-      ok(`Đã cập nhật unit + NODE_OPTIONS cho ${appCount} app và khởi động lại (app node: heap ${heapMB} MB/app).`);
+    if (opts.syncUnits) {
+      const heapMB = syncAllUnits({ restart: !opts.skipRestart });
+      ok(
+        `Đã render lại unit systemd cho ${appCount} đơn vị (heap ${heapMB} MB/đơn vị)` +
+          (opts.skipRestart ? " — chưa restart do --skip-restart." : " và khởi động lại.")
+      );
     } else {
-      ok(`Đã ghi lại unit cho ${appCount} app (chưa restart do --skip-restart — chạy 'napp app restart <domain>' để áp).`);
+      const heapMB = applyNodeHeaps({ restart: !opts.skipRestart });
+      ok(
+        `Đã cân đối heap V8 về ${heapMB} MB/đơn vị cho ${appCount} đơn vị (chỉ sửa dòng --max-old-space-size, ` +
+          `phần còn lại của unit giữ nguyên)` +
+          (opts.skipRestart ? " — chưa restart do --skip-restart, chạy 'napp app restart <domain>' để áp." : " và khởi động lại đơn vị có thay đổi.")
+      );
+      info("Muốn đồng bộ luôn phần hardening/template mới xuống unit cũ: napp tune apply --sync-units");
     }
   }
 

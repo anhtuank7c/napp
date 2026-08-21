@@ -315,6 +315,45 @@ sudo napp service remove queue-email       # gỡ (mặc định giữ mã ngu�
 
 ---
 
+## ✍️ Sửa tay unit systemd
+
+Unit napp sinh ra là **file bình thường, sửa tay được**. Việc hay gặp: đổi
+`ExecStart` (thêm cờ runtime, đổi entrypoint), đẩy log sang journal thay vì file
+(`StandardOutput`/`StandardError`), hoặc chạy bằng `User`/`Group` khác.
+
+napp nhận ra phần bạn đã sửa và **giữ nguyên** ở những lần ghi sau:
+
+```ini
+# Managed by napp — site: api.example.com
+# napp-fingerprint: 3f9c…            <- napp so dòng này với nội dung file
+# napp-preserve: ExecStart StandardOutput
+#   ^ directive do BẠN làm chủ — napp sẽ không ghi đè
+```
+
+- **fingerprint** là băm của phần còn lại trong file. Khớp = file còn nguyên bản
+  napp; lệch (hoặc không có, với unit tạo từ bản napp cũ) = đã có người sửa.
+- Khi phát hiện file đã sửa, napp so từng directive; cái nào bạn đổi thì lấy bản
+  của bạn và ghi tên vào dòng `# napp-preserve:` để **lần ghi sau vẫn nhớ**.
+- Bạn có thể **tự thêm** dòng `# napp-preserve: Tên1 Tên2` để khoá trước một
+  directive, kể cả khi chưa sửa gì.
+
+Directive được giữ: `ExecStart*`, `ExecStop*`, `ExecReload`, `Standard*`,
+`SyslogIdentifier`, `User`, `Group`, `UMask`, `WorkingDirectory`, `Restart*`,
+`Timeout*Sec`, `LimitNOFILE`, `Nice`, `OOMScoreAdjust`, `MemoryMax`,
+`MemoryHigh`, `CPUQuota`.
+
+Hai ngoại lệ có chủ đích — napp **vẫn** làm chủ:
+
+- **Phần hardening** (`ProtectSystem`, `NoNewPrivileges`, `ReadWritePaths`…)
+  không nằm trong danh sách trên, để bản vá bảo mật còn đường lan tới unit cũ.
+- **Directive chính bạn vừa ra lệnh đổi.** Ví dụ `napp service set --run-as`
+  đổi `User`/`Group`: giữ bản sửa tay ở đây là làm ngược lại thứ bạn vừa gõ,
+  nên napp ghi đè và **báo rõ** directive nào vừa bị đặt lại.
+
+Sau khi sửa tay: `sudo systemctl daemon-reload && sudo systemctl restart <unit>`.
+
+---
+
 ## 🔐 Bảo mật mặc định
 
 - Mỗi app: user Linux riêng (`nologin`), thư mục `750`, file `640`, `.env` `600`
@@ -430,13 +469,23 @@ gợi ý nâng cấp OS hoặc chuyển sang [kho chính thức nginx.org](https
 ## ⚙️ Tối ưu theo phần cứng
 
 ```bash
-sudo napp tune show    # xem phần cứng phát hiện được + kế hoạch (chưa áp dụng)
+sudo napp tune show     # xem phần cứng phát hiện được + kế hoạch (chưa áp dụng)
 sudo napp tune apply    # áp: nginx worker/gzip, MariaDB innodb_buffer_pool, Redis maxmemory, sysctl,
-                        # và NODE_OPTIONS heap cho từng app node (ghi lại unit + restart app)
+                        # và cân đối heap V8 cho từng app node
+sudo napp tune apply --sync-units   # + render lại toàn bộ unit systemd từ template
 ```
 
 Chạy `napp tune apply` **bất cứ khi nào nâng cấp phần cứng server** (thêm
 RAM/CPU) để tự động tính lại và áp cấu hình phù hợp — không cần tính tay.
+
+> **Cân đối heap CHỈ sửa đúng một dòng.** `napp tune apply` (và mọi lần
+> tạo/xoá app làm heap phải chia lại) chỉ thay con số trong
+> `--max-old-space-size` của dòng `Environment=NODE_OPTIONS` — không render lại
+> unit, không đụng `ExecStart` / `StandardOutput` / `StandardError` / `User` /
+> `Group` hay dòng nào khác. Chỉ những unit thực sự đổi số mới bị restart.
+> Muốn đẩy cả phần template mới (hardening, `ReadWritePaths`) xuống unit tạo từ
+> bản napp cũ thì thêm `--sync-units` — bản sửa tay của bạn vẫn được giữ, xem
+> mục dưới.
 
 > **Redis `maxmemory-policy` = `noeviction`.** BullMQ kiểm tra ngay lúc kết nối
 > và báo `IMPORTANT! Eviction policy is volatile-lru. It should be "noeviction"`.

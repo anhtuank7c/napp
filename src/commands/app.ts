@@ -4,6 +4,7 @@ import { info, ok, warn, die, section } from "../lib/log";
 import { validateDomain, validatePort, validateRepoUrl, validateBranch, validateEnvKey } from "../lib/validate";
 import {
   AppRecord,
+  ServiceRecord,
   Runtime,
   PackageManager,
   getApp,
@@ -30,6 +31,7 @@ import { mergeEnvFile } from "../lib/envfile";
 import { renderAppNginxConf, renderAppLocationsConf, appLocationsPath, NGINX_LOCATIONS_DIR } from "../templates/nginx";
 import { ensureNappProxyConf } from "./nginx";
 import { renderAppSystemdService, renderServiceSystemdService, execStartLine, unitWorkDir } from "../templates/systemd";
+import { writeManagedUnit, patchUnitHeap, type UnitWriteResult } from "../lib/unitfile";
 import { detectHardware } from "../lib/hardware";
 import { nodeMaxOldSpaceMB } from "../templates/tuning";
 import { ipv6Available } from "../lib/network";
@@ -63,13 +65,54 @@ export interface CreateAppOptions {
   addressHeader?: boolean; // đặt ADDRESS_HEADER/XFF_DEPTH cho adapter-node
 }
 
-// Cân đối heap V8 giữa TẤT CẢ đơn vị chạy Node trên máy — web app VÀ background
-// service: heap mỗi đơn vị node = ngân sách RAM / tổng số đơn vị (xem
-// nodeMaxOldSpaceMB). Ghi lại unit systemd cho mọi đơn vị (đồng thời đồng bộ
-// hardening mới), daemon-reload, và tùy chọn restart để áp ngay. Gọi khi số app/
-// service thay đổi (tạo/xoá) và khi `napp tune apply`. Background service cũng ăn
-// RAM nên phải tính vào mẫu số, nếu không tổng heap sẽ vượt RAM khi có nhiều
-// worker. Trả về số MB heap/đơn vị đã áp (0 nếu không có đơn vị nào).
+// Render lại TOÀN BỘ unit của một app web từ registry, giữ nguyên các directive
+// người dùng đã sửa tay (xem lib/unitfile). Dùng khi cấu hình trong registry đổi
+// (tạo app, đổi user/thư mục ghi) — KHÔNG dùng cho việc chỉ đổi con số heap.
+export function writeAppUnit(app: AppRecord, heapMB: number, authoritative: string[] = []): void {
+  const nodeOptions = app.nodeRuntime === "node" ? `--max-old-space-size=${heapMB}` : undefined;
+  const path = `${SYSTEMD_DIR}/${serviceNameFor(app.domain)}.service`;
+  reportUnitWrite(path, writeManagedUnit(path, renderAppSystemdService(app, execStartLine(app.startCmd), { nodeOptions }), { authoritative }));
+}
+
+/** Như writeAppUnit nhưng cho background service. */
+export function writeServiceUnit(svc: ServiceRecord, heapMB: number, authoritative: string[] = []): void {
+  const nodeOptions = svc.nodeRuntime === "node" ? `--max-old-space-size=${heapMB}` : undefined;
+  const path = `${SYSTEMD_DIR}/${svcSystemdName(svc.name)}.service`;
+  reportUnitWrite(path, writeManagedUnit(path, renderServiceSystemdService(svc, execStartLine(svc.startCmd), { nodeOptions }), { authoritative }));
+}
+
+// Người dùng phải BIẾT napp vừa giữ lại (hoặc buộc phải ghi đè) directive nào —
+// im lặng ở đây là cách nhanh nhất để tưởng nhầm bản sửa tay đã mất.
+function reportUnitWrite(path: string, res: UnitWriteResult): void {
+  if (res.preserved.length > 0) info(`${path}: giữ nguyên directive bạn đã sửa (${res.preserved.join(", ")}).`);
+  if (res.overridden.length > 0) {
+    warn(
+      `${path}: napp buộc phải đặt lại ${res.overridden.join(", ")} theo cấu hình mới trong registry — ` +
+        `bản sửa tay của bạn ở các directive này KHÔNG còn.`
+    );
+  }
+}
+
+// Heap V8 mỗi đơn vị node theo phần cứng hiện tại và TỔNG số đơn vị (web app +
+// background service). Background service cũng ăn RAM nên phải tính vào mẫu số,
+// nếu không tổng heap sẽ vượt RAM khi có nhiều worker.
+export function currentHeapMB(): number {
+  const s = loadState();
+  const total = Object.keys(s.apps).length + Object.keys(s.services).length;
+  return total === 0 ? 0 : nodeMaxOldSpaceMB(detectHardware(), total);
+}
+
+// Cân đối heap V8 giữa TẤT CẢ đơn vị chạy Node trên máy. Gọi khi số app/service
+// thay đổi (tạo/xoá) và khi `napp tune apply`. Trả về số MB heap/đơn vị đã áp
+// (0 nếu không có đơn vị nào).
+//
+// CHỈ SỬA ĐÚNG MỘT THỨ: con số trong '--max-old-space-size' của dòng
+// Environment=NODE_OPTIONS. Không render lại unit, không đụng ExecStart /
+// StandardOutput / StandardError / User / Group hay bất kỳ dòng nào khác — đây
+// là đường chạy ngầm và chạy thường xuyên nhất, render lại cả file ở đây là cách
+// chắc chắn nhất để một ngày nào đó thổi bay cấu hình sửa tay và làm app chết
+// ngay lúc restart. Unit nào chưa tồn tại (registry và hệ thống lệch nhau) mới
+// được dựng lại từ template.
 //
 // skipRestartFor: bỏ qua restart đơn vị có định danh này (domain HOẶC name) — dùng
 // khi đơn vị vừa tạo đã chạy với heap đúng rồi, chỉ cần restart các đơn vị cũ.
@@ -80,26 +123,69 @@ export function applyNodeHeaps(opts: { restart: boolean; skipRestartFor?: string
   const total = apps.length + services.length;
   if (total === 0) return 0;
   const heapMB = nodeMaxOldSpaceMB(detectHardware(), total);
+
+  // Chỉ restart đơn vị THỰC SỰ đổi heap. Trước đây mọi unit đều bị ghi lại nên
+  // restart hết là hợp lý; nay app bun và app đã đúng số không có gì thay đổi,
+  // restart chúng chỉ là một khoảng downtime không đổi lại được gì.
+  const changed: string[] = [];
   for (const app of apps) {
-    const nodeOptions = app.nodeRuntime === "node" ? `--max-old-space-size=${heapMB}` : undefined;
-    writeFile(`${SYSTEMD_DIR}/${serviceNameFor(app.domain)}.service`, renderAppSystemdService(app, execStartLine(app.startCmd), { nodeOptions }), 0o644);
+    // bun dùng JavaScriptCore, không hiểu cờ heap của V8 — không có gì để vá.
+    if (app.nodeRuntime !== "node") continue;
+    const unit = serviceNameFor(app.domain);
+    if (patchHeapOrCreate(`${SYSTEMD_DIR}/${unit}.service`, heapMB, () => writeAppUnit(app, heapMB)) && app.domain !== opts.skipRestartFor) {
+      changed.push(unit);
+    }
   }
   for (const svc of services) {
-    const nodeOptions = svc.nodeRuntime === "node" ? `--max-old-space-size=${heapMB}` : undefined;
-    writeFile(`${SYSTEMD_DIR}/${svcSystemdName(svc.name)}.service`, renderServiceSystemdService(svc, execStartLine(svc.startCmd), { nodeOptions }), 0o644);
+    if (svc.nodeRuntime !== "node") continue;
+    const unit = svcSystemdName(svc.name);
+    if (patchHeapOrCreate(`${SYSTEMD_DIR}/${unit}.service`, heapMB, () => writeServiceUnit(svc, heapMB)) && svc.name !== opts.skipRestartFor) {
+      changed.push(unit);
+    }
   }
+
+  if (changed.length === 0) return heapMB;
   runCmd("systemctl", ["daemon-reload"]);
   if (opts.restart) {
-    for (const app of apps) {
-      if (app.domain === opts.skipRestartFor) continue;
-      runCmd("systemctl", ["restart", serviceNameFor(app.domain)], { silentFail: true });
-    }
-    for (const svc of services) {
-      if (svc.name === opts.skipRestartFor) continue;
-      runCmd("systemctl", ["restart", svcSystemdName(svc.name)], { silentFail: true });
-    }
+    for (const unit of changed) runCmd("systemctl", ["restart", unit], { silentFail: true });
   }
   return heapMB;
+}
+
+// Render lại unit của MỌI app/service từ registry — dùng khi cần đẩy phần
+// template mới (hardening, ReadWritePaths, thứ tự biến môi trường) xuống cả
+// những unit tạo từ bản napp cũ. KHÔNG nằm trong đường chạy cân đối heap: đây là
+// bước có thể đổi nhiều dòng nên phải do người dùng chủ động gọi
+// (`napp tune apply --sync-units`). Directive người dùng sửa tay vẫn được giữ.
+// Trả về số MB heap/đơn vị đã áp (0 nếu không có đơn vị nào).
+export function syncAllUnits(opts: { restart: boolean }): number {
+  const s = loadState();
+  const apps = Object.values(s.apps);
+  const services = Object.values(s.services);
+  const total = apps.length + services.length;
+  if (total === 0) return 0;
+  const heapMB = nodeMaxOldSpaceMB(detectHardware(), total);
+  for (const app of apps) writeAppUnit(app, heapMB);
+  for (const svc of services) writeServiceUnit(svc, heapMB);
+  runCmd("systemctl", ["daemon-reload"]);
+  if (opts.restart) {
+    for (const app of apps) runCmd("systemctl", ["restart", serviceNameFor(app.domain)], { silentFail: true });
+    for (const svc of services) runCmd("systemctl", ["restart", svcSystemdName(svc.name)], { silentFail: true });
+  }
+  return heapMB;
+}
+
+// Vá heap cho MỘT unit. Unit không tồn tại (registry và hệ thống lệch nhau, ví
+// dụ ai đó xoá tay file) thì mới dựng lại từ template. Trả về true nếu file đã đổi.
+function patchHeapOrCreate(path: string, heapMB: number, create: () => void): boolean {
+  if (!existsSync(path)) {
+    warn(`Không tìm thấy ${path} — dựng lại unit từ registry.`);
+    create();
+    return true;
+  }
+  const res = patchUnitHeap(path, heapMB);
+  if (res.note) warn(`${path}: ${res.note}`);
+  return res.changed;
 }
 
 function assertSiteAbsent(domain: string, user: string, port: number | undefined): void {
@@ -439,14 +525,16 @@ EOF`,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
-    const unitPath = `${SYSTEMD_DIR}/${serviceName}.service`;
     // Heap V8 chỉ đặt cho runtime node (bun dùng JSC, không hiểu cờ này). Chia
     // theo TỔNG số app SAU khi thêm app này (hiện có + 1) để cân đối RAM; user
     // có thể ghi đè NODE_OPTIONS trong .env.
     const totalAppsAfter = Object.keys(loadState().apps).length + 1;
-    const nodeOptions = opts.runtime === "node" ? `--max-old-space-size=${nodeMaxOldSpaceMB(detectHardware(), totalAppsAfter)}` : undefined;
-    writeFile(unitPath, renderAppSystemdService(record, execStartLine(startCmd), { nodeOptions }), 0o644);
-    if (nodeOptions) info(`NODE_OPTIONS=${nodeOptions} (heap V8 chia cho ${totalAppsAfter} app; đổi trong .env nếu cần)`);
+    const heapMB = nodeMaxOldSpaceMB(detectHardware(), totalAppsAfter);
+    // App mới -> unit chưa có, writeAppUnit ghi thẳng bản template. Đi qua nó
+    // (thay vì writeFile) để file mang sẵn fingerprint, nhờ đó lần sửa tay đầu
+    // tiên của người dùng được nhận ra và giữ lại.
+    writeAppUnit(record, heapMB);
+    if (opts.runtime === "node") info(`NODE_OPTIONS=--max-old-space-size=${heapMB} (heap V8 chia cho ${totalAppsAfter} app; đổi trong .env nếu cần)`);
     runCmd("systemctl", ["daemon-reload"]);
     runCmd("systemctl", ["enable", serviceName]);
     runCmd("systemctl", ["restart", serviceName]);

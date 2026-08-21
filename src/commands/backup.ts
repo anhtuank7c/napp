@@ -3,6 +3,7 @@ import { runCmd, requireRoot, ensureDir, writeFile, commandExists } from "../lib
 import { info, ok, warn, die, section } from "../lib/log";
 import { dumpAllDatabases, dumpDatabase, dbServiceRunning, dbExists, listDatabases } from "../lib/mysql";
 import { loadState, BACKUP_ROOT, SYSTEMD_DIR } from "../lib/state";
+import { writeManagedUnit } from "../lib/unitfile";
 import { renderBackupService, renderBackupTimer } from "../templates/systemd";
 import { timeToDailyOnCalendar } from "../lib/validate";
 
@@ -143,7 +144,15 @@ export function cmdBackupSchedule(opts: BackupScheduleOptions): void {
   const onCalendar = timeToDailyOnCalendar(opts.time);
   const scriptCmd = `${NAPP_BIN_PATH} backup run --target ${opts.target} --keep-days ${opts.keepDays} --quiet`;
 
-  writeFile(`${SYSTEMD_DIR}/${BACKUP_TIMER_NAME}.service`, renderBackupService(`/bin/bash -lc ${JSON.stringify(scriptCmd)}`), 0o644);
+  // ExecStart ở đây MANG THEO các tuỳ chọn của chính lệnh này (--target,
+  // --keep-days) nên phải do napp làm chủ: giữ bản sửa tay cũ là làm ngược lại
+  // thứ người dùng vừa gõ. Các directive khác (Nice, StandardOutput/Error,
+  // User/Group...) họ sửa thì vẫn được giữ nguyên.
+  writeManagedUnit(
+    `${SYSTEMD_DIR}/${BACKUP_TIMER_NAME}.service`,
+    renderBackupService(`/bin/bash -lc ${JSON.stringify(scriptCmd)}`),
+    { authoritative: ["ExecStart"] }
+  );
   writeFile(`${SYSTEMD_DIR}/${BACKUP_TIMER_NAME}.timer`, renderBackupTimer(onCalendar), 0o644);
   runCmd("systemctl", ["daemon-reload"]);
   runCmd("systemctl", ["enable", "--now", `${BACKUP_TIMER_NAME}.timer`]);

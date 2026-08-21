@@ -5,6 +5,7 @@ import { renderCloudflareRealIpSnippet, CLOUDFLARE_REALIP_CONF } from "../templa
 import { renderCloudflareSyncService, renderCloudflareSyncTimer } from "../templates/systemd";
 import { timeToDailyOnCalendar } from "../lib/validate";
 import { SYSTEMD_DIR } from "../lib/state";
+import { writeManagedUnit } from "../lib/unitfile";
 
 const NAPP_BIN_PATH = "/usr/local/bin/napp";
 const CF_TIMER_NAME = "napp-cloudflare-sync";
@@ -42,7 +43,9 @@ export function cmdCloudflareSchedule(opts: { time: string }): void {
   if (!commandExists("nginx")) die("nginx chưa được cài. Chạy 'napp check --fix' trước.");
   const onCalendar = timeToDailyOnCalendar(opts.time);
 
-  writeFile(`${SYSTEMD_DIR}/${CF_TIMER_NAME}.service`, renderCloudflareSyncService(NAPP_BIN_PATH), 0o644);
+  // ExecStart trỏ tới binary napp hiện tại -> napp làm chủ. Directive khác người
+  // dùng sửa tay (log, Nice, User/Group) vẫn được giữ nguyên.
+  writeManagedUnit(`${SYSTEMD_DIR}/${CF_TIMER_NAME}.service`, renderCloudflareSyncService(NAPP_BIN_PATH), { authoritative: ["ExecStart"] });
   writeFile(`${SYSTEMD_DIR}/${CF_TIMER_NAME}.timer`, renderCloudflareSyncTimer(onCalendar), 0o644);
   runCmd("systemctl", ["daemon-reload"]);
   runCmd("systemctl", ["enable", "--now", `${CF_TIMER_NAME}.timer`]);

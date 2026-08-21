@@ -50,6 +50,10 @@ function renderUnit(spec: UnitSpec): string {
   // trùng để không lặp lại rootDir khi ai đó truyền đúng nó qua --write-dir.
   const writePaths = [...new Set([spec.rootDir ?? spec.workDir, ...(spec.extraWritePaths ?? [])])];
   return `${spec.headerComment}
+# Sửa tay file này ĐƯỢC. napp so fingerprint ở dòng trên để biết bạn đã đổi
+# directive nào (ExecStart, StandardOutput/StandardError, User, Group, ...) và
+# GIỮ NGUYÊN bản của bạn ở những lần ghi sau; phần hardening vẫn được cập nhật.
+# Muốn khoá trước một directive: thêm dòng '# napp-preserve: Tên1 Tên2'.
 [Unit]
 Description=${spec.description}
 After=network.target mariadb.service redis-server.service

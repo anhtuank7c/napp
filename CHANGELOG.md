@@ -2,6 +2,24 @@
 
 Tất cả thay đổi đáng chú ý của `napp` được ghi lại ở đây.
 
+## 1.21.0
+
+- **Sửa tay unit systemd không còn bị ghi đè.** Trước đây mọi đường dẫn đụng tới unit đều render lại **toàn bộ** file từ template rồi ghi đè. Ai sửa `ExecStart` (thêm cờ runtime, đổi entrypoint), `StandardOutput`/`StandardError` (đẩy log sang journal), hay `User`/`Group` sẽ mất sạch sau lần `napp tune apply` — hoặc thậm chí chỉ vì tạo thêm một app, vì đó cũng là lúc heap phải chia lại. App chết ngay lúc restart, đúng lúc không ai ngờ tới.
+
+  napp nay nhận ra phần bạn đã sửa và giữ nguyên. Mỗi unit mang một dòng `# napp-fingerprint:` (băm của phần còn lại trong file): khớp = còn nguyên bản napp, lệch hoặc không có = đã có người sửa. Khi phát hiện file đã sửa, napp so từng directive và ghi tên cái bạn đổi vào dòng `# napp-preserve:` — dòng này để **lần ghi sau vẫn nhớ**, nếu chỉ dựa vào fingerprint thì ngay sau lần giữ đầu tiên file lại "khớp" và lần thứ hai sẽ ghi đè mất. Bạn cũng có thể tự thêm `# napp-preserve: Tên1 Tên2` để khoá trước một directive.
+
+  Directive được giữ: `ExecStart*`, `ExecStop*`, `ExecReload`, `Standard*`, `SyslogIdentifier`, `User`, `Group`, `UMask`, `WorkingDirectory`, `Restart*`, `Timeout*Sec`, `LimitNOFILE`, `Nice`, `OOMScoreAdjust`, `MemoryMax`, `MemoryHigh`, `CPUQuota`. Phần **hardening** (`ProtectSystem`, `NoNewPrivileges`, `ReadWritePaths`…) cố ý **không** nằm trong danh sách, để bản vá bảo mật còn đường lan tới unit cũ.
+
+- **Cân đối heap V8 chỉ sửa đúng một dòng.** `napp tune apply` và mọi lần tạo/xoá app (heap chia theo tổng số đơn vị node nên số app đổi là phải tính lại) nay chỉ thay con số trong `--max-old-space-size` của dòng `Environment=NODE_OPTIONS` — giữ nguyên từng ký tự của mọi dòng khác, kể cả các cờ NODE_OPTIONS khác trên chính dòng đó. Đây là đường chạy ngầm và chạy thường xuyên nhất; render lại cả file cho **một con số** là cách chắc chắn nhất để một ngày nào đó thổi bay cấu hình sửa tay.
+
+  Kèm theo: **chỉ restart unit thực sự đổi số**. Trước đây mọi unit đều bị ghi lại nên restart hết là hợp lý; nay app bun (JavaScriptCore, không hiểu cờ heap của V8) và app đã đúng số không có gì thay đổi — restart chúng chỉ là một khoảng downtime không đổi lại được gì.
+
+- **`napp tune apply --sync-units`** (mới, mặc định tắt): render lại toàn bộ unit từ template để đẩy phần mới (hardening, `ReadWritePaths`, thứ tự biến môi trường) xuống unit tạo từ bản napp cũ. Đây là việc **cũ vẫn làm ngầm**, nay phải gõ ra — nó đổi nhiều dòng, và unit là nơi người dùng hay sửa tay nhất. Kể cả ở chế độ này, directive bạn sửa vẫn được giữ.
+
+- **Directive chính bạn vừa ra lệnh đổi thì napp vẫn làm chủ.** `napp service set --run-as` đổi `User`/`Group`; giữ bản sửa tay ở đây là làm ngược lại thứ bạn vừa gõ. napp ghi đè và **báo rõ** directive nào vừa bị đặt lại, thay vì im lặng. Tương tự với `ExecStart` của unit backup/Cloudflare sync (nó mang chính các tuỳ chọn `--target`/`--keep-days`/`--time` bạn truyền vào).
+
+- Unit backup và Cloudflare sync cũng đi qua cùng cơ chế này — sửa `Nice`, log hay `User`/`Group` của chúng nay cũng còn nguyên.
+
 ## 1.20.1
 
 - **`napp --help` có phần ví dụ ở cuối**, gồm mục **"sau khi cập nhật napp"** — danh sách lệnh do commander tự sinh trả lời được "có những lệnh gì" nhưng không nhắc các bước **bắt buộc** sau khi nâng cấp, mà bỏ qua chúng thì server vẫn mang cấu hình cũ đã hỏng (`volatile-lru` làm mất job BullMQ, bộ đệm `16k` làm route SvelteKit sâu trả 502). Chỉ ghi vào changelog là chưa đủ — gần như không ai đọc changelog.

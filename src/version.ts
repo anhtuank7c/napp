@@ -16,6 +16,27 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.21.0
+- Sửa tay unit systemd KHÔNG còn bị ghi đè. Mỗi unit mang dòng
+  '# napp-fingerprint:'; lệch fingerprint = đã có người sửa, napp so từng
+  directive và giữ lại bản của bạn (ExecStart, StandardOutput/StandardError,
+  User, Group, Restart, LimitNOFILE, Nice, MemoryMax...), ghi tên chúng vào
+  '# napp-preserve:' để lần ghi sau vẫn nhớ. Bạn cũng tự thêm dòng đó được để
+  khoá trước. Phần hardening (ProtectSystem, ReadWritePaths...) CỐ Ý không nằm
+  trong danh sách giữ, để bản vá bảo mật còn đường lan tới unit cũ.
+- Cân đối heap V8 chỉ sửa ĐÚNG MỘT DÒNG: con số trong --max-old-space-size của
+  Environment=NODE_OPTIONS. Không render lại unit, không đụng dòng nào khác.
+  Trước đây 'napp tune apply' — và cả việc tạo thêm một app, vì heap chia theo
+  tổng số đơn vị node — đều ghi đè cả file, thổi bay cấu hình sửa tay và làm app
+  chết ngay lúc restart. Chỉ restart unit thực sự đổi số (app bun không dùng cờ
+  heap của V8 nên không còn bị restart vô ích).
+- MỚI: 'napp tune apply --sync-units' — render lại toàn bộ unit từ template để
+  đẩy hardening/template mới xuống unit tạo từ bản napp cũ. Việc này CŨ VẪN LÀM
+  NGẦM, nay phải gõ ra. Directive bạn sửa tay vẫn được giữ.
+- Directive chính bạn vừa ra lệnh đổi thì napp vẫn làm chủ: 'napp service set
+  --run-as' đặt lại User/Group, unit backup/cloudflare đặt lại ExecStart (nó
+  mang chính các tuỳ chọn bạn truyền). napp BÁO RÕ directive nào vừa bị đặt lại.
+
 ## 1.20.1
 - 'napp --help' có phần VÍ DỤ ở cuối, gồm mục "sau khi cập nhật napp": danh
   sách lệnh tự sinh trả lời được "có lệnh gì" nhưng không nhắc các bước BẮT
