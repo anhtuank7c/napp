@@ -77,7 +77,13 @@ Sau khi cập nhật napp (bản cũ để lại cấu hình đã hỏng, không
                                  -> hết 502 'upstream sent too big header' ở
                                     route SvelteKit lồng sâu
   sudo napp check                báo Redis còn maxmemory-policy khác noeviction
-                                 (BullMQ mất job) và vhost nào còn bộ đệm cũ
+                                 (BullMQ mất job), vhost nào còn bộ đệm cũ, VÀ
+                                 app nào còn đẩy toàn bộ asset tĩnh qua Node
+                                 (chậm mà không có lỗi nào để lần ra)
+  sudo napp app set <domain> --auto-static
+                                 nhận diện framework từ thư mục build rồi cho
+                                 nginx trả thẳng asset. Tự cấp luôn quyền đọc
+                                 cho nginx — thiếu bước đó thì asset trả 403
   sudo napp tune apply --sync-units
                                  đẩy hardening mới xuống unit systemd tạo từ bản
                                  napp cũ. Không có cờ này, tune apply chỉ sửa
@@ -185,10 +191,17 @@ app
   )
   .option(
     "--static-prefix <path...>",
-    "tiền tố URL phục vụ từ --static-root, lặp lại được (SvelteKit: /_app/ · Next.js: /_next/static/)",
+    "tiền tố URL phục vụ từ --static-root, lặp lại được (SvelteKit: /_app/ · Nuxt: /_nuxt/ · Astro: /_astro/). Next.js dùng --static-alias",
     (v, prev: string[]) => [...prev, v],
     [] as string[]
   )
+  .option(
+    "--static-alias <prefix=dir...>",
+    "tiền tố URL phục vụ bằng 'alias', lặp lại được — dùng khi URL khác tên thư mục (Next.js: '/_next/static/=<webRoot>/.next/static')",
+    (v, prev: string[]) => [...prev, v],
+    [] as string[]
+  )
+  .option("--auto-static", "tự nhận diện framework từ thư mục build và cho nginx trả thẳng asset (SvelteKit, Next.js, Nuxt, SolidStart, Astro)")
   .option("--env <KEY=VALUE...>", "biến môi trường bổ sung, có thể lặp lại nhiều lần", (v, prev: string[]) => [...prev, v], [] as string[])
   .action(async (domain, opts) => {
     await cmdAppCreate(domain, {
@@ -211,6 +224,8 @@ app
       maxBody: opts.maxBody,
       staticRoot: opts.staticRoot,
       staticPrefix: (opts.staticPrefix ?? []).length > 0 ? opts.staticPrefix : undefined,
+      staticAlias: (opts.staticAlias ?? []).length > 0 ? opts.staticAlias : undefined,
+      autoStatic: Boolean(opts.autoStatic),
       uploadDir: opts.uploadDir,
       uploadPrefix: opts.uploadPrefix,
       hotlinkProtect: Boolean(opts.hotlinkProtect),
@@ -258,14 +273,21 @@ app
 
 app
   .command("set <domain>")
-  .description("đổi cấu hình NGINX của app ĐÃ TẠO (asset tĩnh, file tải lên, chặn hotlink, giới hạn upload)")
+  .description("đổi cấu hình NGINX của app ĐÃ TẠO (asset tĩnh, file tải lên, chặn hotlink, giới hạn upload) — xem --auto-static")
   .option("--static-root <dir>", "thư mục asset build để NGINX trả thẳng thay vì qua Node")
   .option(
     "--static-prefix <path...>",
-    "tiền tố URL phục vụ từ --static-root, lặp lại được (SvelteKit: /_app/ · Next.js: /_next/static/)",
+    "tiền tố URL phục vụ từ --static-root, lặp lại được (SvelteKit: /_app/ · Nuxt: /_nuxt/ · Astro: /_astro/). Next.js dùng --static-alias",
     (v, prev: string[]) => [...prev, v],
     [] as string[]
   )
+  .option(
+    "--static-alias <prefix=dir...>",
+    "tiền tố URL phục vụ bằng 'alias', lặp lại được — dùng khi URL khác tên thư mục (Next.js: '/_next/static/=<webRoot>/.next/static')",
+    (v, prev: string[]) => [...prev, v],
+    [] as string[]
+  )
+  .option("--auto-static", "nhận diện framework từ thư mục build rồi áp cấu hình tĩnh phù hợp (SvelteKit, Next.js, Nuxt, SolidStart, Astro)")
   .option("--upload-dir <dir>", "thư mục file NGƯỜI DÙNG TẢI LÊN lúc chạy (khác --static-root)")
   .option("--upload-prefix <path>", "tiền tố URL của --upload-dir (mặc định '/uploads/')")
   .option("--hotlink-protect", "chỉ cho nhúng ảnh trong --upload-dir từ domain của site")
@@ -281,6 +303,8 @@ app
     cmdAppSet(domain, {
       staticRoot: opts.staticRoot,
       staticPrefix: (opts.staticPrefix ?? []).length > 0 ? opts.staticPrefix : undefined,
+      staticAlias: (opts.staticAlias ?? []).length > 0 ? opts.staticAlias : undefined,
+      autoStatic: Boolean(opts.autoStatic),
       uploadDir: opts.uploadDir,
       uploadPrefix: opts.uploadPrefix,
       // commander đặt hotlinkProtect=true khi có --hotlink-protect và false khi

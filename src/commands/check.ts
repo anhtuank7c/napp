@@ -2,8 +2,12 @@ import { readFileSync, existsSync } from "node:fs";
 import { execCapture, runCmd, commandExists, requireRoot, isServiceActive, writeFile, ensureDir } from "../lib/exec";
 import { info, ok, warn, section, die } from "../lib/log";
 import { REDIS_TUNING_PATH } from "../templates/tuning";
-import { loadState, NGINX_AVAILABLE } from "../lib/state";
+import { loadState, NGINX_AVAILABLE, type AppRecord } from "../lib/state";
 import { cmdNginxSync, stripInlineProxyBuffers } from "./nginx";
+import { cmdAppSet } from "./app";
+import { detectStaticLayout, staticSetCommand, type StaticSuggestion } from "../lib/framework";
+import { appServePaths, grantNginxGroupAccess, nginxWorkerUser, pathReadableBy } from "../lib/staticaccess";
+import { unitWorkDir } from "../templates/systemd";
 
 export interface CheckOptions {
   fix: boolean;
@@ -139,6 +143,48 @@ function vhostsWithInlineProxyBuffers(): string[] {
   return stale;
 }
 
+// --- asset tĩnh: app nào ĐANG đẩy toàn bộ asset qua Node ---------------------
+//
+// Đây là loại hỏng KHÔNG có triệu chứng nào để lần ra: không log, không lỗi,
+// không mã trạng thái lạ. App chỉ đơn giản là chậm — mỗi trang kéo hàng trăm
+// chunk .js/.css, tất cả xếp hàng trên event loop đơn luồng và tranh chấp với
+// chính việc render. Người dùng mô tả nó là "vào dashboard thấy giựt" và đi đo
+// CPU/RAM, nơi mọi thứ trông hoàn toàn bình thường.
+//
+// Vì không ai tự đi tìm một cấu hình mình không biết là có, chỗ để nói ra là
+// đây — lệnh mà người dùng vốn đã chạy sau mỗi lần nâng cấp.
+interface StaticCandidate {
+  app: AppRecord;
+  suggestion: StaticSuggestion;
+}
+
+function staticCandidates(): StaticCandidate[] {
+  const out: StaticCandidate[] = [];
+  for (const app of Object.values(loadState().apps)) {
+    // Đã cấu hình rồi thì không đụng vào: người dùng có thể đã cố ý chọn tiền
+    // tố khác với bảng luật (và họ hiểu app của mình hơn bảng luật).
+    if (app.staticRoot || (app.staticAliases?.length ?? 0) > 0) continue;
+    const suggestion = detectStaticLayout(unitWorkDir(app.webRoot, app.appDir));
+    if (suggestion) out.push({ app, suggestion });
+  }
+  return out;
+}
+
+// Cấu hình tĩnh ĐÚNG nhưng nginx không đọc nổi thư mục -> 403, không phải file.
+// Trả về [] khi không kiểm tra được (không chạy bằng root): thà im lặng còn hơn
+// báo động giả, vì cảnh báo sai vài lần là người dùng bỏ qua mọi cảnh báo sau đó.
+function unreadableStaticApps(): { app: AppRecord; paths: string[] }[] {
+  const nginxUser = nginxWorkerUser();
+  const out: { app: AppRecord; paths: string[] }[] = [];
+  for (const app of Object.values(loadState().apps)) {
+    const paths = appServePaths(app).filter((p) => existsSync(p));
+    if (paths.length === 0) continue;
+    const bad = paths.filter((p) => pathReadableBy(nginxUser, p) === false);
+    if (bad.length > 0) out.push({ app, paths: bad });
+  }
+  return out;
+}
+
 function installFail2ban(): void {
   info("Đang cài đặt fail2ban...");
   runCmd("apt-get", ["install", "-y", "fail2ban"]);
@@ -234,6 +280,57 @@ export async function cmdCheck(opts: CheckOptions): Promise<void> {
           `Giá trị trong location thắng giá trị mức http, nên các site này vẫn dùng proxy_buffer_size 16k ` +
           `và vẫn trả 502 ('upstream sent too big header') ở route SvelteKit lồng sâu. Sửa: napp nginx sync`,
         fix: () => cmdNginxSync(),
+      });
+    }
+
+    // --- asset tĩnh chưa bật ---
+    const candidates = staticCandidates();
+    const safe = candidates.filter((c) => !c.suggestion.risky);
+    const risky = candidates.filter((c) => c.suggestion.risky);
+    if (safe.length > 0) {
+      findings.push({
+        name: "nginx-static",
+        ok: false,
+        message:
+          `${safe.length} app đang đẩy TOÀN BỘ asset tĩnh qua tiến trình Node ` +
+          `(${safe.map((c) => `${c.app.domain}: ${c.suggestion.framework}`).join(", ")}). ` +
+          `Mỗi trang kéo hàng trăm chunk .js/.css xếp hàng trên event loop đơn luồng — app chậm mà không có lỗi nào để lần. ` +
+          `Sửa: ${safe.map((c) => `napp app set ${c.app.domain} --auto-static`).join(" · ")}`,
+        fix: () => {
+          for (const c of safe) cmdAppSet(c.app.domain, { autoStatic: true });
+        },
+      });
+    }
+    // Nhóm risky KHÔNG có fix: '/assets/' có thể là route thật của app, và
+    // 'location ^~' thắng cả proxy_pass nên áp nhầm là route đó chết hẳn bằng
+    // 404. Quyết định này thuộc về người biết app, không thuộc về --fix.
+    for (const c of risky) {
+      warn(
+        `${c.app.domain}: nhận diện ${c.suggestion.framework} nhưng tiền tố ` +
+          `'${c.suggestion.staticPrefixes.join(" ")}' có thể trùng route thật của app — napp KHÔNG tự áp.\n` +
+          `  Kiểm tra app không dùng tiền tố đó làm route, rồi chạy:\n    ${staticSetCommand(c.app.domain, c.suggestion)}`
+      );
+    }
+
+    // --- asset tĩnh đã bật nhưng nginx không đọc được ---
+    const unreadable = unreadableStaticApps();
+    if (unreadable.length > 0) {
+      const nginxUser = nginxWorkerUser();
+      findings.push({
+        name: "nginx-static-perm",
+        ok: false,
+        message:
+          `${unreadable.length} app có cấu hình asset tĩnh nhưng nginx (user '${nginxUser}') KHÔNG đọc được thư mục ` +
+          `(${unreadable.map((u) => u.app.domain).join(", ")}). Thư mục app thuộc user riêng và để 750, nginx chạy bằng user khác nên ` +
+          `không đi xuyên qua được — kết quả là 403 chứ không phải file, và log nginx ghi 'Permission denied' rất dễ đọc nhầm thành sai đường dẫn. ` +
+          `Sửa: thêm '${nginxUser}' vào nhóm của từng app rồi restart nginx.`,
+        fix: () => {
+          for (const u of unreadable) {
+            const res = grantNginxGroupAccess(u.app.user);
+            if (res.changed) ok(`${u.app.domain}: ${res.message}`);
+            else warn(`${u.app.domain}: ${res.message}`);
+          }
+        },
       });
     }
   } else {

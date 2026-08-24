@@ -36,6 +36,8 @@ import { detectHardware } from "../lib/hardware";
 import { nodeMaxOldSpaceMB } from "../templates/tuning";
 import { ipv6Available } from "../lib/network";
 import { GIT_NONINTERACTIVE_ENV, prepareRepoAuth, setupRepoAuth } from "../lib/repo";
+import { detectStaticLayout, parseStaticAlias, staticSetCommand, type StaticAlias, type StaticSuggestion } from "../lib/framework";
+import { appServePaths, ensureNginxCanServe } from "../lib/staticaccess";
 import { defaultPackageManager, defaultInstallCmd, defaultStartCmd, ensurePackageManager, ensureRuntime } from "../lib/provision";
 
 export interface CreateAppOptions {
@@ -58,11 +60,59 @@ export interface CreateAppOptions {
   maxBody?: string; // client_max_body_size của nginx
   staticRoot?: string; // thư mục asset build để nginx trả thẳng
   staticPrefix?: string[]; // tiền tố URL phục vụ từ staticRoot
+  staticAlias?: string[]; // "<tiền-tố-URL>=<thư-mục>" — khi URL và tên thư mục khác nhau
+  autoStatic?: boolean; // tự áp cấu hình tĩnh theo framework nhận diện được
   uploadDir?: string; // thư mục file tải lên lúc chạy
   uploadPrefix?: string; // tiền tố URL của thư mục trên
   hotlinkProtect?: boolean; // chỉ cho nhúng ảnh từ domain của site
   hotlinkAllow?: string[]; // domain ngoài cũng được phép nhúng
   addressHeader?: boolean; // đặt ADDRESS_HEADER/XFF_DEPTH cho adapter-node
+}
+
+/** Chuyển '--static-alias <prefix>=<dir>' thành bản ghi, chết sớm nếu sai dạng. */
+function resolveStaticAliases(items?: string[]): StaticAlias[] {
+  const out: StaticAlias[] = [];
+  for (const item of items ?? []) {
+    const { value, error } = parseStaticAlias(item);
+    if (error) die(error);
+    out.push(value!);
+  }
+  return out;
+}
+
+/** Mọi tiền tố URL mà một gợi ý sẽ chiếm — gộp cả hai cơ chế root và alias. */
+function suggestedPrefixes(s: StaticSuggestion): string[] {
+  return [...s.staticPrefixes, ...s.staticAliases.map((a) => a.prefix)];
+}
+
+/**
+ * In kết quả nhận diện framework.
+ *
+ * CỐ Ý in cả khi KHÔNG áp: giá trị lớn nhất của tính năng này không nằm ở chỗ
+ * tự cấu hình giúp, mà ở chỗ người dùng biết rằng có một cấu hình đáng bật và
+ * biết chính xác câu lệnh để bật. Một app chạy chậm vì đẩy hết asset qua Node
+ * KHÔNG có triệu chứng nào ngoài "hơi giựt" — không log, không lỗi.
+ */
+function reportStaticDetection(domain: string, s: StaticSuggestion, applied: boolean, autoStatic: boolean): void {
+  const prefixes = suggestedPrefixes(s).join(" ");
+  if (applied) {
+    ok(`Nhận diện ${s.framework} → nginx trả thẳng ${prefixes} (không qua Node).`);
+    info(`  Căn cứ: có thư mục ${s.evidence}`);
+    if (s.note) warn(`  LƯU Ý: ${s.note}`);
+    return;
+  }
+
+  info(`Nhận diện ${s.framework} (căn cứ: có thư mục ${s.evidence}).`);
+  if (s.risky) {
+    warn(
+      `napp KHÔNG tự áp cấu hình này${autoStatic ? " dù bạn đã truyền --auto-static" : ""}: tiền tố '${prefixes}' không phải namespace riêng của framework.\n` +
+        `  'location ^~' thắng cả route regex lẫn proxy_pass, nên nếu app có route thật ở đó thì route ấy chết hẳn bằng 404.`
+    );
+  } else if (!autoStatic) {
+    info(`  Hiện MỌI file .js/.css/.woff2 đều đi qua tiến trình Node — thêm --auto-static lúc tạo app để napp tự bật.`);
+  }
+  info(`  Bật bằng: ${staticSetCommand(domain, s)}`);
+  if (s.note) warn(`  LƯU Ý: ${s.note}`);
 }
 
 // Render lại TOÀN BỘ unit của một app web từ registry, giữ nguyên các directive
@@ -496,6 +546,39 @@ EOF`,
     runCmd("find", [webRoot, "-type", "f", "-exec", "chmod", "640", "{}", "+"]);
     runCmd("chmod", ["600", envPath]);
 
+    // --- asset tĩnh: nhận diện framework từ THƯ MỤC BUILD (xem lib/framework.ts) ---
+    // Chạy Ở ĐÂY vì đây là điểm sớm nhất có đủ hai điều kiện: build đã xong (nên
+    // thư mục output có thật) và bản ghi chưa dựng (nên còn kịp đưa vào).
+    const explicitStatic =
+      opts.staticRoot !== undefined || (opts.staticPrefix?.length ?? 0) > 0 || (opts.staticAlias?.length ?? 0) > 0;
+    let staticRoot = opts.staticRoot;
+    let staticPrefixes = (opts.staticPrefix?.length ?? 0) > 0 ? opts.staticPrefix : undefined;
+    let staticAliases = resolveStaticAliases(opts.staticAlias);
+    let framework: string | undefined;
+
+    const detected = detectStaticLayout(appWorkDir);
+    if (detected) {
+      framework = detected.framework;
+      let applied = false;
+      // Cờ người dùng truyền tay LUÔN THẮNG nhận diện: họ biết app của mình,
+      // bảng luật thì chỉ đoán từ tên thư mục.
+      if (explicitStatic) {
+        info(`Nhận diện ${detected.framework}, nhưng bạn đã truyền cấu hình tĩnh riêng — giữ nguyên bản của bạn.`);
+      } else if (opts.autoStatic && !detected.risky) {
+        staticRoot = detected.staticRoot;
+        staticPrefixes = detected.staticPrefixes.length > 0 ? detected.staticPrefixes : undefined;
+        staticAliases = detected.staticAliases;
+        applied = true;
+      }
+      if (!explicitStatic) reportStaticDetection(domain, detected, applied, opts.autoStatic ?? false);
+    } else if (opts.autoStatic) {
+      warn(
+        `--auto-static: không nhận ra bố cục asset nào trong ${appWorkDir}.\n` +
+          `  Nếu app chưa build (thiếu --build-cmd) thì chưa có gì trên đĩa để phục vụ. ` +
+          `Bố cục lạ thì cấu hình tay bằng 'napp app set ${domain} --static-root ... --static-prefix ...'.`
+      );
+    }
+
     // --- systemd service ---
     ensureDir("/var/log/napp", 0o750);
     const record: AppRecord = {
@@ -516,8 +599,10 @@ EOF`,
       redisDbIndex,
       appDir: opts.appDir,
       maxBodySize: opts.maxBody,
-      staticRoot: opts.staticRoot,
-      staticPrefixes: opts.staticPrefix,
+      staticRoot,
+      staticPrefixes,
+      staticAliases: staticAliases.length > 0 ? staticAliases : undefined,
+      framework,
       uploadDir: opts.uploadDir,
       uploadPrefix: opts.uploadPrefix,
       hotlinkProtect: opts.hotlinkProtect,
@@ -560,6 +645,12 @@ EOF`,
     upsertApp(record);
     rollbackActive = false;
     release();
+
+    // Quyền đọc cho nginx — CHỈ sau khi app đã an toàn trong registry.
+    // Thư mục app là 750 thuộc user riêng, nginx chạy bằng user khác nên không
+    // đi xuyên qua được: thiếu bước này thì mọi tiền tố tĩnh vừa cấu hình trả
+    // 403 chứ không phải file. Xem lib/staticaccess.ts.
+    ensureNginxCanServe(user, appServePaths(record));
 
     // Cân đối lại heap V8 giữa các app để chia sẻ RAM. App vừa tạo đã chạy với
     // heap đúng rồi nên bỏ qua restart nó; chỉ ghi lại + restart các app CŨ để
@@ -944,6 +1035,8 @@ export function injectLocationsInclude(conf: string, upstreamMarker: string, inc
 export interface SetAppOptions {
   staticRoot?: string;
   staticPrefix?: string[];
+  staticAlias?: string[];
+  autoStatic?: boolean;
   uploadDir?: string;
   uploadPrefix?: string;
   hotlinkProtect?: boolean;
@@ -976,8 +1069,59 @@ export function cmdAppSet(domain: string, opts: SetAppOptions): void {
     app[key] = value;
     changed.push(label);
   };
+  // --auto-static: nhận diện lại TỪ ĐĨA rồi áp — đường dành cho app đã tạo từ
+  // trước (bản napp cũ chưa có nhận diện, hoặc lúc tạo app chưa build xong).
+  if (opts.autoStatic) {
+    const detected = detectStaticLayout(unitWorkDir(app.webRoot, app.appDir));
+    if (!detected) {
+      die(
+        `--auto-static: không nhận ra bố cục asset nào trong ${unitWorkDir(app.webRoot, app.appDir)}.\n` +
+          `  App đã build chưa? Bố cục lạ thì cấu hình tay: --static-root <dir> --static-prefix <tiền-tố>`
+      );
+    }
+    if (detected.risky) {
+      die(
+        `--auto-static: nhận diện ${detected.framework}, nhưng tiền tố '${suggestedPrefixes(detected).join(" ")}' ` +
+          `không phải namespace riêng của framework nên napp KHÔNG tự áp.\n` +
+          `  'location ^~' thắng cả route regex lẫn proxy_pass — áp nhầm là route thật của app chết hẳn bằng 404.\n` +
+          `  Kiểm tra app không dùng tiền tố đó làm route, rồi áp tay:\n    ${staticSetCommand(domain, detected)}`
+      );
+    }
+    set("framework", detected.framework as AppRecord["framework"], `framework=${detected.framework}`);
+    // Đặt CẢ BA trường, kể cả về undefined: --auto-static phải cho ra ĐÚNG cấu
+    // hình vừa nhận diện, không phải cấu hình đó CHỒNG LÊN cấu hình cũ. Một app
+    // từng là Next.js (dùng alias) rồi đổi sang SvelteKit (dùng root) mà chỉ ghi
+    // các trường có giá trị thì sẽ giữ lại location alias trỏ vào '.next/static'
+    // không còn tồn tại — nginx vẫn nạp được, nên hỏng này im lặng hoàn toàn.
+    //
+    // Vì thế KHÔNG dùng set(): set() bỏ qua undefined có chủ đích (để cờ CLI
+    // không truyền thì không xoá cấu hình cũ). Ở đây undefined lại CÓ NGHĨA —
+    // "framework này không dùng cơ chế đó" — nên phải gán thẳng.
+    const force = <K extends keyof AppRecord>(key: K, value: AppRecord[K], label: string) => {
+      if (JSON.stringify(app[key]) === JSON.stringify(value)) return;
+      app[key] = value;
+      changed.push(label);
+    };
+    force("staticRoot", detected.staticRoot as AppRecord["staticRoot"], `static-root=${detected.staticRoot ?? "(bỏ)"}`);
+    force(
+      "staticPrefixes",
+      detected.staticPrefixes.length > 0 ? detected.staticPrefixes : undefined,
+      `static-prefix=${detected.staticPrefixes.join(",") || "(bỏ)"}`
+    );
+    force(
+      "staticAliases",
+      detected.staticAliases.length > 0 ? detected.staticAliases : undefined,
+      `static-alias=${detected.staticAliases.map((a) => a.prefix).join(",") || "(bỏ)"}`
+    );
+    if (detected.note) warn(`LƯU Ý (${detected.framework}): ${detected.note}`);
+  }
+
   set("staticRoot", opts.staticRoot as AppRecord["staticRoot"], `static-root=${opts.staticRoot}`);
   if ((opts.staticPrefix?.length ?? 0) > 0) set("staticPrefixes", opts.staticPrefix, `static-prefix=${opts.staticPrefix!.join(",")}`);
+  if ((opts.staticAlias?.length ?? 0) > 0) {
+    const aliases = resolveStaticAliases(opts.staticAlias);
+    set("staticAliases", aliases, `static-alias=${aliases.map((a) => `${a.prefix}=${a.dir}`).join(",")}`);
+  }
   set("uploadDir", opts.uploadDir as AppRecord["uploadDir"], `upload-dir=${opts.uploadDir}`);
   set("uploadPrefix", opts.uploadPrefix as AppRecord["uploadPrefix"], `upload-prefix=${opts.uploadPrefix}`);
   set("hotlinkProtect", opts.hotlinkProtect as AppRecord["hotlinkProtect"], `hotlink-protect=${opts.hotlinkProtect}`);
@@ -985,8 +1129,18 @@ export function cmdAppSet(domain: string, opts: SetAppOptions): void {
   set("maxBodySize", opts.maxBody as AppRecord["maxBodySize"], `max-body=${opts.maxBody}`);
 
   if (changed.length === 0) {
+    // --auto-static chạy lại trên app đã cấu hình đúng là chuyện BÌNH THƯỜNG
+    // (nó nằm trong gợi ý của 'napp check'). Trả về "đã đúng rồi" chứ không
+    // phải lỗi — nhưng vẫn kiểm tra quyền, vì cấu hình đúng mà nginx không đọc
+    // được thì vẫn 403.
+    if (opts.autoStatic) {
+      ok(`${domain}: cấu hình asset tĩnh đã khớp với framework nhận diện được — không có gì để đổi.`);
+      ensureNginxCanServe(app.user, appServePaths(app));
+      return;
+    }
     die(
       `Không có gì để đổi. Truyền ít nhất một tuỳ chọn, ví dụ:\n` +
+        `  napp app set ${domain} --auto-static   (napp tự nhận diện framework từ thư mục build)\n` +
         `  napp app set ${domain} --static-root ${app.webRoot}/build/client --static-prefix /_app/`
     );
   }
@@ -1038,10 +1192,16 @@ export function cmdAppSet(domain: string, opts: SetAppOptions): void {
   app.updatedAt = new Date().toISOString();
   upsertApp(app);
 
+  // Sau khi cấu hình đã đúng, quyền mới là thứ quyết định 200 hay 403.
+  ensureNginxCanServe(app.user, appServePaths(app));
+
   ok(`Đã cập nhật và reload nginx.`);
   info(`• Location riêng: ${locPath}`);
   if (text !== before) info(`• Đã chèn '${includeLine}' vào vhost (một lần duy nhất; lần sau chỉ ghi lại file trên).`);
   if (app.staticRoot) info(`• Asset build giờ do NGINX trả, không qua Node.`);
+  if ((app.staticAliases?.length ?? 0) > 0) {
+    info(`• Tiền tố phục vụ bằng alias: ${app.staticAliases!.map((a) => `${a.prefix} → ${a.dir}`).join(" · ")}`);
+  }
   if (app.uploadDir) info(`• File tải lên phục vụ từ ${app.uploadDir} (không phụ thuộc lần build gần nhất).`);
   if (app.hotlinkProtect) info(`• Chặn hotlink: chỉ domain của site (+ ${app.hotlinkAllow?.join(", ") || "không có domain ngoài"}).`);
 }

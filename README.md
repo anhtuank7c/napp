@@ -14,6 +14,7 @@ cô lập hoàn toàn giữa các app, nginx chỉ đóng vai trò reverse-proxy
 - 🗄️ Tạo sẵn **database MariaDB** + **Redis DB riêng (0-15)** cho từng app (tùy chọn)
 - 👤 Mỗi app một **user Linux riêng**, systemd service riêng, thư mục riêng (750/640, `.env` 600)
 - 🌐 nginx reverse-proxy tự sinh, hỗ trợ **Cloudflare real-IP** (trích xuất đúng IP client thật)
+- ⚡ **Asset tĩnh do nginx trả thẳng** (`--auto-static`): napp nhận diện framework từ **thư mục build** (SvelteKit · Next.js · Nuxt · SolidStart · Astro · Remix · Vite), chọn đúng `root`/`alias` và tự cấp quyền đọc cho nginx — thay vì để hàng trăm chunk `.js`/`.css` xếp hàng trên event loop đơn luồng của Node
 - 🧱 **UFW**: mặc định deny, mở SSH + 80/443 công khai (tùy chọn khoá origin theo dải IP Cloudflare với `--restrict-cloudflare`)
 - 🛑 **Hardening nginx** (`napp nginx harden`): chặn truy cập thẳng IP / Host lạ (trả 444), chỉ domain đã cấu hình mới vào được; ẩn phiên bản nginx
 - 🛡️ **fail2ban**: sshd + nginx-botsearch/http-auth/limit-req + jail riêng chống spam 502/504/429
@@ -55,6 +56,18 @@ sudo napp check --fix    # tự cài/khởi động các thành phần còn thi�
 (nếu dùng `--db`), **Redis** (nếu dùng `--redis`), **certbot + plugin nginx**
 (nếu dùng SSL), **fail2ban**, **UFW**. Lệnh `check` sẽ chỉ rõ thứ còn thiếu.
 
+Ngoài thành phần còn thiếu, `check` còn soi **cấu hình đã lỗi thời hoặc chưa
+bật** trên các app ĐANG CHẠY — những thứ không có lệnh nào tự phát hiện giúp:
+
+| Phát hiện | Vì sao đáng quan tâm |
+|---|---|
+| Redis `maxmemory-policy` khác `noeviction` | BullMQ mất job giữa chừng, không bên nào báo lỗi |
+| Vhost còn bộ đệm proxy `16k` nội tuyến | Route SvelteKit lồng sâu trả 502 |
+| App còn đẩy **toàn bộ asset tĩnh** qua Node | App chậm mà **không có lỗi nào để lần ra** |
+| nginx **không đọc được** thư mục asset đã cấu hình | Asset trả **403** chứ không phải file |
+
+`--fix` sửa được cả bốn (trừ tiền tố `/assets/` rủi ro — xem phần asset tĩnh).
+
 ---
 
 ## 📖 Cách dùng
@@ -78,13 +91,16 @@ Gõ số rồi Enter, `0` để quay lại/thoát.
 | `sudo napp doctor upgrade [--all] [--only nginx] [-y]` | Cài bản vá (mặc định chỉ bản vá **bảo mật**) + restart dịch vụ liên quan |
 | `sudo napp app create <domain> [--repo <url>] [--branch <b>] [--runtime node\|bun] [--db] [--redis] [--port <n>] [--env K=V...]` | Tạo app mới |
 | ↳ `[--app-dir apps/backend]` | Monorepo: app nằm trong thư mục con (WorkingDirectory + `.env` trỏ vào đó) |
-| ↳ `[--static-root <dir> --static-prefix /_app/]` | Cho **nginx** trả asset build thay vì Node |
+| ↳ `[--auto-static]` | **Nhận diện framework từ thư mục build** rồi cho nginx trả thẳng asset (SvelteKit · Next.js · Nuxt · SolidStart · Astro) |
+| ↳ `[--static-root <dir> --static-prefix /_app/]` | Cho **nginx** trả asset build thay vì Node (cấu hình tay) |
+| ↳ `[--static-alias /_next/static/=<dir>]` | Như trên nhưng khi **URL khác tên thư mục trên đĩa** (Next.js) |
 | ↳ `[--upload-dir <dir>]` | Thư mục file **tải lên lúc chạy** — không phải asset build, xem cảnh báo dưới |
 | ↳ `[--hotlink-protect]` `[--hotlink-allow <domain>]` | Chỉ cho nhúng ảnh từ domain của site |
 | ↳ `[--max-body 100M]` | `client_max_body_size` (mặc định `20M`) |
 | ↳ `[--share-redis-with <domain>]` \| `[--redis-db <n>]` | Dùng **chung** Redis DB với đơn vị khác |
 | `sudo napp app deploy <domain>` | git pull + cài deps + build + restart |
-| `sudo napp app set <domain> [--static-root <dir>] [--static-prefix /_app/] [--upload-dir <dir>] [--hotlink-protect] [--max-body 100M]` | **Đổi cấu hình nginx của app ĐÃ TẠO** — giữ nguyên khối SSL của certbot |
+| `sudo napp app set <domain> --auto-static` | **Bật asset tĩnh cho app ĐÃ TẠO** — napp tự nhận diện framework và tự cấp quyền đọc cho nginx |
+| `sudo napp app set <domain> [--static-root <dir>] [--static-prefix /_app/] [--static-alias <p>=<dir>] [--upload-dir <dir>] [--hotlink-protect] [--max-body 100M]` | **Đổi cấu hình nginx của app ĐÃ TẠO** — giữ nguyên khối SSL của certbot |
 | `sudo napp app list` | Liệt kê app đang quản lý |
 | `sudo napp app restart\|stop\|start <domain>` | Điều khiển service |
 | `napp app logs <domain> [-f] [-n 200]` | Xem log (journalctl) |
@@ -180,6 +196,131 @@ sudo napp app deploy api.example.com
 
 ---
 
+## ⚡ Asset tĩnh: cho nginx trả thẳng thay vì đẩy qua Node
+
+Mặc định vhost không có `root` nào, nên **mọi** file — từng chunk `.js`, `.css`,
+`.woff2` — đều đi qua tiến trình Node. Một trang SSR/SPA hiện đại kéo hàng trăm
+chunk, tất cả xếp hàng trên **event loop đơn luồng** và tranh chấp với chính
+việc render trang.
+
+Đây là loại hỏng **không có triệu chứng nào để lần ra**: không log, không lỗi,
+không mã trạng thái lạ. App chỉ đơn giản là chậm, người dùng mô tả là "vào
+dashboard thấy giựt" rồi đi đo CPU/RAM — nơi mọi thứ trông hoàn toàn bình thường.
+
+### Cách nhanh nhất: để napp tự nhận diện
+
+```bash
+# App đã tạo từ trước
+sudo napp app set demo.example.com --auto-static
+
+# Hoặc ngay lúc tạo app
+sudo napp app create demo.example.com --repo ... --build-cmd "npm run build" --auto-static
+```
+
+`napp check` cũng tự báo app nào còn đẩy toàn bộ asset qua Node, và `napp check
+--fix` bật giúp:
+
+```
+- [nginx-static] 2 app đang đẩy TOÀN BỘ asset tĩnh qua tiến trình Node
+  (demo.example.com: SvelteKit (adapter-node), shop.example.com: Next.js)...
+```
+
+### Cấu hình tay
+
+```bash
+# SvelteKit / Nuxt / Astro / SolidStart — URL trùng tên thư mục -> dùng root
+sudo napp app set demo.example.com \
+  --static-root /var/www/demo.example.com/build/client --static-prefix /_app/
+
+# Next.js — URL khác tên thư mục -> phải dùng alias
+sudo napp app set shop.example.com \
+  --static-alias /_next/static/=/var/www/shop.example.com/.next/static
+```
+
+`--static-prefix` và `--static-alias` đều **lặp lại được**.
+
+napp **cố ý chỉ phục vụ theo tiền tố đã khai báo**, không dùng `try_files $uri`
+chung cho `location /`: một `try_files` chung sẽ đem cả cây thư mục ra đường (kể
+cả file lọt vào đó ngoài ý muốn) và có thể trả `index.html` tĩnh thay vì để app
+tự render.
+
+### Những cái bẫy đã được mã hoá sẵn trong bảng luật
+
+> **`--auto-static` nhận diện framework từ THƯ MỤC BUILD, không phải từ
+> `package.json`.** Deps ở gốc repo không nói được app con đang dùng adapter
+> nào (monorepo liệt kê cả `next` lẫn `@sveltejs/kit`), và cùng một app
+> SvelteKit thì `adapter-node` sinh `build/client` còn `adapter-static` sinh
+> `build` — deps giống hệt nhau. Hệ quả: **chỉ nhận diện được sau khi build**.
+> Chưa build thì không có gì trên đĩa để phục vụ, và napp trả về "không nhận ra"
+> thay vì đoán bừa.
+>
+> | Thấy trên đĩa | Framework | Tiền tố nginx chiếm |
+> |---|---|---|
+> | `build/client/_app/` | SvelteKit adapter-node | `/_app/` |
+> | `.next/static/` | Next.js | `/_next/static/` (qua `--static-alias`) |
+> | `.output/public/_nuxt/` | Nuxt 3 / Nitro | `/_nuxt/` |
+> | `.output/public/_build/` | SolidStart / Vinxi | `/_build/` |
+> | `dist/client/_astro/` · `dist/_astro/` | Astro | `/_astro/` |
+> | `build/client/assets/` | Remix / React Router v7 | `/assets/` — **chỉ gợi ý** |
+> | `dist/assets/` | Vite (SPA) | `/assets/` — **chỉ gợi ý** |
+
+> **Next.js: KHÔNG bao giờ lấy `/_next/` làm tiền tố, chỉ `/_next/static/`.**
+> Phần còn lại của `/_next/` **phải** đi qua Node: `/_next/image` là bộ tối ưu
+> ảnh chạy lúc request, `/_next/data` là payload điều hướng phía client. Chiếm
+> cả `/_next/` bằng nginx là mất tối ưu ảnh và hỏng navigation.
+>
+> Next.js cũng là framework duy nhất trong bảng cần `--static-alias` thay vì
+> `--static-root`: file nằm ở `.next/static/…` nhưng URL là `/_next/static/…`.
+> `root .next` sẽ đi tìm `.next/_next/static/…` — đường dẫn không tồn tại, nên
+> **toàn bộ JS/CSS trả 404 và trang trắng**. `alias` thì thay thế đúng tiền tố.
+
+> **`/assets/` chỉ được GỢI Ý, không bao giờ tự áp.** `/_app/`, `/_next/`,
+> `/_nuxt/`, `/_astro/` là namespace riêng của framework — không app nào đặt
+> route ở đó. `/assets/` thì là một đoạn URL bình thường mà app hoàn toàn có thể
+> dùng làm route thật. Mà `location ^~` **thắng cả route regex lẫn `proxy_pass`**,
+> nên áp nhầm là route đó **chết hẳn bằng 404**: không log, không lỗi, chỉ là
+> trang trắng. Kiểm tra app trước rồi áp tay bằng `napp app set`.
+
+> **napp tự cấp quyền đọc cho nginx — nếu không thì asset trả 403, không phải
+> file.** Thư mục app thuộc **user riêng của app** và để `750`, còn worker nginx
+> chạy bằng user khác (`www-data`), nên nó **không đi xuyên qua được**
+> `/var/www/<domain>`. Log nginx ghi `Permission denied`, rất dễ đọc nhầm thành
+> "sai đường dẫn". `--auto-static`, `--static-root` và `napp check --fix` đều tự
+> thêm `www-data` vào **nhóm** của app rồi **restart** nginx (reload *không* đủ:
+> danh sách nhóm chỉ được đọc lúc tiến trình khởi tạo). Đánh đổi: nginx đọc được
+> cây mã nguồn của app ở mức nhóm — `.env` vẫn an toàn vì để `600`, và nginx chỉ
+> phục vụ đúng các tiền tố `^~` đã khai báo.
+
+### File người dùng tải lên — `--upload-dir` (khác asset build)
+
+> **File tải lên cần `--upload-dir`, không dùng `--static-root` được.** Với
+> SvelteKit adapter-node (và tương tự), `static/` được **sao chép vào
+> `build/client/` lúc build** và lúc chạy server chỉ phục vụ `build/client`. Ảnh
+> admin tải lên **sau** khi build nằm ở `static/uploads`, không có trong
+> `build/client`, nên trả **404 dù file có thật trên đĩa** — rồi tự nhiên hiện
+> ra sau lần deploy kế tiếp vì build lại sao chép `static/`. Trông y như lỗi
+> chập chờn:
+>
+> ```bash
+> sudo napp app create pghotel.vn --repo ... \
+>   --upload-dir /var/www/pghotel.vn/apps/backend/static/uploads
+> ```
+
+> **`--hotlink-protect` chặn hotlink TUỲ TIỆN, không phải kiểm soát truy cập.**
+> `Referer` do trình duyệt tự khai — trang hotlink chỉ cần
+> `<meta name="referrer" content="no-referrer">` là đi qua. Và nếu có CDN đứng
+> trước, CDN cache theo URL và **không quan tâm `Referer`**: ảnh đã vào cache
+> edge được trả cho mọi referer mà không hỏi origin, nên cấu hình này chỉ tác
+> dụng với lần cache MISS — muốn chặn thật thì bật ở tầng CDN (Cloudflare có
+> sẵn Hotlink Protection trong Scrape Shield). Đừng "chữa" bằng `Vary: Referer`,
+> nó biến mỗi referer thành một bản cache riêng.
+>
+> `none` (không có `Referer`) được phép có chủ đích: bot lấy ảnh xem trước khi
+> chia sẻ link — Facebook, Zalo, Telegram — thường không gửi `Referer`, chặn nó
+> là **mọi link chia sẻ mất ảnh preview**.
+
+---
+
 ## ⚙️ Ví dụ: background service chạy ngầm (worker / bot / queue consumer)
 
 Không phải chương trình Node.js nào cũng có domain. Worker xử lý hàng đợi, bot
@@ -272,31 +413,6 @@ Lệnh này `chown` lại mã nguồn sang user mới, ghi lại unit và restar
 > tiền tố hàng đợi/cache). napp không sinh những biến đó — truyền bằng `--env`
 > với **cùng giá trị** cho cả hai.
 
-> **File tải lên cần `--upload-dir`, không dùng `--static-root` được.** Với
-> SvelteKit adapter-node (và tương tự), `static/` được **sao chép vào
-> `build/client/` lúc build** và lúc chạy server chỉ phục vụ `build/client`. Ảnh
-> admin tải lên **sau** khi build nằm ở `static/uploads`, không có trong
-> `build/client`, nên trả **404 dù file có thật trên đĩa** — rồi tự nhiên hiện
-> ra sau lần deploy kế tiếp vì build lại sao chép `static/`. Trông y như lỗi
-> chập chờn:
->
-> ```bash
-> sudo napp app create pghotel.vn --repo ... \
->   --upload-dir /var/www/pghotel.vn/apps/backend/static/uploads
-> ```
-
-> **`--hotlink-protect` chặn hotlink TUỲ TIỆN, không phải kiểm soát truy cập.**
-> `Referer` do trình duyệt tự khai — trang hotlink chỉ cần
-> `<meta name="referrer" content="no-referrer">` là đi qua. Và nếu có CDN đứng
-> trước, CDN cache theo URL và **không quan tâm `Referer`**: ảnh đã vào cache
-> edge được trả cho mọi referer mà không hỏi origin, nên cấu hình này chỉ tác
-> dụng với lần cache MISS — muốn chặn thật thì bật ở tầng CDN (Cloudflare có
-> sẵn Hotlink Protection trong Scrape Shield). Đừng "chữa" bằng `Vary: Referer`,
-> nó biến mỗi referer thành một bản cache riêng.
->
-> `none` (không có `Referer`) được phép có chủ đích: bot lấy ảnh xem trước khi
-> chia sẻ link — Facebook, Zalo, Telegram — thường không gửi `Referer`, chặn nó
-> là **mọi link chia sẻ mất ảnh preview**.
 - **Mọi mã nguồn nằm chung `/var/www`**: app web giữ tên domain
   (`/var/www/api.example.com`), service có hậu tố `-service`
   (`/var/www/queue-email-service`) — khỏi phân mảnh thư mục, dễ tìm. Nằm trong
@@ -357,6 +473,7 @@ Sau khi sửa tay: `sudo systemctl daemon-reload && sudo systemctl restart <unit
 ## 🔐 Bảo mật mặc định
 
 - Mỗi app: user Linux riêng (`nologin`), thư mục `750`, file `640`, `.env` `600`
+- Khi bật asset tĩnh, `www-data` được thêm vào **nhóm của app** để nginx đọc được thư mục build — nginx khi đó đọc được cây mã nguồn ở mức nhóm, nhưng **`.env` vẫn ngoài tầm** (`600`, chỉ chủ sở hữu) và nginx chỉ phục vụ đúng các tiền tố `^~` đã khai báo (không có `try_files` chung)
 - systemd service hardening: `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `ReadWritePaths` giới hạn đúng thư mục app
 - Database: mỗi app một database + user CSDL riêng, quyền chỉ trên database đó (không dùng root)
 - UFW: mặc định deny incoming, mở SSH + **80/443 công khai**. Việc lấy đúng IP client thật khi qua Cloudflare do nginx real-IP đảm nhiệm (`napp cloudflare sync`), độc lập với tường lửa. Nếu muốn khoá origin chỉ nhận traffic từ dải IP Cloudflare (chống bypass thẳng origin IP) thì thêm `--restrict-cloudflare` — lưu ý mọi domain phải bật proxy Cloudflare
@@ -553,6 +670,55 @@ lại vhost nên khối SSL certbot chèn vẫn nguyên vẹn), có sao lưu + h
 
 ---
 
+## 🧯 Asset tĩnh trả 403 — quyền đọc của nginx
+
+Triệu chứng: cấu hình `--static-root`/`--upload-dir` **đúng đường dẫn**, file có
+thật trên đĩa (`ls` thấy), nhưng trình duyệt nhận **403** cho mọi `.js`/`.css`/
+ảnh. Log nginx ghi:
+
+```
+open() "/var/www/demo.example.com/build/client/_app/…" failed (13: Permission denied)
+```
+
+Chữ **`Permission denied`** rất dễ đọc lướt thành "sai đường dẫn" — nhưng
+`failed (13)` là quyền, `failed (2)` mới là không tìm thấy file.
+
+Nguyên nhân nằm ở chính cơ chế cô lập của napp: thư mục app thuộc **user riêng
+của app** (`na_<slug>`) với thư mục `750` và file `640`, còn worker nginx chạy
+bằng **user khác** (`www-data`). Không thuộc nhóm `na_<slug>` thì `www-data`
+thậm chí **không đi xuyên qua nổi** `/var/www/<domain>`, chứ chưa nói tới đọc
+file bên trong.
+
+Từ **1.22.0** napp tự xử lý: `--auto-static`, `--static-root` và `napp check
+--fix` đều kiểm tra bằng `sudo -u www-data test -r`, và nếu không đọc được thì
+thêm `www-data` vào **nhóm** của app rồi **restart** nginx.
+
+```bash
+sudo napp check --fix          # phát hiện + sửa cho mọi app đang chạy
+sudo napp app set demo.example.com --auto-static   # hoặc sửa cho một app
+```
+
+Tự kiểm tra:
+
+```bash
+sudo -u www-data test -r /var/www/demo.example.com/build/client && echo OK
+id -nG www-data                # phải có na_<slug> của app
+```
+
+> **Phải `restart` chứ không `reload`.** Danh sách nhóm bổ sung chỉ được đọc
+> lúc tiến trình khởi tạo: master nginx đang chạy giữ nguyên danh sách cũ và
+> sinh worker từ đó, nên `reload` xong vẫn **403 y hệt** — một cái bẫy mất hàng
+> giờ để lần ra vì "đã cấp quyền rồi mà".
+
+> **Đánh đổi:** sau bước này nginx đọc được cây mã nguồn của app ở **mức nhóm**.
+> Không dùng `chmod o+rX` (mở cho mọi user local, phá đúng thứ napp đang giữ) và
+> không dùng `setfacl` (cần gói `acl` + filesystem bật acl). Quyền nhóm thì đã
+> sẵn đúng — `750`/`640` nghĩa là nhóm ĐÃ có `r-x`/`r--`, việc duy nhất còn
+> thiếu là cho nginx vào nhóm. `.env` vẫn an toàn vì để `600` (chủ sở hữu, không
+> phải nhóm), và nginx chỉ phục vụ đúng các tiền tố `^~` đã khai báo.
+
+---
+
 ## 🔄 Tự lưu trữ Gist + OTA update
 
 Để `napp update` hoạt động (giống `lara update`):
@@ -592,7 +758,8 @@ src/
   index.ts              # CLI entry (commander)
   version.ts             # version + changelog + URL update
   lib/                    # log, exec (dry-run/run-as), state (registry JSON),
-                          # validate, hardware, lock, mysql, envfile, cloudflare, network
+                          # validate, hardware, lock, mysql, envfile, cloudflare, network,
+                          # framework (nhận diện bố cục asset), staticaccess (quyền đọc cho nginx)
   templates/              # nginx, systemd (service/timer), fail2ban, tuning
   commands/               # check, app, domain, cert, db, redis, backup,
                           # firewall, fail2ban, tune, cloudflare, update, menu, installSelf

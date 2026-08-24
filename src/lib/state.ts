@@ -53,6 +53,14 @@ export interface AppRecord {
   // Asset build được nginx trả thẳng từ đĩa (xem NginxAppOptions).
   staticRoot?: string;
   staticPrefixes?: string[];
+  // Tiền tố URL phục vụ bằng `alias` thay vì `root` + try_files. Cần khi đoạn
+  // URL và tên thư mục trên đĩa KHÁC NHAU — Next.js là ca điển hình: URL
+  // '/_next/static/' nhưng file nằm ở '.next/static/'. Xem templates/nginx.ts.
+  staticAliases?: { prefix: string; dir: string }[];
+  // Framework nhận diện được lúc tạo/áp cấu hình tĩnh (lib/framework.ts). Chỉ
+  // để hiển thị và để bản napp sau suy lại tiền tố khi framework đổi quy ước —
+  // KHÔNG có logic nào rẽ nhánh theo giá trị này.
+  framework?: string;
   // Thư mục file tải lên lúc CHẠY (khác staticRoot — xem NginxAppOptions).
   uploadDir?: string;
   uploadPrefix?: string;

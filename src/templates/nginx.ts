@@ -211,6 +211,34 @@ ${staticPrefixes!
 `
       : "";
 
+  // --- asset tĩnh phục vụ bằng `alias` (tuỳ chọn) ---------------------------
+  // Dùng khi ĐOẠN URL và TÊN THƯ MỤC TRÊN ĐĨA KHÁC NHAU, nên `root` không ghép
+  // ra đúng đường dẫn. Ca kinh điển là Next.js: asset nằm ở '.next/static/…'
+  // nhưng URL là '/_next/static/…'. `root .next` sẽ nối nguyên URI vào sau root
+  // và đi tìm '.next/_next/static/…' — đường dẫn không bao giờ tồn tại, nên
+  // TOÀN BỘ JS/CSS trả 404 và trang trắng. `alias` thì THAY THẾ phần tiền tố đã
+  // khớp bằng thư mục, ra đúng '.next/static/…'.
+  //
+  // KHÔNG kèm `try_files` — cùng lý do đã ghi ở khối upload bên dưới: hành vi
+  // của try_files trong location dùng alias khác nhau giữa các bản nginx, mà bỏ
+  // đi thì nginx vẫn trả 404 đúng khi thiếu file.
+  const aliasBlock = (app.staticAliases ?? [])
+    .map(
+      (a) => `
+    location ^~ ${a.prefix} {
+        alias ${a.dir.replace(/\/+$/, "")}/;
+        # Lặp lại ba header bảo mật vì cùng lý do như khối trên: một add_header
+        # trong location con là nginx bỏ toàn bộ add_header kế thừa từ server.
+        add_header X-Frame-Options "SAMEORIGIN" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+        access_log off;
+    }
+`
+    )
+    .join("");
+
   // --- file người dùng tải lên (tuỳ chọn) -----------------------------------
   // Đây là một cái bẫy riêng, KHÔNG dùng staticRoot giải quyết được.
   //
@@ -280,9 +308,9 @@ ${hotlinkBlock}
     : "";
 
 
-  const out = `${staticBlock}${uploadBlock}`;
+  const out = `${staticBlock}${aliasBlock}${uploadBlock}`;
   return out.trim().length === 0
-    ? `# Managed by napp — site: ${app.domain}\n# Chưa bật tuỳ chọn nào (--static-root / --upload-dir). File giữ lại vì vhost include nó.\n`
+    ? `# Managed by napp — site: ${app.domain}\n# Chưa bật tuỳ chọn nào (--static-root / --static-alias / --upload-dir). File giữ lại vì vhost include nó.\n`
     : `# Managed by napp — location riêng của ${app.domain}. TỰ SINH, đừng sửa tay.\n# Cập nhật bằng: napp app set ${app.domain} ...\n${out}`;
 }
 

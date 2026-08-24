@@ -16,6 +16,42 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.22.0
+- MỚI '--auto-static': napp NHẬN DIỆN FRAMEWORK từ THƯ MỤC BUILD rồi cho nginx
+  trả thẳng asset, thay vì bắt bạn tự tra tiền tố. Nhận: SvelteKit adapter-node
+  ('build/client/_app' -> /_app/), Next.js ('.next/static' -> /_next/static/),
+  Nuxt 3/Nitro ('.output/public/_nuxt' -> /_nuxt/), SolidStart/Vinxi
+  ('.output/public/_build' -> /_build/), Astro ('dist/client/_astro' hoặc
+  'dist/_astro' -> /_astro/). Dùng được ở cả 'app create' và 'app set'.
+  Căn cứ là THƯ MỤC CÓ THẬT chứ không phải dependencies: package.json ở gốc
+  monorepo không nói được app con dùng adapter nào, và cùng một app SvelteKit
+  thì adapter-node sinh 'build/client' còn adapter-static sinh 'build' với deps
+  y hệt. Hệ quả: chỉ nhận diện được SAU khi build — chưa build thì báo không
+  nhận ra, không đoán bừa.
+- MỚI '--static-alias <tiền-tố>=<thư-mục>': phục vụ bằng 'alias' thay vì 'root'.
+  Cần cho Next.js — file ở '.next/static/…' nhưng URL là '/_next/static/…', nên
+  'root .next' đi tìm '.next/_next/static/…' và TOÀN BỘ JS/CSS trả 404 (trang
+  trắng). Với Next.js, napp CHỈ chiếm '/_next/static/': '/_next/image' (tối ưu
+  ảnh lúc request) và '/_next/data' (payload điều hướng) PHẢI đi qua Node.
+- '/assets/' (Remix · React Router v7 · Vite SPA) CHỈ ĐƯỢC GỢI Ý, không bao giờ
+  tự áp — kể cả khi có --auto-static. '/_app/', '/_next/', '/_nuxt/', '/_astro/'
+  là namespace riêng của framework nên chiếm được an toàn; '/assets/' thì app
+  hoàn toàn có thể dùng làm route thật, mà 'location ^~' thắng cả route regex
+  lẫn proxy_pass -> áp nhầm là route đó chết hẳn bằng 404, không log, không lỗi.
+- SỬA LỖI: asset tĩnh trả 403 chứ không phải file. Thư mục app thuộc user riêng
+  và để 750, worker nginx chạy bằng user khác (www-data) nên không đi xuyên qua
+  nổi /var/www/<domain> — nghĩa là MỌI cấu hình --static-root/--upload-dir từ
+  trước tới nay đều 403 trên máy sạch, và log nginx ghi 'Permission denied', rất
+  dễ đọc nhầm thành sai đường dẫn. napp nay tự thêm www-data vào NHÓM của app
+  rồi RESTART nginx (reload không đủ: danh sách nhóm chỉ đọc lúc tiến trình khởi
+  tạo). '.env' vẫn an toàn vì để 600.
+- 'napp check' nay báo hai thứ mới, cho app ĐANG CHẠY: (1) app nào còn đẩy toàn
+  bộ asset qua Node dù nhận diện được framework — loại hỏng không có triệu chứng
+  nào ngoài 'vào dashboard thấy giựt'; (2) app nào có cấu hình tĩnh mà nginx
+  không đọc được. '--fix' sửa được cả hai (trừ nhóm '/assets/' rủi ro).
+- Menu tương tác: thêm mục 'Bật nginx trả asset tĩnh', và bước tạo app có hỏi
+  luôn. CỐ Ý hỏi chứ không bật ngầm — napp đang chiếm một tiền tố URL.
+
 ## 1.21.0
 - Sửa tay unit systemd KHÔNG còn bị ghi đè. Mỗi unit mang dòng
   '# napp-fingerprint:'; lệch fingerprint = đã có người sửa, napp so từng

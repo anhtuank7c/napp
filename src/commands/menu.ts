@@ -1,7 +1,7 @@
 import readline from "node:readline/promises";
 import { cmdCheck } from "./check";
 import { cmdDoctor, cmdDoctorSystem, cmdDoctorDeps, cmdDoctorUpgrade } from "./doctor";
-import { cmdAppCreate, cmdAppDeploy, cmdAppRemove, cmdAppList, cmdAppRestart, cmdAppLogs, listAppSummaries } from "./app";
+import { cmdAppCreate, cmdAppDeploy, cmdAppRemove, cmdAppList, cmdAppRestart, cmdAppLogs, cmdAppSet, listAppSummaries } from "./app";
 import {
   cmdServiceCreate,
   cmdServiceDeploy,
@@ -210,6 +210,7 @@ async function menuApp(): Promise<void> {
       "Deploy (git pull + rebuild + restart)",
       "Restart app",
       "Xem log (tail 100 dòng)",
+      "Bật nginx trả asset tĩnh (tự nhận diện framework)",
       "Xoá app",
     ]);
     const choice = await ask("Chọn: ");
@@ -237,6 +238,9 @@ async function menuApp(): Promise<void> {
         const packageManager = await askChoice<PackageManager>("Trình quản lý gói phụ thuộc", ["npm", "pnpm", "yarn", "bun"], pmDefault);
         const db = await askYesNo("Tạo database MariaDB riêng cho app này?");
         const redis = await askYesNo("Cấp Redis DB riêng cho app này?");
+        // Hỏi thay vì bật ngầm: napp chiếm tiền tố URL bằng 'location ^~', thứ
+        // thắng cả proxy_pass. Người dùng phải BIẾT điều đó đang xảy ra.
+        const autoStatic = await askYesNo("Cho nginx trả thẳng asset tĩnh nếu nhận diện được framework (nhanh hơn nhiều)?");
         await cmdAppCreate(domain, {
           repo: repo || undefined,
           branch: "main",
@@ -246,6 +250,7 @@ async function menuApp(): Promise<void> {
           packageManager,
           db,
           redis,
+          autoStatic,
           env: [],
         });
       });
@@ -265,6 +270,11 @@ async function menuApp(): Promise<void> {
         if (domain) cmdAppLogs(domain, { follow: false, lines: 100 });
       });
     } else if (choice === "6") {
+      await guard(async () => {
+        const domain = await askAppDomain("bật asset tĩnh");
+        if (domain) cmdAppSet(domain, { autoStatic: true });
+      });
+    } else if (choice === "7") {
       await guard(async () => {
         const domain = await askAppDomain("XOÁ");
         if (!domain) return;
