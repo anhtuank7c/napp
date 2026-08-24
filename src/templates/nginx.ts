@@ -23,6 +23,12 @@ export function appLocationsPath(domain: string): string {
   return `${NGINX_LOCATIONS_DIR}/${domain}.conf`;
 }
 
+// File location do NGƯỜI DÙNG viết. napp include nó vào cuối file tự sinh và
+// KHÔNG BAO GIỜ ghi đè — xem lib/locationsfile.ts về lý do nó phải tồn tại.
+export function appCustomLocationsPath(domain: string): string {
+  return `${NGINX_LOCATIONS_DIR}/${domain}.custom.conf`;
+}
+
 // Biến $napp_connection_upgrade: chỉ gửi 'Connection: upgrade' cho request
 // WebSocket THẬT SỰ. Tên có tiền tố napp_ để không đụng map $connection_upgrade
 // mà người dùng có thể đã tự khai báo ở nơi khác (trùng tên -> nginx báo lỗi).
@@ -171,6 +177,44 @@ export function renderAppLocationsConf(app: AppRecord): string {
   const uploadPrefix = app.uploadPrefix ?? "/uploads/";
   const hotlinkProtect = app.hotlinkProtect ?? false;
   const hotlinkAllow = app.hotlinkAllow;
+  const hotlinkStrict = app.hotlinkStrict ?? false;
+
+  // --- Cross-Origin-Resource-Policy: lớp chặn hotlink THẬT SỰ ----------------
+  //
+  // Khác `valid_referers` ở đúng chỗ quan trọng nhất: CORP do TRÌNH DUYỆT CỦA
+  // NGƯỜI XEM thực thi, dựa trên header do SERVER CỦA BẠN gửi ra. Trang hotlink
+  // không có cách nào tác động tới nó — trong khi Referer là thứ chính trang đó
+  // khai báo, nên chỉ cần một thẻ <meta name="referrer" content="no-referrer">
+  // là toàn bộ `valid_referers` bị vô hiệu.
+  //
+  // Và nó SỐNG SÓT QUA CDN. Cloudflare cache theo URL rồi trả bản cache cho mọi
+  // referer mà không hỏi origin, nên kiểm tra Referer ở origin gần như vô dụng
+  // khi có CDN đứng trước. CORP thì nằm trong chính response đã cache, và trình
+  // duyệt vẫn thực thi nó ở phía người xem — cache hay không cache đều như nhau.
+  //
+  // KHÔNG phá thứ mà '--hotlink-strict' phá:
+  //   - Bot lấy ảnh preview (Facebook, Zalo, Telegram) tải ảnh Ở PHÍA SERVER,
+  //     không phải trình duyệt, nên CORP không áp — link chia sẻ VẪN có ảnh.
+  //   - Gõ thẳng URL ảnh là ĐIỀU HƯỚNG cấp cao nhất, không phải subresource
+  //     nhúng vào trang khác, nên cũng không bị chặn.
+  //
+  // Chọn 'same-site' chứ không 'same-origin': napp tự thêm alias 'www.<domain>',
+  // và admin/api thường nằm ở subdomain khác. 'same-origin' sẽ chặn chính
+  // www.<domain> nhúng ảnh của <domain> — hỏng ngay trên site của mình.
+  //
+  // GIỚI HẠN: CORP chỉ có ba giá trị (same-origin/same-site/cross-origin), KHÔNG
+  // có danh sách cho phép theo domain. Nên khi người dùng đã khai '--hotlink-allow'
+  // để cho phép domain NGOÀI nhúng, ta KHÔNG phát CORP — phát ra là chặn đúng
+  // những domain vừa được cho phép, và lỗi đó im lặng (ảnh vỡ ở phía đối tác).
+  // Khi đó chỉ còn `valid_referers` làm việc, và app.ts nói rõ điều này ra.
+  const corpApplies = hotlinkProtect && (hotlinkAllow?.length ?? 0) === 0;
+  const corpHeader = corpApplies
+    ? `
+        # Chặn hotlink do TRÌNH DUYỆT thực thi — trang nhúng không tác động được,
+        # và nó vẫn hiệu lực sau khi đi qua cache CDN. Xem chú thích ở nginx.ts.
+        add_header Cross-Origin-Resource-Policy "same-site" always;`
+    : "";
+
   // --- asset tĩnh (tuỳ chọn) ------------------------------------------------
   // Không có staticRoot thì MỌI request — kể cả từng file .js/.css/.woff2 — đều
   // đi qua tiến trình Node. Một trang của app SPA/SSR hiện đại kéo hàng trăm
@@ -203,7 +247,7 @@ ${staticPrefixes!
         # sinh ra Cache-Control, và hai chỉ thị cùng lúc trả về HAI header.
         # 'immutable' mới là phần đáng giá: nó bỏ luôn bước revalidate khi người
         # dùng bấm tải lại, thứ mà 'expires' một mình không làm được.
-        add_header Cache-Control "public, max-age=31536000, immutable" always;
+        add_header Cache-Control "public, max-age=31536000, immutable" always;${corpHeader}
         access_log off;
     }`
   )
@@ -232,7 +276,7 @@ ${staticPrefixes!
         add_header X-Frame-Options "SAMEORIGIN" always;
         add_header X-Content-Type-Options "nosniff" always;
         add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-        add_header Cache-Control "public, max-age=31536000, immutable" always;
+        add_header Cache-Control "public, max-age=31536000, immutable" always;${corpHeader}
         access_log off;
     }
 `
@@ -279,13 +323,15 @@ ${staticPrefixes!
   //     không hỏi origin. Cấu hình này khi đó chỉ tác dụng với lần cache MISS.
   //     Muốn chặn thật thì bật ở tầng CDN. KHÔNG thêm 'Vary: Referer' để chữa —
   //     nó biến mỗi referer thành một bản cache riêng và phá nát hiệu quả cache.
+  //  3. Với '--hotlink-strict', 'none' và 'blocked' BỊ BỎ khỏi danh sách. Chặt
+  //     hơn thật, nhưng đổi lại đúng những thiệt hại kể trên: mất ảnh preview
+  //     khi chia sẻ link, và người dùng thật sau proxy công ty bị 403.
+  const referers = hotlinkStrict ? ["server_names"] : ["none", "blocked", "server_names"];
   const hotlinkBlock = hotlinkProtect
     ? `
         # Chỉ cho nhúng từ chính domain này. Xem chú thích ở nginx.ts về vì sao
-        # 'none' và 'blocked' được phép, và vì sao đây không phải kiểm soát truy cập.
-        valid_referers none blocked server_names${
-          (hotlinkAllow?.length ?? 0) > 0 ? " " + hotlinkAllow!.join(" ") : ""
-        };
+        # 'none' và 'blocked' được phép${hotlinkStrict ? " (đã BỎ vì --hotlink-strict)" : ""}, và vì sao đây không phải kiểm soát truy cập.
+        valid_referers ${referers.join(" ")}${(hotlinkAllow?.length ?? 0) > 0 ? " " + hotlinkAllow!.join(" ") : ""};
         if ($invalid_referer) { return 403; }
 `
     : "";
@@ -301,17 +347,31 @@ ${hotlinkBlock}
         # Ngắn hơn asset build rất nhiều: tên file tải lên KHÔNG băm nội dung,
         # nên cùng một URL có thể đổi nội dung. 'immutable' ở đây sẽ khoá bản cũ
         # trong cache trình duyệt hàng năm trời.
-        add_header Cache-Control "public, max-age=86400" always;
+        add_header Cache-Control "public, max-age=86400" always;${corpHeader}
         access_log off;
     }
 `
     : "";
 
 
+  // Include file sidecar ở CUỐI, sau mọi location napp sinh ra. Thứ tự trong
+  // file không quyết định location nào thắng (nginx chọn theo độ dài tiền tố,
+  // không theo vị trí), nên đặt cuối chỉ để người đọc thấy rõ ranh giới giữa
+  // phần tự sinh và phần của mình.
+  //
+  // LUÔN include, kể cả khi app chưa bật tuỳ chọn nào — file sidecar được
+  // lib/locationsfile.ts tạo sẵn (rỗng) trước mỗi lần ghi, nên include không
+  // bao giờ trỏ vào file không tồn tại.
+  const customInclude =
+    `\n    # Location do BẠN viết. napp KHÔNG BAO GIỜ ghi đè file dưới đây — đặt\n` +
+    `    # location riêng vào đó thay vì sửa file này (file này bị render lại\n` +
+    `    # mỗi lần 'napp app set' / 'napp domain add' chạy).\n` +
+    `    include ${appCustomLocationsPath(app.domain)};\n`;
+
   const out = `${staticBlock}${aliasBlock}${uploadBlock}`;
   return out.trim().length === 0
-    ? `# Managed by napp — site: ${app.domain}\n# Chưa bật tuỳ chọn nào (--static-root / --static-alias / --upload-dir). File giữ lại vì vhost include nó.\n`
-    : `# Managed by napp — location riêng của ${app.domain}. TỰ SINH, đừng sửa tay.\n# Cập nhật bằng: napp app set ${app.domain} ...\n${out}`;
+    ? `# Managed by napp — site: ${app.domain}\n# Chưa bật tuỳ chọn nào (--static-root / --static-alias / --upload-dir). File giữ lại vì vhost include nó.\n${customInclude}`
+    : `# Managed by napp — location riêng của ${app.domain}. TỰ SINH, đừng sửa tay.\n# Cập nhật bằng: napp app set ${app.domain} ...\n${out}${customInclude}`;
 }
 
 // Vhost reverse-proxy CHỈ HTTP (giống lara.sh: certbot sẽ tự sửa file này để

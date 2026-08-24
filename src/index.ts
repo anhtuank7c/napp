@@ -182,7 +182,8 @@ app
   .option("--static-root <dir>", "thư mục asset build để NGINX trả thẳng thay vì qua Node (vd '<webRoot>/build/client')")
   .option("--upload-dir <dir>", "thư mục file NGƯỜI DÙNG TẢI LÊN lúc chạy — KHÁC --static-root, xem README (vd '<webRoot>/static/uploads')")
   .option("--upload-prefix <path>", "tiền tố URL của --upload-dir (mặc định '/uploads/')")
-  .option("--hotlink-protect", "chỉ cho nhúng ảnh trong --upload-dir từ domain của site (chặn hotlink tuỳ tiện)")
+  .option("--hotlink-protect", "chỉ cho nhúng asset/ảnh từ domain của site (CORP do trình duyệt thực thi + kiểm tra Referer)")
+  .option("--hotlink-strict", "chặt hơn: BỎ 'none'/'blocked' khỏi valid_referers — đổi lại MẤT ảnh preview khi chia sẻ link")
   .option(
     "--hotlink-allow <domain...>",
     "domain NGOÀI cũng được phép nhúng, lặp lại được (vd 'partner.com' hoặc '*.cdn.net')",
@@ -229,6 +230,7 @@ app
       uploadDir: opts.uploadDir,
       uploadPrefix: opts.uploadPrefix,
       hotlinkProtect: Boolean(opts.hotlinkProtect),
+      hotlinkStrict: Boolean(opts.hotlinkStrict),
       hotlinkAllow: (opts.hotlinkAllow ?? []).length > 0 ? opts.hotlinkAllow : undefined,
       env: opts.env ?? [],
     });
@@ -290,8 +292,10 @@ app
   .option("--auto-static", "nhận diện framework từ thư mục build rồi áp cấu hình tĩnh phù hợp (SvelteKit, Next.js, Nuxt, SolidStart, Astro)")
   .option("--upload-dir <dir>", "thư mục file NGƯỜI DÙNG TẢI LÊN lúc chạy (khác --static-root)")
   .option("--upload-prefix <path>", "tiền tố URL của --upload-dir (mặc định '/uploads/')")
-  .option("--hotlink-protect", "chỉ cho nhúng ảnh trong --upload-dir từ domain của site")
+  .option("--hotlink-protect", "chỉ cho nhúng asset/ảnh từ domain của site (CORP + kiểm tra Referer)")
   .option("--no-hotlink-protect", "tắt chặn hotlink")
+  .option("--hotlink-strict", "chặt hơn: BỎ 'none'/'blocked' khỏi valid_referers — đổi lại MẤT ảnh preview khi chia sẻ link")
+  .option("--no-hotlink-strict", "quay lại mức mặc định (cho phép 'none'/'blocked')")
   .option(
     "--hotlink-allow <domain...>",
     "domain NGOÀI cũng được phép nhúng, lặp lại được",
@@ -311,6 +315,7 @@ app
       // có --no-hotlink-protect; KHÔNG truyền cờ nào thì nó là undefined nhờ
       // không khai báo default -> cmdAppSet bỏ qua, không ghi đè giá trị cũ.
       hotlinkProtect: opts.hotlinkProtect,
+      hotlinkStrict: opts.hotlinkStrict,
       hotlinkAllow: (opts.hotlinkAllow ?? []).length > 0 ? opts.hotlinkAllow : undefined,
       maxBody: opts.maxBody,
     })

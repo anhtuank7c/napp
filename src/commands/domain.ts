@@ -3,7 +3,8 @@ import { execCapture, runCmd, requireRoot, writeFile, ensureDir } from "../lib/e
 import { validateDomain } from "../lib/validate";
 import { info, ok, die, warn } from "../lib/log";
 import { requireApp, upsertApp, NGINX_AVAILABLE, NGINX_ENABLED } from "../lib/state";
-import { renderAppNginxConf, renderAppLocationsConf, appLocationsPath, NGINX_LOCATIONS_DIR } from "../templates/nginx";
+import { renderAppNginxConf } from "../templates/nginx";
+import { writeAppLocationsConf } from "../lib/locationsfile";
 import { ipv6Available } from "../lib/network";
 
 function regenerateNginxConf(domain: string): void {
@@ -14,8 +15,7 @@ function regenerateNginxConf(domain: string): void {
   // không bật tuỳ chọn nào: nginx TỪ CHỐI KHỞI ĐỘNG nếu include trỏ vào file
   // không tồn tại, nên với app tạo bằng bản napp cũ (chưa có file này) thì
   // regenerate mà thiếu bước này sẽ làm sập nginx của TOÀN MÁY, không riêng site.
-  ensureDir(NGINX_LOCATIONS_DIR, 0o755);
-  writeFile(appLocationsPath(domain), renderAppLocationsConf(app), 0o644);
+  writeAppLocationsConf(app);
 
   // Sao lưu để hoàn tác được: đây là ghi đè TOÀN BỘ vhost.
   const bak = `${ngxConf}.napp-bak`;

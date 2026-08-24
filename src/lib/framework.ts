@@ -184,6 +184,55 @@ export function detectStaticLayout(appRoot: string): StaticSuggestion | null {
   return null;
 }
 
+/**
+ * Thư mục FILE NGƯỜI DÙNG TẢI LÊN, nhận diện được một cách AN TOÀN.
+ *
+ * Trước đây napp cố ý không đoán chỗ này, với lý do "không framework nào khai
+ * báo app ghi file tải lên vào đâu". Đúng ở dạng tổng quát, nhưng nó bỏ sót một
+ * ca hẹp mà suy luận CÓ căn cứ chắc chắn: thư mục tên 'uploads' nằm NGAY TRONG
+ * GỐC TĨNH CÔNG KHAI của framework ('static/' của SvelteKit, 'public/' của
+ * Next/Nuxt/Astro/Vite).
+ *
+ * Vì sao ca đó an toàn: 'static/' và 'public/' theo ĐỊNH NGHĨA của framework là
+ * thư mục được phục vụ công khai — lệnh build sao chép nguyên chúng vào output.
+ * Nghĩa là '<gốc tĩnh>/uploads' ĐÃ công khai sẵn ở mọi bản build; cho nginx phục
+ * vụ nó KHÔNG mở thêm bất cứ thứ gì. Nó chỉ vá đúng khoảng trống: file tải lên
+ * SAU lần build gần nhất không có trong output nên trả 404, rồi tự hiện ra sau
+ * lần deploy kế tiếp — trông hệt như lỗi chập chờn.
+ *
+ * CỐ Ý KHÔNG đoán các thư mục ngoài gốc tĩnh ('./uploads', './storage',
+ * './media'...): những chỗ đó app tự chọn, không có gì bảo đảm chúng được phép
+ * công khai, và đoán sai ở đây là đem file riêng tư ra đường. Người dùng vẫn
+ * khai báo tay được bằng '--upload-dir'.
+ */
+export interface UploadSuggestion {
+  /** Thư mục trên đĩa (tuyệt đối). */
+  dir: string;
+  /** Tiền tố URL đề nghị. */
+  prefix: string;
+  /** Gốc tĩnh công khai đã tìm thấy nó ('static' hoặc 'public'). */
+  publicRoot: string;
+}
+
+// Gốc tĩnh công khai theo quy ước: SvelteKit dùng 'static/', phần còn lại của
+// hệ sinh thái (Next, Nuxt, Astro, Vite, Remix) dùng 'public/'.
+const PUBLIC_ROOTS = ["static", "public"];
+// Tên thư mục tải lên theo quy ước. Giữ danh sách NGẮN có chủ đích: mỗi tên
+// thêm vào là một cơ hội phục vụ nhầm một thư mục không định công khai.
+const UPLOAD_DIRS = ["uploads", "upload"];
+
+export function detectUploadDir(appRoot: string): UploadSuggestion | null {
+  if (!isDir(appRoot)) return null;
+  for (const root of PUBLIC_ROOTS) {
+    if (!isDir(join(appRoot, root))) continue;
+    for (const name of UPLOAD_DIRS) {
+      const dir = join(appRoot, `${root}/${name}`);
+      if (isDir(dir)) return { dir, prefix: `/${name}/`, publicRoot: root };
+    }
+  }
+  return null;
+}
+
 /** Các cờ CLI tương ứng một gợi ý — dùng chung cho cả lúc áp lẫn lúc in ra. */
 export function staticFlags(s: StaticSuggestion): string[] {
   const out: string[] = [];

@@ -65,8 +65,9 @@ bật** trên các app ĐANG CHẠY — những thứ không có lệnh nào t�
 | Vhost còn bộ đệm proxy `16k` nội tuyến | Route SvelteKit lồng sâu trả 502 |
 | App còn đẩy **toàn bộ asset tĩnh** qua Node | App chậm mà **không có lỗi nào để lần ra** |
 | nginx **không đọc được** thư mục asset đã cấu hình | Asset trả **403** chứ không phải file |
+| Thư mục tải lên trong gốc tĩnh công khai chưa được phục vụ | File tải lên sau lần build gần nhất trả **404**, rồi tự hiện ra sau deploy — giống lỗi chập chờn |
 
-`--fix` sửa được cả bốn (trừ tiền tố `/assets/` rủi ro — xem phần asset tĩnh).
+`--fix` sửa được cả năm (trừ tiền tố `/assets/` rủi ro — xem phần asset tĩnh).
 
 ---
 
@@ -293,6 +294,17 @@ tự render.
 
 ### File người dùng tải lên — `--upload-dir` (khác asset build)
 
+Từ **1.23.0** `--auto-static` nhận diện luôn thư mục này, nhưng **chỉ trong ca
+an toàn**: thư mục tên `uploads`/`upload` nằm **ngay trong gốc tĩnh công khai**
+của framework (`static/` với SvelteKit, `public/` với Next/Nuxt/Astro/Vite).
+Những thư mục đó theo **định nghĩa của framework** đã công khai — build sao chép
+nguyên chúng vào output — nên phục vụ chúng **không mở thêm gì**.
+
+napp **cố ý không đoán** thư mục nằm ngoài gốc tĩnh (`./uploads`, `./storage`,
+`./media`…): chỗ đó app tự chọn, không có gì bảo đảm được phép công khai, và
+đoán sai ở đây là **đem file riêng tư ra đường**. Khai báo tay bằng
+`--upload-dir` cho những trường hợp đó.
+
 > **File tải lên cần `--upload-dir`, không dùng `--static-root` được.** Với
 > SvelteKit adapter-node (và tương tự), `static/` được **sao chép vào
 > `build/client/` lúc build** và lúc chạy server chỉ phục vụ `build/client`. Ảnh
@@ -306,6 +318,63 @@ tự render.
 >   --upload-dir /var/www/pghotel.vn/apps/backend/static/uploads
 > ```
 
+### Chặn hotlink — hai lớp, sức mạnh rất khác nhau
+
+```bash
+sudo napp app set pghotel.vn --hotlink-protect
+```
+
+Từ **1.23.0** cờ này bật **hai** lớp, và cần hiểu rõ lớp nào làm được gì:
+
+| | `Cross-Origin-Resource-Policy` | `valid_referers` |
+|---|---|---|
+| Ai thực thi | **Trình duyệt người xem**, theo header server bạn gửi | nginx của bạn, theo header trang nhúng khai |
+| Trang hotlink lách được? | **Không** — nó không đổi được header bạn gửi | **Được**, chỉ cần một thẻ `<meta name="referrer" content="no-referrer">` |
+| Còn tác dụng sau CDN? | **Có** — nằm trong chính response đã cache | **Gần như không** — CDN cache theo URL, trả cho mọi referer |
+| Cho phép domain ngoài? | Không (chỉ same-origin/same-site/cross-origin) | **Có** — `--hotlink-allow partner.com` |
+| Chặn được scraper server-side? | Không | Không |
+
+Nói ngắn: **CORP là lớp thật sự chặn được**, `valid_referers` là rào cản tuỳ
+tiện còn lại để hỗ trợ danh sách cho phép. Trước 1.23.0 napp chỉ có lớp thứ hai —
+tức là hotlink chặn được bằng **một dòng HTML** ở phía trang đi ăn cắp.
+
+napp dùng `same-site` chứ không `same-origin`: napp tự thêm alias `www.<domain>`
+và admin/api thường nằm ở subdomain khác, nên `same-origin` sẽ chặn **chính site
+của bạn** nhúng ảnh của mình.
+
+> **CORP không được phát khi bạn dùng `--hotlink-allow`.** CORP chỉ có ba giá trị
+> và **không diễn đạt được danh sách cho phép theo domain** — bật nó lên là chặn
+> đúng những đối tác bạn vừa cho phép, và ảnh vỡ ở phía họ mà không ai báo cho
+> bạn. Khi đó chỉ còn `valid_referers`, tức là chỉ còn rào cản tuỳ tiện; napp nói
+> rõ điều này ra mỗi lần bạn cấu hình. Cần chặn **thật** mà vẫn cho đối tác nhúng
+> thì phải dùng **URL ký** (`ngx_http_secure_link_module`) hoặc bật ở tầng CDN.
+
+**Muốn chặt hơn nữa** — bỏ luôn nhóm không có `Referer`:
+
+```bash
+sudo napp app set pghotel.vn --hotlink-protect --hotlink-strict
+```
+
+> ⚠️ `--hotlink-strict` **đắt hơn nhiều so với thứ nó ngăn được**: bot lấy ảnh
+> preview (Facebook, Zalo, Telegram, Slack) thường **không gửi `Referer`**, nên
+> mọi link chia sẻ của bạn **mất ảnh preview**. Người dùng thật sau proxy công ty
+> (nhóm `blocked`) cũng bị **403**. Với CORP đã bật sẵn, phần lớn trường hợp
+> **không cần** cờ này — CORP đã chặn nhúng cross-site rồi, mà **không** đụng tới
+> bot preview (chúng tải ảnh ở phía server, CORP là cơ chế của trình duyệt) và
+> không đụng tới việc gõ thẳng URL ảnh (đó là điều hướng, không phải nhúng).
+
+> **Nếu bạn đang dùng Cloudflare proxy**, hãy bật thêm **Hotlink Protection**
+> trong Scrape Shield. Kiểm tra `Referer` ở origin gần như vô nghĩa sau CDN: ảnh
+> đã vào cache edge được Cloudflare trả cho mọi referer mà **không hỏi origin**,
+> nên cấu hình origin chỉ tác dụng ở lần cache MISS. (CORP thì vẫn chạy, vì nó đi
+> theo response.) Đừng "chữa" bằng `Vary: Referer` — nó biến mỗi referer thành
+> một bản cache riêng và phá nát hiệu quả cache.
+
+> **Không lớp nào chống được scraper server-side.** Một script `curl` về rồi tự
+> host lại thì mọi cơ chế trên đều vô hiệu — chúng chỉ chặn **nhúng trực tiếp**.
+> Ảnh thật sự riêng tư phải đi qua kiểm soát truy cập của app (URL ký có hạn
+> dùng, kiểm tra phiên đăng nhập), không phải qua cấu hình nginx.
+
 > **`--hotlink-protect` chặn hotlink TUỲ TIỆN, không phải kiểm soát truy cập.**
 > `Referer` do trình duyệt tự khai — trang hotlink chỉ cần
 > `<meta name="referrer" content="no-referrer">` là đi qua. Và nếu có CDN đứng
@@ -318,6 +387,49 @@ tự render.
 > `none` (không có `Referer`) được phép có chủ đích: bot lấy ảnh xem trước khi
 > chia sẻ link — Facebook, Zalo, Telegram — thường không gửi `Referer`, chặn nó
 > là **mọi link chia sẻ mất ảnh preview**.
+
+---
+
+## 🧩 Location nginx tự viết — dùng file `.custom.conf`
+
+`/etc/nginx/napp-locations/<domain>.conf` là file **tự sinh**: `napp app create`,
+`napp app set` và `napp domain add/remove` đều **render lại toàn bộ** nó từ
+registry. Mọi thứ bạn thêm tay vào đó sẽ biến mất vào lần chạy kế tiếp của bất kỳ
+lệnh nào trong ba lệnh trên — và triệu chứng (ảnh vỡ, route 404) chỉ hiện ra rất
+lâu sau, vào lúc **không liên quan gì tới lệnh đã gây ra nó**.
+
+Chỗ đúng để đặt location riêng là file sidecar bên cạnh, napp **không bao giờ**
+ghi đè:
+
+```
+/etc/nginx/napp-locations/<domain>.conf          <- TỰ SINH, đừng sửa
+/etc/nginx/napp-locations/<domain>.custom.conf   <- của BẠN, napp không đụng
+```
+
+File `.custom.conf` được `include` **bên trong khối `server`** của vhost, nên
+viết thẳng các khối `location …` là được:
+
+```nginx
+location ^~ /tai-lieu/ {
+    alias /var/www/pghotel.vn/documents/;
+    add_header X-Content-Type-Options "nosniff" always;
+}
+```
+
+```bash
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+> **napp cảnh báo trước khi làm mất.** Trước mỗi lần ghi đè, napp so tập tiền tố
+> `location ^~` cũ với mới. Tiền tố nào sắp biến mất thì file cũ được **sao lưu**
+> sang `<domain>.conf.napp-orphaned` và napp nói rõ mất cái gì — kèm hai hướng
+> xử lý: chuyển sang `.custom.conf` (nếu là location bạn viết), hoặc khai báo lại
+> vào registry bằng `napp app set` (nếu đó là cấu hình napp bị rơi mất).
+>
+> Cố ý so **tiền tố** chứ không dùng fingerprint như unit systemd: file của app
+> tạo bằng bản napp cũ không có fingerprint nào, dùng cách đó là **cảnh báo sai
+> hàng loạt** ngay lần nâng cấp đầu tiên — và người dùng học được cách bỏ qua
+> cảnh báo của napp.
 
 ---
 

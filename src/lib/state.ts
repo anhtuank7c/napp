@@ -67,6 +67,9 @@ export interface AppRecord {
   // Chặn hotlink ảnh (chỉ cho nhúng từ domain của site). Xem NginxAppOptions.
   hotlinkProtect?: boolean;
   hotlinkAllow?: string[];
+  // Bỏ 'none' và 'blocked' khỏi valid_referers. Chặt hơn, nhưng mất ảnh preview
+  // khi chia sẻ link và 403 nhầm người dùng sau proxy công ty — xem nginx.ts.
+  hotlinkStrict?: boolean;
   createdAt: string;
   updatedAt: string;
 }

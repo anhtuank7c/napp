@@ -16,6 +16,57 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.23.0
+- SỬA LỖI: file location TỰ SINH ghi đè mất phần người dùng thêm tay, KHÔNG cảnh
+  báo. '/etc/nginx/napp-locations/<domain>.conf' được render lại TOÀN BỘ từ
+  registry ở BA chỗ ('app create', 'app set', 'domain add/remove'), trong khi nó
+  cũng là chỗ DUY NHẤT đặt được location riêng — nên ai thêm tay một location
+  (ví dụ '/uploads/') đều mất nó vào lần chạy kế tiếp của bất kỳ lệnh nào trong
+  ba lệnh đó. Triệu chứng (ảnh vỡ, 404) hiện ra rất lâu sau, vào lúc không liên
+  quan gì tới lệnh đã gây ra.
+- MỚI: file sidecar '<domain>.custom.conf' — napp include nó vào cuối file tự
+  sinh và KHÔNG BAO GIỜ ghi đè. Đây là chỗ ĐÚNG để đặt location riêng.
+- Trước khi ghi đè, napp so tập tiền tố 'location ^~' cũ với mới: tiền tố nào
+  sắp biến mất thì SAO LƯU file cũ ('.napp-orphaned') và nói rõ mất cái gì, mất
+  đi đâu. Cố ý so tiền tố chứ không dùng fingerprint như unit systemd: file của
+  app tạo bằng bản napp cũ không có fingerprint nào, dùng cách đó là cảnh báo sai
+  hàng loạt ngay lần nâng cấp đầu tiên.
+- MỚI: '--auto-static' nhận diện luôn THƯ MỤC FILE TẢI LÊN. Chỉ nhận ca AN TOÀN:
+  thư mục tên 'uploads'/'upload' nằm NGAY TRONG gốc tĩnh công khai của framework
+  ('static/' của SvelteKit, 'public/' của Next/Nuxt/Astro/Vite). Những thư mục đó
+  theo định nghĩa của framework ĐÃ công khai (build sao chép nguyên chúng vào
+  output), nên phục vụ chúng KHÔNG mở thêm gì — nó chỉ vá đúng khoảng trống: file
+  tải lên SAU lần build gần nhất không có trong output nên trả 404, rồi tự hiện
+  ra sau lần deploy kế tiếp, trông hệt lỗi chập chờn.
+  CỐ Ý KHÔNG đoán thư mục NGOÀI gốc tĩnh ('./uploads', './storage', './media'):
+  chỗ đó app tự chọn, không gì bảo đảm được phép công khai, và đoán sai là đem
+  file riêng tư ra đường. Vẫn khai báo tay được bằng '--upload-dir'.
+- Tiền tố URL được đặt kèm theo thư mục nhận diện được: thư mục tên 'upload' (số
+  ít) trước đây sẽ bị phục vụ ở '/uploads/' vì đó là mặc định của renderer.
+- 'napp check' báo thêm: app nào có thư mục tải lên trong gốc tĩnh công khai mà
+  nginx chưa phục vụ. '--fix' sửa được.
+- CHẶN HOTLINK MẠNH HƠN HẲN: '--hotlink-protect' nay phát thêm header
+  'Cross-Origin-Resource-Policy: same-site' cho MỌI location asset (asset build
+  lẫn file tải lên), không chỉ kiểm tra Referer như trước.
+  Khác biệt cốt lõi: CORP do TRÌNH DUYỆT NGƯỜI XEM thực thi dựa trên header do
+  SERVER BẠN gửi, nên trang hotlink KHÔNG tác động được — trong khi Referer là
+  thứ chính trang đó khai báo, chỉ cần <meta name="referrer" content="no-referrer">
+  là vô hiệu toàn bộ valid_referers. CORP cũng SỐNG SÓT QUA CDN: Cloudflare cache
+  theo URL rồi trả cho mọi referer mà không hỏi origin (làm kiểm tra Referer ở
+  origin gần như vô dụng), còn CORP nằm trong chính response đã cache.
+  Và nó KHÔNG phá thứ mà chặn Referer gắt phá: bot lấy ảnh preview (Facebook,
+  Zalo, Telegram) tải ảnh ở phía SERVER nên không bị áp -> link chia sẻ vẫn có
+  ảnh; gõ thẳng URL ảnh là điều hướng cấp cao nhất nên cũng không bị chặn.
+  Dùng 'same-site' chứ không 'same-origin' vì napp tự thêm alias 'www.<domain>'
+  và admin/api thường ở subdomain khác — 'same-origin' sẽ chặn chính site mình.
+- CORP KHÔNG được phát khi có '--hotlink-allow': CORP chỉ có ba giá trị, không
+  diễn đạt được danh sách cho phép theo domain, nên phát ra là chặn đúng những
+  đối tác vừa cho phép và ảnh vỡ ở phía họ mà không ai báo. napp NÓI RÕ khi rơi
+  vào trường hợp này, kèm hướng đi thật (URL ký secure_link, hoặc tầng CDN).
+- MỚI '--hotlink-strict': bỏ 'none'/'blocked' khỏi valid_referers. Chặt hơn
+  nhưng MẤT ảnh preview khi chia sẻ link và 403 nhầm người dùng sau proxy công
+  ty — napp cảnh báo mỗi lần cờ này bật.
+
 ## 1.22.0
 - MỚI '--auto-static': napp NHẬN DIỆN FRAMEWORK từ THƯ MỤC BUILD rồi cho nginx
   trả thẳng asset, thay vì bắt bạn tự tra tiền tố. Nhận: SvelteKit adapter-node

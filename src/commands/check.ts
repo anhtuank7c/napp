@@ -5,7 +5,7 @@ import { REDIS_TUNING_PATH } from "../templates/tuning";
 import { loadState, NGINX_AVAILABLE, type AppRecord } from "../lib/state";
 import { cmdNginxSync, stripInlineProxyBuffers } from "./nginx";
 import { cmdAppSet } from "./app";
-import { detectStaticLayout, staticSetCommand, type StaticSuggestion } from "../lib/framework";
+import { detectStaticLayout, detectUploadDir, staticSetCommand, type StaticSuggestion } from "../lib/framework";
 import { appServePaths, grantNginxGroupAccess, nginxWorkerUser, pathReadableBy } from "../lib/staticaccess";
 import { unitWorkDir } from "../templates/systemd";
 
@@ -185,6 +185,22 @@ function unreadableStaticApps(): { app: AppRecord; paths: string[] }[] {
   return out;
 }
 
+// App có thư mục tải lên nằm trong gốc tĩnh công khai mà nginx CHƯA phục vụ.
+//
+// Hỏng theo kiểu đặc biệt khó chẩn đoán: file tải lên TRƯỚC lần build gần nhất
+// hiện bình thường (build sao chép 'static/'|'public/' vào output), file tải lên
+// SAU đó trả 404 — rồi tự hiện ra sau lần deploy kế tiếp. Nhìn hệt như lỗi cache
+// hoặc lỗi chập chờn, nên gần như không ai lần ra là do cấu hình nginx.
+function uploadCandidates(): { app: AppRecord; dir: string; prefix: string }[] {
+  const out: { app: AppRecord; dir: string; prefix: string }[] = [];
+  for (const app of Object.values(loadState().apps)) {
+    if (app.uploadDir) continue;
+    const upload = detectUploadDir(unitWorkDir(app.webRoot, app.appDir));
+    if (upload) out.push({ app, dir: upload.dir, prefix: upload.prefix });
+  }
+  return out;
+}
+
 function installFail2ban(): void {
   info("Đang cài đặt fail2ban...");
   runCmd("apt-get", ["install", "-y", "fail2ban"]);
@@ -310,6 +326,23 @@ export async function cmdCheck(opts: CheckOptions): Promise<void> {
           `'${c.suggestion.staticPrefixes.join(" ")}' có thể trùng route thật của app — napp KHÔNG tự áp.\n` +
           `  Kiểm tra app không dùng tiền tố đó làm route, rồi chạy:\n    ${staticSetCommand(c.app.domain, c.suggestion)}`
       );
+    }
+
+    // --- thư mục tải lên chưa được phục vụ ---
+    const uploads = uploadCandidates();
+    if (uploads.length > 0) {
+      findings.push({
+        name: "nginx-uploads",
+        ok: false,
+        message:
+          `${uploads.length} app có thư mục file tải lên nằm trong gốc tĩnh công khai nhưng nginx CHƯA phục vụ ` +
+          `(${uploads.map((u) => `${u.app.domain}: ${u.dir}`).join(", ")}). ` +
+          `File tải lên SAU lần build gần nhất trả 404 dù có thật trên đĩa, rồi tự hiện ra sau lần deploy kế tiếp — ` +
+          `trông hệt lỗi chập chờn. Sửa: ${uploads.map((u) => `napp app set ${u.app.domain} --upload-dir ${u.dir}`).join(" · ")}`,
+        fix: () => {
+          for (const u of uploads) cmdAppSet(u.app.domain, { uploadDir: u.dir, uploadPrefix: u.prefix });
+        },
+      });
     }
 
     // --- asset tĩnh đã bật nhưng nginx không đọc được ---

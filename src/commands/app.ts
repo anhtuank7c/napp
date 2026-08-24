@@ -28,7 +28,8 @@ import {
 import { acquireLock } from "../lib/lock";
 import { createDatabase, dropDatabase } from "../lib/mysql";
 import { mergeEnvFile } from "../lib/envfile";
-import { renderAppNginxConf, renderAppLocationsConf, appLocationsPath, NGINX_LOCATIONS_DIR } from "../templates/nginx";
+import { renderAppNginxConf, appLocationsPath } from "../templates/nginx";
+import { writeAppLocationsConf, hintCustomLocations } from "../lib/locationsfile";
 import { ensureNappProxyConf } from "./nginx";
 import { renderAppSystemdService, renderServiceSystemdService, execStartLine, unitWorkDir } from "../templates/systemd";
 import { writeManagedUnit, patchUnitHeap, type UnitWriteResult } from "../lib/unitfile";
@@ -36,7 +37,7 @@ import { detectHardware } from "../lib/hardware";
 import { nodeMaxOldSpaceMB } from "../templates/tuning";
 import { ipv6Available } from "../lib/network";
 import { GIT_NONINTERACTIVE_ENV, prepareRepoAuth, setupRepoAuth } from "../lib/repo";
-import { detectStaticLayout, parseStaticAlias, staticSetCommand, type StaticAlias, type StaticSuggestion } from "../lib/framework";
+import { detectStaticLayout, detectUploadDir, parseStaticAlias, staticSetCommand, type StaticAlias, type StaticSuggestion } from "../lib/framework";
 import { appServePaths, ensureNginxCanServe } from "../lib/staticaccess";
 import { defaultPackageManager, defaultInstallCmd, defaultStartCmd, ensurePackageManager, ensureRuntime } from "../lib/provision";
 
@@ -65,6 +66,7 @@ export interface CreateAppOptions {
   uploadDir?: string; // thư mục file tải lên lúc chạy
   uploadPrefix?: string; // tiền tố URL của thư mục trên
   hotlinkProtect?: boolean; // chỉ cho nhúng ảnh từ domain của site
+  hotlinkStrict?: boolean; // bỏ 'none'/'blocked' khỏi valid_referers
   hotlinkAllow?: string[]; // domain ngoài cũng được phép nhúng
   addressHeader?: boolean; // đặt ADDRESS_HEADER/XFF_DEPTH cho adapter-node
 }
@@ -113,6 +115,34 @@ function reportStaticDetection(domain: string, s: StaticSuggestion, applied: boo
   }
   info(`  Bật bằng: ${staticSetCommand(domain, s)}`);
   if (s.note) warn(`  LƯU Ý: ${s.note}`);
+}
+
+/**
+ * Nói RÕ lớp chặn hotlink nào đang thực sự hoạt động.
+ *
+ * Quan trọng vì hai lớp có sức mạnh rất khác nhau, mà nhìn cấu hình thì không
+ * thấy: `valid_referers` dựa trên header do CHÍNH TRANG NHÚNG khai báo nên chỉ
+ * là rào cản tuỳ tiện, còn CORP do trình duyệt người xem thực thi nên trang
+ * nhúng không lách được. Người dùng cần biết mình đang có cái nào.
+ */
+function reportHotlink(app: AppRecord): void {
+  const allow = app.hotlinkAllow ?? [];
+  if (allow.length === 0) {
+    ok(`• Chặn hotlink: Cross-Origin-Resource-Policy=same-site (trình duyệt thực thi, trang nhúng KHÔNG lách được) + kiểm tra Referer.`);
+  } else {
+    // CORP không có danh sách cho phép theo domain — phát ra là chặn đúng những
+    // đối tác vừa được cho phép, và ảnh vỡ ở phía họ mà không ai báo.
+    warn(
+      `• Chặn hotlink: CHỈ còn kiểm tra Referer, KHÔNG có CORP.\n` +
+        `  Vì --hotlink-allow đang cho phép domain ngoài (${allow.join(", ")}), mà CORP chỉ có same-origin/same-site/cross-origin —\n` +
+        `  không diễn đạt được danh sách cho phép. Bật CORP ở đây sẽ chặn đúng các domain bạn vừa cho phép.\n` +
+        `  Referer do CHÍNH trang nhúng khai báo: một thẻ <meta name="referrer" content="no-referrer"> là đi qua.\n` +
+        `  Cần chặn thật mà vẫn cho đối tác nhúng: dùng URL ký (nginx secure_link) hoặc bật ở tầng CDN.`
+    );
+  }
+  if (app.hotlinkStrict) {
+    warn(`  --hotlink-strict đang BẬT: link chia sẻ (Facebook, Zalo, Telegram) sẽ MẤT ảnh preview, và người dùng sau proxy công ty có thể bị 403.`);
+  }
 }
 
 // Render lại TOÀN BỘ unit của một app web từ registry, giữ nguyên các directive
@@ -579,6 +609,31 @@ EOF`,
       );
     }
 
+    // Thư mục file tải lên — nhận diện TÁCH RIÊNG với asset build, vì nó không
+    // phụ thuộc framework và hỏng theo một kiểu hoàn toàn khác (xem detectUploadDir).
+    let uploadDir = opts.uploadDir;
+    let uploadPrefix = opts.uploadPrefix;
+    if (uploadDir === undefined) {
+      const upload = detectUploadDir(appWorkDir);
+      if (upload) {
+        if (opts.autoStatic) {
+          uploadDir = upload.dir;
+          // Kèm tiền tố, vì mặc định của renderer là '/uploads/' — thư mục tên
+          // 'upload' (số ít) sẽ bị phục vụ ở sai URL nếu bỏ dòng này.
+          uploadPrefix = upload.prefix;
+          ok(`Nhận diện thư mục tải lên ${upload.dir} → nginx phục vụ tại ${upload.prefix}`);
+          info(`  Nó nằm trong '${upload.publicRoot}/' nên vốn đã công khai ở mọi bản build — cấu hình này không mở thêm gì.`);
+        } else {
+          info(`Thấy thư mục tải lên ${upload.dir} nhưng CHƯA được nginx phục vụ.`);
+          info(
+            `  File tải lên SAU lần build gần nhất sẽ trả 404 (build chỉ sao chép '${upload.publicRoot}/' vào output MỘT LẦN), ` +
+              `rồi tự hiện ra sau lần deploy kế tiếp — rất giống lỗi chập chờn.`
+          );
+          info(`  Bật bằng: sudo napp app set ${domain} --upload-dir ${upload.dir}`);
+        }
+      }
+    }
+
     // --- systemd service ---
     ensureDir("/var/log/napp", 0o750);
     const record: AppRecord = {
@@ -603,9 +658,10 @@ EOF`,
       staticPrefixes,
       staticAliases: staticAliases.length > 0 ? staticAliases : undefined,
       framework,
-      uploadDir: opts.uploadDir,
-      uploadPrefix: opts.uploadPrefix,
+      uploadDir,
+      uploadPrefix,
       hotlinkProtect: opts.hotlinkProtect,
+      hotlinkStrict: opts.hotlinkStrict,
       hotlinkAllow: opts.hotlinkAllow,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -633,8 +689,7 @@ EOF`,
     // PHẢI ghi trước vhost: vhost `include` file này, và nginx TỪ CHỐI KHỞI ĐỘNG
     // nếu include trỏ vào file không tồn tại. Ghi cả khi app không bật tuỳ chọn
     // nào — khi đó file chỉ chứa chú thích.
-    ensureDir(NGINX_LOCATIONS_DIR, 0o755);
-    writeFile(appLocationsPath(domain), renderAppLocationsConf(record), 0o644);
+    writeAppLocationsConf(record);
     writeFile(ngxConf, renderAppNginxConf(record, { ipv6: ipv6Available() }), 0o644);
     runCmd("ln", ["-sf", ngxConf, `${NGINX_ENABLED}/${domain}.conf`]);
     const test = execCapture("nginx", ["-t"]);
@@ -1040,6 +1095,7 @@ export interface SetAppOptions {
   uploadDir?: string;
   uploadPrefix?: string;
   hotlinkProtect?: boolean;
+  hotlinkStrict?: boolean;
   hotlinkAllow?: string[];
   maxBody?: string;
 }
@@ -1114,6 +1170,20 @@ export function cmdAppSet(domain: string, opts: SetAppOptions): void {
       `static-alias=${detected.staticAliases.map((a) => a.prefix).join(",") || "(bỏ)"}`
     );
     if (detected.note) warn(`LƯU Ý (${detected.framework}): ${detected.note}`);
+
+    // Thư mục tải lên đi kèm luôn: đây chính là ca đã khiến người dùng phải sửa
+    // tay file location (napp không "quên" phục vụ /uploads/ — registry đơn giản
+    // là không có uploadDir nào để mà phục vụ). KHÔNG ghi đè nếu app đã có.
+    if (!app.uploadDir) {
+      const upload = detectUploadDir(unitWorkDir(app.webRoot, app.appDir));
+      if (upload) {
+        set("uploadDir", upload.dir as AppRecord["uploadDir"], `upload-dir=${upload.dir}`);
+        // PHẢI đặt kèm tiền tố: renderAppLocationsConf mặc định '/uploads/', nên
+        // thư mục tên 'upload' (số ít) sẽ bị phục vụ ở sai URL nếu bỏ dòng này.
+        set("uploadPrefix", upload.prefix as AppRecord["uploadPrefix"], `upload-prefix=${upload.prefix}`);
+        info(`Nhận diện thư mục tải lên ${upload.dir} → phục vụ tại ${upload.prefix} (nằm trong '${upload.publicRoot}/' nên vốn đã công khai).`);
+      }
+    }
   }
 
   set("staticRoot", opts.staticRoot as AppRecord["staticRoot"], `static-root=${opts.staticRoot}`);
@@ -1125,6 +1195,7 @@ export function cmdAppSet(domain: string, opts: SetAppOptions): void {
   set("uploadDir", opts.uploadDir as AppRecord["uploadDir"], `upload-dir=${opts.uploadDir}`);
   set("uploadPrefix", opts.uploadPrefix as AppRecord["uploadPrefix"], `upload-prefix=${opts.uploadPrefix}`);
   set("hotlinkProtect", opts.hotlinkProtect as AppRecord["hotlinkProtect"], `hotlink-protect=${opts.hotlinkProtect}`);
+  set("hotlinkStrict", opts.hotlinkStrict as AppRecord["hotlinkStrict"], `hotlink-strict=${opts.hotlinkStrict}`);
   if ((opts.hotlinkAllow?.length ?? 0) > 0) set("hotlinkAllow", opts.hotlinkAllow, `hotlink-allow=${opts.hotlinkAllow!.join(",")}`);
   set("maxBodySize", opts.maxBody as AppRecord["maxBodySize"], `max-body=${opts.maxBody}`);
 
@@ -1160,8 +1231,7 @@ export function cmdAppSet(domain: string, opts: SetAppOptions): void {
   const locExisted = existsSync(locPath);
   if (locExisted) runCmd("cp", ["-a", locPath, locBak]);
 
-  ensureDir(NGINX_LOCATIONS_DIR, 0o755);
-  writeFile(locPath, renderAppLocationsConf(app), 0o644);
+  writeAppLocationsConf(app);
 
   let text = readFileSync(conf, "utf8");
   // client_max_body_size là chỉ thị ĐƠN đã có sẵn trong vhost — vá tại chỗ thay
@@ -1203,5 +1273,5 @@ export function cmdAppSet(domain: string, opts: SetAppOptions): void {
     info(`• Tiền tố phục vụ bằng alias: ${app.staticAliases!.map((a) => `${a.prefix} → ${a.dir}`).join(" · ")}`);
   }
   if (app.uploadDir) info(`• File tải lên phục vụ từ ${app.uploadDir} (không phụ thuộc lần build gần nhất).`);
-  if (app.hotlinkProtect) info(`• Chặn hotlink: chỉ domain của site (+ ${app.hotlinkAllow?.join(", ") || "không có domain ngoài"}).`);
+  if (app.hotlinkProtect) reportHotlink(app);
 }
