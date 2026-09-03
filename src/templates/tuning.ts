@@ -24,11 +24,11 @@ const REDIS_RAM_PERCENT: Record<HardwareProfile["tier"], number> = {
   xlarge: 15,
 };
 
-// Heap V8 (--max-old-space-size) cho app node được CHIA SẺ theo số app đang
+// Heap V8 (--max-old-space-size) cho app node được CHIA SẺ theo số đơn vị đang
 // chạy: lấy "ngân sách RAM cho app" = RAM tổng − phần dành cho MariaDB/Redis/OS,
-// rồi chia đều cho số app, kẹp trong [sàn, trần theo tier]. Đây là GIỚI HẠN mỗi
-// app (V8 gom rác trước khi chạm), KHÔNG phải RAM đặt trước. Nhờ chia theo số
-// app, thêm/bớt app sẽ co giãn heap để tổng vừa với RAM (quan trọng trên máy nhỏ).
+// rồi chia theo TRỌNG SỐ, kẹp trong [sàn, trần theo tier]. Đây là GIỚI HẠN mỗi
+// đơn vị (V8 gom rác trước khi chạm), KHÔNG phải RAM đặt trước. Nhờ chia theo số
+// đơn vị, thêm/bớt app sẽ co giãn heap để tổng vừa với RAM (quan trọng trên máy nhỏ).
 const NODE_OS_RESERVE_PERCENT: Record<HardwareProfile["tier"], number> = {
   micro: 25, // máy 1GB: chừa nhiều cho kernel/OS
   small: 20,
@@ -49,15 +49,118 @@ function mb(n: number): string {
   return `${Math.max(16, Math.round(n))}M`;
 }
 
-// MB cho --max-old-space-size của MỖI app node khi trên máy có `appCount` app.
-// appCount nên là TỔNG số app (node + bun) vì tất cả đều dùng chung RAM — chỉ
-// app node được đặt cap tường minh, phần chia cho bun coi như chừa sẵn.
-export function nodeMaxOldSpaceMB(hw: HardwareProfile, appCount = 1, dbRamPercentOverride?: number): number {
-  const dbPercent = dbRamPercentOverride ?? DB_RAM_PERCENT[hw.tier];
+// --- Ưu tiên tài nguyên: web app > background service -----------------------
+//
+// VÌ SAO CẦN CẢ HAI THỨ (heap và CPUWeight), và vì sao CPUWeight mới là thứ
+// người dùng THẤY được:
+//
+// '--max-old-space-size' là một TRẦN, KHÔNG phải phần RAM đặt trước. Nó không
+// giữ chỗ gì cả — nó nói cho V8 biết khi nào phải gom rác gắt và khi nào thì
+// chết. Cho web app heap lớn hơn KHÔNG lấy đi gì của worker; nó chỉ cho web app
+// lớn thêm trước khi thrash GC hoặc bị OOM. Đáng làm, nhưng nó không cứu được
+// độ trễ request.
+//
+// Thứ THẬT SỰ phá trải nghiệm người dùng là TRANH CHẤP CPU. Một worker nén ảnh
+// (sharp/ffmpeg) chiếm hết lõi sẽ làm mọi request chậm, và không con số heap nào
+// đổi được điều đó dù chỉ một mili-giây.
+//
+// CPUWeight là công cụ đúng, và gần như miễn phí: nó là TỶ LỆ CHIA TƯƠNG ĐỐI,
+// CHỈ có tác dụng KHI CÓ TRANH CHẤP. Worker rảnh -> web app vẫn dùng 100% CPU
+// như thường. Worker chiếm hết lõi -> kernel chia theo trọng số thay vì cào
+// bằng. Không đặt trước, không lãng phí gì.
+//
+// Mặc định của systemd là 100. 200 vs 50 cho tỷ lệ 4:1 khi có tranh chấp.
+export const CPU_WEIGHT_WEB = 200;
+export const CPU_WEIGHT_SERVICE = 50;
+
+// IOWeight: cùng ý tưởng cho đĩa (worker ghi file lớn làm request đói I/O).
+//
+// TRUNG THỰC VỀ GIỚI HẠN: IOWeight CHỈ có tác dụng với I/O scheduler 'bfq'.
+// Rất nhiều VPS NVMe chạy scheduler 'none' hoặc 'mq-deadline', ở đó directive
+// này KHÔNG làm gì cả — nó không báo lỗi, chỉ đơn giản là vô hiệu. `napp tune`
+// dò và nói thẳng ra điều đó thay vì in một con số không có tác dụng.
+export const IO_WEIGHT_WEB = 200;
+export const IO_WEIGHT_SERVICE = 50;
+
+// Trọng số heap của background service so với web app. 0.5 = worker được nửa
+// phần heap của một web app.
+export const SERVICE_WEIGHT_DEFAULT = 0.5;
+
+/**
+ * MemoryHigh cho background service — giới hạn MỀM, KHÔNG phải MemoryMax.
+ *
+ * MemoryHigh vượt ngưỡng thì kernel THROTTLE và thu hồi bộ nhớ của cgroup đó
+ * trước; nó KHÔNG giết tiến trình. Đó chính là hành vi mong muốn: khi cả máy
+ * thiếu RAM, thu hồi từ worker trước khi động tới web app.
+ *
+ * CỐ Ý KHÔNG đặt MemoryMax cho service: MemoryMax là giới hạn CỨNG, vượt là
+ * OOM-kill. Biến một worker chậm thành một worker CHẾT thì tệ hơn hẳn vấn đề
+ * ban đầu.
+ *
+ * Hệ số 3x (sàn 256MB) là có chủ đích rộng rãi: heap V8 chỉ là MỘT PHẦN của
+ * RSS (còn native, buffer, mã máy đã biên dịch). Đặt sát quá thì worker bị
+ * throttle liên tục ngay cả khi máy đang rảnh — chậm mà không có lý do nào nhìn
+ * thấy được, đúng loại hỏng khó chẩn đoán nhất.
+ *
+ * Áp cho MỌI service, kể cả bun: đây là cơ chế cgroup, không liên quan runtime
+ * (khác heap V8 — thứ chỉ có nghĩa với node).
+ */
+export function serviceMemoryHighMB(serviceHeapMB: number): number {
+  return Math.max(256, Math.round(serviceHeapMB * 3));
+}
+
+/** Số đơn vị chạy Node trên máy, tách theo loại. */
+export interface UnitMix {
+  webApps: number;
+  services: number;
+}
+
+export interface NodeHeapPlan {
+  webMB: number; // --max-old-space-size cho web app
+  serviceMB: number; // ... cho background service
+  serviceWeight: number;
+  totalUnits: number;
+}
+
+export interface NodeHeapOptions {
+  dbRamPercent?: number;
+  /** Trọng số heap của service so với web app (kẹp trong [0.1, 1]). */
+  serviceWeight?: number;
+}
+
+/**
+ * Chia ngân sách RAM cho các đơn vị node, ƯU TIÊN WEB APP.
+ *
+ * Trước 1.25.0 phép chia là cào bằng: budget / (số app + số service). Nghĩa là
+ * một worker cron chạy mỗi giờ được đúng bằng heap của web app đang phục vụ
+ * traffic — trong khi chỉ một trong hai cái đó ảnh hưởng tới người dùng thật.
+ *
+ * Nay mẫu số là TỔNG TRỌNG SỐ: `webApps + services * serviceWeight`. Tổng heap
+ * cấp phát KHÔNG đổi (vẫn vừa đúng ngân sách), chỉ là phân bổ lại về phía
+ * traffic. Ví dụ máy 4GB, 2 app + 2 service: trước là 327MB cho cả bốn; nay web
+ * 436MB, service 218MB — tổng vẫn 1308MB.
+ *
+ * Không có web app nào (chỉ toàn service) thì mẫu số là `services * weight`, và
+ * serviceMB quay về đúng `budget / services` — worker vẫn được trọn ngân sách
+ * chứ không bị phạt vô cớ.
+ */
+export function nodeHeapPlan(hw: HardwareProfile, mix: UnitMix, opts: NodeHeapOptions = {}): NodeHeapPlan {
+  const serviceWeight = Math.min(1, Math.max(0.1, opts.serviceWeight ?? SERVICE_WEIGHT_DEFAULT));
+  const dbPercent = opts.dbRamPercent ?? DB_RAM_PERCENT[hw.tier];
   const budgetPercent = Math.max(15, 100 - dbPercent - REDIS_RAM_PERCENT[hw.tier] - NODE_OS_RESERVE_PERCENT[hw.tier]);
   const budgetMB = (hw.totalMemMB * budgetPercent) / 100;
-  const perApp = Math.floor(budgetMB / Math.max(1, appCount));
-  return Math.max(NODE_HEAP_FLOOR_MB, Math.min(NODE_HEAP_CAP_MB[hw.tier], perApp));
+
+  const denominator = mix.webApps + mix.services * serviceWeight;
+  const perWeb = denominator > 0 ? budgetMB / denominator : budgetMB;
+  const cap = NODE_HEAP_CAP_MB[hw.tier];
+  const clamp = (v: number) => Math.max(NODE_HEAP_FLOOR_MB, Math.min(cap, Math.floor(v)));
+
+  return {
+    webMB: clamp(perWeb),
+    serviceMB: clamp(perWeb * serviceWeight),
+    serviceWeight,
+    totalUnits: mix.webApps + mix.services,
+  };
 }
 
 export interface TuningPlan {
@@ -67,10 +170,10 @@ export interface TuningPlan {
   tableOpenCache: number;
   redisMaxMemoryMB: number;
   workerConnections: number;
-  nodeMaxOldSpaceMB: number;
+  heap: NodeHeapPlan;
 }
 
-export function computeTuningPlan(hw: HardwareProfile, dbRamPercentOverride?: number, appCount = 1): TuningPlan {
+export function computeTuningPlan(hw: HardwareProfile, dbRamPercentOverride?: number, mix: UnitMix = { webApps: 1, services: 0 }, serviceWeight?: number): TuningPlan {
   const dbPercent = dbRamPercentOverride ?? DB_RAM_PERCENT[hw.tier];
   const redisPercent = REDIS_RAM_PERCENT[hw.tier];
   const innodbBufferPoolMB = Math.round((hw.totalMemMB * dbPercent) / 100);
@@ -81,7 +184,15 @@ export function computeTuningPlan(hw: HardwareProfile, dbRamPercentOverride?: nu
   const tableOpenCache = hw.tier === "micro" ? 200 : hw.tier === "small" ? 400 : 800;
   const workerConnections = hw.tier === "micro" ? 1024 : hw.tier === "small" ? 2048 : 4096;
 
-  return { innodbBufferPoolMB, maxConnections, tmpTableMB, tableOpenCache, redisMaxMemoryMB, workerConnections, nodeMaxOldSpaceMB: nodeMaxOldSpaceMB(hw, appCount, dbRamPercentOverride) };
+  return {
+    innodbBufferPoolMB,
+    maxConnections,
+    tmpTableMB,
+    tableOpenCache,
+    redisMaxMemoryMB,
+    workerConnections,
+    heap: nodeHeapPlan(hw, mix, { dbRamPercent: dbRamPercentOverride, serviceWeight }),
+  };
 }
 
 export function renderMariadbTuning(hw: HardwareProfile, plan: TuningPlan): string {

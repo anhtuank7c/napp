@@ -17,9 +17,11 @@ cô lập hoàn toàn giữa các app, nginx chỉ đóng vai trò reverse-proxy
 - ⚡ **Asset tĩnh do nginx trả thẳng** (`--auto-static`): napp nhận diện framework từ **thư mục build** (SvelteKit · Next.js · Nuxt · SolidStart · Astro · Remix · Vite), chọn đúng `root`/`alias` và tự cấp quyền đọc cho nginx — thay vì để hàng trăm chunk `.js`/`.css` xếp hàng trên event loop đơn luồng của Node
 - 🧱 **UFW**: mặc định deny, mở SSH + 80/443 công khai (tùy chọn khoá origin theo dải IP Cloudflare với `--restrict-cloudflare`)
 - 🛑 **Hardening nginx** (`napp nginx harden`): chặn truy cập thẳng IP / Host lạ (trả 444), chỉ domain đã cấu hình mới vào được; ẩn phiên bản nginx
+- 🚫 **Chặn quét lỗ hổng** (`napp nginx scanblock`): request dò CMS/framework PHP (`/wp-login.php`, `/wp-admin/`, `/phpmyadmin/`, `/cgi-bin/`) bị nginx trả **444** ngay, không vòng qua Node, và ghi sang **log riêng** để access log của site sạch trở lại — kèm jail fail2ban `napp-scanner` ban IP ngay ở tường lửa
 - 🛡️ **fail2ban**: sshd + nginx-botsearch/http-auth/limit-req + jail riêng chống spam 502/504/429
 - 💾 **Backup định kỳ** (database + mã nguồn) qua **systemd timer**, có xoay vòng retention
 - ⚙️ **Tối ưu theo phần cứng thực tế**: `napp tune apply` phát hiện CPU/RAM và điều chỉnh nginx/MariaDB/Redis/sysctl **và NODE_OPTIONS heap V8 cho từng app node** — chạy lại bất cứ khi nào nâng cấp server
+- 🥇 **Web app được ưu tiên hơn background service**: heap V8 chia theo trọng số (web gấp đôi worker) và `CPUWeight`/`IOWeight` ở systemd — một worker nén ảnh/video không còn làm chậm request của người dùng thật
 - 🔍 `napp check --fix`: kiểm tra + tự cài Node.js, nginx, certbot, MariaDB, Redis, fail2ban, UFW nếu thiếu
 - 🩺 **`napp doctor`**: soi **bản vá bảo mật đang chờ** (nginx, OpenSSL, OpenSSH…), dịch vụ còn chạy **thư viện cũ** sau khi vá, đối chiếu **CVE nổi bật của nginx**, vòng đời Node.js; quét **rủi ro chuỗi cung ứng** (dependency chain attack) trong dependencies của từng app/service — và `napp doctor upgrade` để lấy bản vá về
 - 🔄 Tự cập nhật (`napp update`) qua gist công khai, giống lara
@@ -133,7 +135,8 @@ Gõ số rồi Enter, `0` để quay lại/thoát.
 | `sudo napp firewall sync [--ssh-port n] [--restrict-cloudflare]` | Đồng bộ UFW (mặc định mở 80/443; `--restrict-cloudflare` để khoá origin theo IP Cloudflare) |
 | `sudo napp fail2ban setup` | Áp cấu hình fail2ban |
 | `sudo napp nginx harden` / `unharden` | Chặn truy cập IP/Host lạ (default_server 444) + ẩn version / gỡ |
-| `sudo napp nginx sync` | Đồng bộ cấu hình proxy dùng chung vào các vhost đã có (bộ đệm, header `Connection`) — **giữ nguyên khối SSL của certbot** |
+| `sudo napp nginx scanblock` / `unscanblock` | Chặn/bỏ chặn quét lỗ hổng CMS PHP (444 + log riêng), áp cho **mọi site kể cả app tạo bằng bản napp cũ** |
+| `sudo napp nginx sync` | Đồng bộ cấu hình dùng chung vào các vhost đã có (bộ đệm, header `Connection`, chèn dòng `include` file location còn thiếu) — **giữ nguyên khối SSL của certbot** |
 | `sudo napp cloudflare sync` | Đồng bộ dải IP Cloudflare vào nginx (real IP) ngay |
 | `sudo napp cloudflare schedule [--time 01:00]` | Lên lịch tự động đồng bộ IP Cloudflare (systemd timer, hàng ngày) |
 | `sudo napp cloudflare unschedule` | Gỡ lịch tự động đồng bộ IP Cloudflare |
@@ -390,6 +393,120 @@ sudo napp app set pghotel.vn --hotlink-protect --hotlink-strict
 
 ---
 
+## 🚫 Chặn quét lỗ hổng CMS/framework PHP
+
+Một máy chủ Node công khai nhận hàng nghìn request mỗi ngày dò các CMS PHP mà
+bạn **không hề cài**: `/wp-login.php`, `/wp-admin/setup-config.php`,
+`/phpmyadmin/`, `/vendor/phpunit/.../eval-stdin.php`. Không cái nào **hại**
+được app Node — không có PHP nào để chạy — nhưng mỗi cái đều đi trọn đường
+`nginx → proxy_pass → router của framework → render trang 404`. Với SSR
+(SvelteKit/Next) đó là cả chuỗi hook/layout chạy để dựng một trang lỗi cho một
+con bot. Và tất cả rơi vào access log của site, trộn lẫn với traffic thật.
+
+```bash
+sudo napp nginx scanblock      # bật cho MỌI site (kể cả app tạo bằng bản napp cũ)
+sudo napp fail2ban setup       # bật jail 'napp-scanner' — phần quan trọng, đọc bên dưới
+```
+
+### Đừng kỳ vọng sai vào con số
+
+`return 444` **không** tiết kiệm nhiều CPU như tên gọi gợi ý. Phần đắt nhất của
+một request quét là **bắt tay TCP + TLS**, và nginx đã trả xong khoản đó
+**trước** khi kịp nhìn thấy URI. Thứ tiết kiệm được là vòng qua Node, không
+phải cái bắt tay.
+
+Khoản lời thật nằm ở hai chỗ khác:
+
+1. **Access log của site sạch trở lại** — request bị chặn ghi sang
+   `/var/log/nginx/napp-scanner.log`, không lẫn vào log của site nữa.
+2. **fail2ban có tín hiệu gần như hoàn hảo** — mọi dòng trong file log riêng đó
+   chắc chắn là scanner, nên jail `napp-scanner` ban **3 lần / 10 phút → cấm 1
+   ngày** mà không có rủi ro ban nhầm. **Đây mới là chỗ tiết kiệm tài nguyên
+   thật**: IP bị ban thì gói tin bị bỏ ở tường lửa, trước cả bắt tay TLS.
+
+> ⚠️ Vì lý do (2), napp **không** dùng `access_log off` cho các location bị
+> chặn. Tắt log là hết ồn thật, nhưng jail `nginx-botsearch` đọc
+> `/var/log/nginx/*access.log` sẽ mất luôn tín hiệu: log sạch mà scanner không
+> bao giờ bị ban, cứ mở kết nối mãi.
+
+### Danh sách mẫu cố ý HẸP
+
+Chế độ hỏng đáng sợ duy nhất ở đây là **chặn nhầm route thật của app**, và nó
+hỏng im lặng. Nên danh sách neo vào **đuôi file** và **namespace riêng**, không
+đoán theo đường dẫn:
+
+| Mẫu | Bắt được |
+|---|---|
+| `\.(php[0-9]?\|phtml\|phps\|asp\|aspx\|jsp\|jspx\|cfm\|cgi\|shtml)$` | đuôi file mà app Node không bao giờ phục vụ |
+| `^/(wp-admin\|wp-content\|wp-includes\|wp-json\|wordpress)/` | namespace riêng của WordPress |
+| `^/(phpmyadmin\|pma\|myadmin\|mysqladmin\|adminer\|dbadmin)(/\|$)` | trang quản trị database PHP |
+| `^/cgi-bin/` | CGI cổ điển (Shellshock và họ hàng) |
+
+**Cố ý KHÔNG có** `/admin`, `/config`, `/vendor`, `/backup`, `/telescope` — tất
+cả đều là route hoàn toàn hợp lệ của một app Node. Neo theo đuôi đã bắt luôn
+phần lớn mẫu Laravel/PHP mà không cần thêm luật: `/vendor/phpunit/phpunit/src/
+Util/PHP/eval-stdin.php` kết thúc bằng `.php`.
+
+Cũng **không** có luật cho `.env` hay `/.git/`: vhost napp đã có sẵn
+`location ~ /\.(?!well-known).* { deny all; }` trả 403 cho chúng.
+
+### Bật/tắt
+
+```bash
+sudo napp nginx scanblock                     # bật toàn máy
+sudo napp nginx unscanblock                   # tắt toàn máy
+sudo napp app set <domain> --no-scan-block    # tắt cho RIÊNG một site
+sudo napp app set <domain> --scan-block       # bật lại cho site đó
+```
+
+Danh sách mẫu nằm ở **một file dùng chung**
+`/etc/nginx/napp-locations/_scanner-block.conf`, mỗi vhost chỉ `include` một
+dòng. Tắt = làm **rỗng** file đó, **không xoá** — mọi vhost đang include nó, xoá
+là nginx từ chối khởi động và sập **toàn bộ** site trên máy.
+
+### App tạo bằng bản napp cũ
+
+Cơ chế "file location riêng + một dòng `include`" chỉ có từ **1.19.0**. Vhost tạo
+trước đó **không có dòng include nào**, nên mọi thứ napp ghi vào
+`/etc/nginx/napp-locations/` đều không tới được chúng — kể cả chặn quét lỗ hổng.
+Hỏng kiểu im lặng hoàn hảo: `nginx -t` xanh, lệnh báo thành công, mà site cũ —
+đúng những site đã chạy lâu nhất và bị quét nhiều nhất — vẫn để ngỏ.
+
+Cả `napp nginx scanblock` lẫn `napp nginx sync` đều **tự chèn dòng include còn
+thiếu** vào các vhost đó, bằng phép cắt chuỗi theo khối `server` (không render
+lại vhost, nên **khối SSL của certbot giữ nguyên**). `napp check` cũng báo ra khi
+phát hiện vhost thiếu include.
+
+```bash
+sudo napp check          # báo vhost nào còn thiếu + chặn quét đã bật chưa
+sudo napp nginx sync     # vá tất cả trong một lượt, có nginx -t + hoàn tác
+```
+
+### ⚠️ Nếu site nằm sau Cloudflare proxy
+
+Hai điều cần biết:
+
+- **444 → Cloudflare hiển thị lỗi 520.** 444 là đóng kết nối không phản hồi, và
+  Cloudflare dịch điều đó thành trang lỗi 520 cho người xem. Với scanner thì
+  không sao; nhưng nếu một luật chặn nhầm route thật, người dùng thấy "520" chứ
+  không phải 404 — trông như server sập. Đó chính là lý do danh sách mẫu ở trên
+  hẹp đến mức gần như không thể chặn nhầm.
+- **Ban bằng ufw trở nên vô hiệu.** Nhờ real-IP, fail2ban ban đúng IP **thật**
+  của client, nhưng gói tin lại đến từ IP **edge của Cloudflare** nên luật ufw
+  không bao giờ khớp — ban thành vô hiệu mà không báo lỗi nào. Với các site đó
+  hãy chặn ở **WAF của Cloudflare** (gói free có 5 custom rule, và traffic không
+  chạm tới VPS luôn). Phần chặn 444 + tách log ở nginx thì vẫn hoạt động bình
+  thường.
+
+### Theo dõi
+
+```bash
+sudo tail -f /var/log/nginx/napp-scanner.log     # ai đang quét, quét site nào
+sudo fail2ban-client status napp-scanner         # đã ban những IP nào
+```
+
+---
+
 ## 🧩 Location nginx tự viết — dùng file `.custom.conf`
 
 `/etc/nginx/napp-locations/<domain>.conf` là file **tự sinh**: `napp app create`,
@@ -589,7 +706,7 @@ Sau khi sửa tay: `sudo systemctl daemon-reload && sudo systemctl restart <unit
 - systemd service hardening: `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `ReadWritePaths` giới hạn đúng thư mục app
 - Database: mỗi app một database + user CSDL riêng, quyền chỉ trên database đó (không dùng root)
 - UFW: mặc định deny incoming, mở SSH + **80/443 công khai**. Việc lấy đúng IP client thật khi qua Cloudflare do nginx real-IP đảm nhiệm (`napp cloudflare sync`), độc lập với tường lửa. Nếu muốn khoá origin chỉ nhận traffic từ dải IP Cloudflare (chống bypass thẳng origin IP) thì thêm `--restrict-cloudflare` — lưu ý mọi domain phải bật proxy Cloudflare
-- fail2ban: chặn brute-force SSH + bot dò nginx + IP spam lỗi 502/504/429
+- fail2ban: chặn brute-force SSH + bot dò nginx + IP spam lỗi 502/504/429 + **jail `napp-scanner`** (quét lỗ hổng PHP — xem mục riêng bên dưới)
 - Cloudflare real-IP: nginx trích xuất đúng IP client thật (không phải IP edge Cloudflare) để app phía sau nhận `X-Real-IP`/`X-Forwarded-For` chính xác
 
 ⚠️ **An toàn khi chạy `napp firewall sync` lần đầu**: hãy giữ một phiên
@@ -700,12 +817,78 @@ gợi ý nâng cấp OS hoặc chuyển sang [kho chính thức nginx.org](https
 ```bash
 sudo napp tune show     # xem phần cứng phát hiện được + kế hoạch (chưa áp dụng)
 sudo napp tune apply    # áp: nginx worker/gzip, MariaDB innodb_buffer_pool, Redis maxmemory, sysctl,
-                        # và cân đối heap V8 cho từng app node
-sudo napp tune apply --sync-units   # + render lại toàn bộ unit systemd từ template
+                        # cân đối heap V8, và ƯU TIÊN TÀI NGUYÊN cho web app
+sudo napp tune apply --service-weight 0.3   # worker chỉ được 30% heap của web app
+sudo napp tune apply --sync-units           # + render lại toàn bộ unit systemd từ template
 ```
 
 Chạy `napp tune apply` **bất cứ khi nào nâng cấp phần cứng server** (thêm
 RAM/CPU) để tự động tính lại và áp cấu hình phù hợp — không cần tính tay.
+
+### Web app được ưu tiên hơn background service
+
+Web app phục vụ traffic thật; worker thì không. Trước 1.25.0 napp đối xử với hai
+loại này **hoàn toàn như nhau** — cùng phần heap, và không có ưu tiên CPU nào cả.
+
+Nay có ba lớp, và chúng **không quan trọng ngang nhau**:
+
+| Lớp | Web app | Service | Ghi chú |
+|---|---|---|---|
+| Heap V8 (`--max-old-space-size`) | ×1 | ×0.5 | **Trần**, không phải RAM đặt trước |
+| `CPUWeight` | 200 | 50 | Tỷ lệ chia CPU **khi có tranh chấp** |
+| `IOWeight` | 200 | 50 | Chỉ hiệu lực với I/O scheduler `bfq` |
+| `MemoryHigh` | — | 3× heap | Giới hạn **mềm**, chỉ cho service |
+
+**Heap là lớp YẾU NHẤT, đừng trông chờ vào nó.** `--max-old-space-size` là một
+**trần**, không phải phần RAM được giữ chỗ: cho web app heap lớn hơn *không* lấy
+đi gì của worker, nó chỉ cho web app lớn thêm trước khi thrash GC hoặc chết.
+
+**`CPUWeight` mới là lớp người dùng thật sự cảm nhận được.** Một worker nén ảnh
+(sharp/ffmpeg) chiếm hết lõi làm mọi request chậm hẳn, và không con số heap nào
+đổi được điều đó. `CPUWeight` là tỷ lệ chia **chỉ áp dụng khi có tranh chấp** —
+worker rảnh thì web app vẫn dùng 100% CPU như thường. Đo trên máy thật, hai tiến
+trình cùng đốt CPU 100% trên một lõi trong 12 giây:
+
+```
+web app (CPUWeight=200) : 9597 ms CPU
+worker  (CPUWeight=50)  : 2401 ms CPU   -> đúng 4.00 : 1
+```
+
+Đổi tỷ lệ heap bằng `--service-weight` (0.1–1; `1` = chia đều như trước 1.25.0).
+Giá trị được **lưu vào registry**, nên mọi lần tạo/xoá app sau đó vẫn giữ đúng tỷ
+lệ bạn chọn — cờ chỉ có tác dụng một lần thì lần `app create` kế tiếp sẽ âm thầm
+lật ngược nó.
+
+> **`MemoryHigh` chứ không phải `MemoryMax`.** `MemoryHigh` là giới hạn **mềm**:
+> vượt ngưỡng thì kernel throttle và thu hồi bộ nhớ của riêng worker đó — đúng
+> thứ ta muốn khi cả máy thiếu RAM. `MemoryMax` là giới hạn **cứng**, vượt là
+> OOM-kill; biến một worker chậm thành một worker **chết** thì tệ hơn hẳn vấn đề
+> ban đầu. Web app **không** bị đặt `MemoryHigh` chút nào.
+
+> ⚠️ **Đừng tin `systemctl show -p CPUWeight`.** Nó chỉ đọc lại giá trị đã **cấu
+> hình** trong unit, kể cả khi cgroup controller `cpu` không bật và dòng đó hoàn
+> toàn vô hiệu — đo được trường hợp `systemctl show` trả `200` trong khi hai tiến
+> trình vẫn chia CPU **1:1**. Nguồn sự thật là `cpu.weight` trong cgroup của
+> chính unit đó, và `napp tune apply` đối chiếu đúng file này rồi báo cáo kết quả
+> thật.
+
+> **Áp được cho unit tạo bằng bản napp cũ.** `CPUWeight`/`IOWeight` được vá vào
+> unit hiện có bằng một phép **phẫu thuật riêng** — không render lại unit, không
+> đụng `ExecStart`/`User`/`Group`. Không có bước này thì các directive mới chỉ
+> tới được unit cũ qua `--sync-units`, thứ gần như không ai chạy: lệnh báo thành
+> công, `tune show` in ra tỷ lệ ưu tiên, mà unit thật thì trống không.
+> `napp check` cũng báo ra khi phát hiện unit còn thiếu.
+>
+> Ưu tiên CPU/IO **áp ngay bằng `daemon-reload`, KHÔNG cần restart app** (đã kiểm
+> chứng: `cpu.weight` trong kernel đổi từ 200 sang 350 với cùng PID). Chỉ heap
+> mới bắt buộc restart — `NODE_OPTIONS` chỉ được đọc lúc tiến trình khởi động.
+
+> **`IOWeight` thường không có tác dụng, và napp nói thẳng.** Nó chỉ hiệu lực với
+> I/O scheduler `bfq`; VPS NVMe thường dùng `none` hoặc `mq-deadline`, ở đó kernel
+> **không tạo cả file `io.weight`**. `napp tune show` dò scheduler thật và báo rõ
+> máy bạn thuộc nhóm nào thay vì in một con số vô nghĩa. Tương tự, `MemoryHigh`
+> chỉ tồn tại ở **cgroup v2** (Ubuntu 22.04+) — trên 20.04 napp bỏ hẳn dòng đó
+> thay vì ghi ra một directive mà kernel sẽ lờ đi.
 
 > **Cân đối heap CHỈ sửa đúng một dòng.** `napp tune apply` (và mọi lần
 > tạo/xoá app làm heap phải chia lại) chỉ thay con số trong

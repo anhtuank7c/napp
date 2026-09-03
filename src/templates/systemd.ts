@@ -1,9 +1,13 @@
 import type { AppRecord, ServiceRecord } from "../lib/state";
+import { CPU_WEIGHT_WEB, CPU_WEIGHT_SERVICE, IO_WEIGHT_WEB, IO_WEIGHT_SERVICE } from "./tuning";
 
 export interface AppSystemdOptions {
   // NODE_OPTIONS đặt cho app (ví dụ "--max-old-space-size=768"). Chỉ nên set cho
   // runtime node (V8); bun dùng JavaScriptCore, KHÔNG hiểu cờ heap của V8.
   nodeOptions?: string;
+  // MemoryHigh (MB) — giới hạn MỀM, chỉ đặt cho background service. Xem
+  // serviceMemoryHighMB() ở templates/tuning.ts về vì sao KHÔNG dùng MemoryMax.
+  memoryHighMB?: number;
 }
 
 // Thông tin định danh + môi trường để dựng MỘT unit systemd. Web app và
@@ -28,6 +32,11 @@ interface UnitSpec {
   extraWritePaths?: string[];
   logBase: string; // tiền tố file log: <logBase>.out.log / <logBase>.error.log
   execStart: string;
+  // Ưu tiên CPU/đĩa KHI CÓ TRANH CHẤP. Web app cao hơn background service —
+  // xem chú thích ở templates/tuning.ts. Rảnh thì không ai bị giới hạn gì.
+  cpuWeight: number;
+  ioWeight: number;
+  memoryHighMB?: number;
   nodeOptions?: string; // MẶC ĐỊNH (đặt trước EnvironmentFile, .env ghi đè được)
   forcedEnv: string[]; // napp ÉP (đặt sau EnvironmentFile, .env KHÔNG ghi đè được)
 }
@@ -49,6 +58,14 @@ function renderUnit(spec: UnitSpec): string {
   // Nhiều đường dẫn cách nhau bằng dấu cách trên MỘT dòng ReadWritePaths. Bỏ
   // trùng để không lặp lại rootDir khi ai đó truyền đúng nó qua --write-dir.
   const writePaths = [...new Set([spec.rootDir ?? spec.workDir, ...(spec.extraWritePaths ?? [])])];
+  // MemoryHigh là giới hạn MỀM (throttle + thu hồi), KHÔNG phải MemoryMax
+  // (OOM-kill). Chỉ đặt cho background service: dưới áp lực RAM, kernel thu hồi
+  // từ worker trước khi động tới app đang phục vụ traffic.
+  const memoryHighLine = spec.memoryHighMB
+    ? "# Giới hạn MỀM: vượt ngưỡng thì kernel throttle + thu hồi bộ nhớ của riêng\n" +
+      "# đơn vị này, KHÔNG giết tiến trình (khác MemoryMax). Cần cgroup v2.\n" +
+      `MemoryHigh=${spec.memoryHighMB}M\n`
+    : "";
   return `${spec.headerComment}
 # Sửa tay file này ĐƯỢC. napp so fingerprint ở dòng trên để biết bạn đã đổi
 # directive nào (ExecStart, StandardOutput/StandardError, User, Group, ...) và
@@ -90,7 +107,15 @@ LockPersonality=yes
 
 # --- Giới hạn tài nguyên ---
 LimitNOFILE=65535
-
+# Ưu tiên tương đối KHI CÓ TRANH CHẤP (mặc định systemd là 100). Web app đặt cao
+# hơn background service để một worker nén ảnh/video không làm chậm request của
+# người dùng thật. Không có tranh chấp thì không ai bị giới hạn: một tiến trình
+# rảnh không giữ chỗ CPU nào cả.
+CPUWeight=${spec.cpuWeight}
+# IOWeight CHỈ hiệu lực với I/O scheduler 'bfq'; scheduler khác thì dòng này vô
+# hại nhưng không làm gì. 'napp tune show' nói rõ máy này có thuộc nhóm nào.
+IOWeight=${spec.ioWeight}
+${memoryHighLine}
 # --- Log ---
 StandardOutput=append:${spec.logBase}.out.log
 StandardError=append:${spec.logBase}.error.log
@@ -117,6 +142,11 @@ export function renderAppSystemdService(app: AppRecord, execStart: string, opts:
     logBase: `/var/log/napp/${app.domain}`,
     execStart,
     nodeOptions: opts.nodeOptions,
+    // Web app phục vụ traffic thật -> ưu tiên cao hơn background service.
+    cpuWeight: CPU_WEIGHT_WEB,
+    ioWeight: IO_WEIGHT_WEB,
+    // KHÔNG đặt MemoryHigh cho web app: throttle đúng thứ đang phục vụ người
+    // dùng là làm ngược lại mục đích của cả cơ chế này.
     forcedEnv: [`NODE_ENV=production`, `PORT=${app.port}`],
   });
 }
@@ -137,6 +167,9 @@ export function renderServiceSystemdService(svc: ServiceRecord, execStart: strin
     logBase: `/var/log/napp/${svc.name}`,
     execStart,
     nodeOptions: opts.nodeOptions,
+    cpuWeight: CPU_WEIGHT_SERVICE,
+    ioWeight: IO_WEIGHT_SERVICE,
+    memoryHighMB: opts.memoryHighMB,
     forcedEnv,
   });
 }

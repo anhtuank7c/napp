@@ -70,6 +70,12 @@ export interface AppRecord {
   // Bỏ 'none' và 'blocked' khỏi valid_referers. Chặt hơn, nhưng mất ảnh preview
   // khi chia sẻ link và 403 nhầm người dùng sau proxy công ty — xem nginx.ts.
   hotlinkStrict?: boolean;
+  // Chặn quét lỗ hổng CMS/framework PHP (.php, /wp-admin/, /phpmyadmin/... -> 444).
+  // undefined = BẬT (mặc định của cả server, xem `napp nginx scanblock`); chỉ
+  // false mới bỏ dòng include khỏi file location của site này. Mặc định-bật là
+  // có chủ đích: app tạo bằng bản napp cũ cũng phải được bảo vệ sau khi nâng cấp
+  // mà không cần ai nhớ bật thêm cờ nào.
+  scanBlock?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -117,6 +123,12 @@ export interface NappState {
   usedPorts: number[];
   usedRedisDb: number[];
   acmeEmail?: string; // email đã dùng đăng ký Let's Encrypt — nhớ để đỡ nhập lại
+  // Trọng số heap của background service so với web app (mặc định 0.5 — web app
+  // được gấp đôi). LƯU LẠI chứ không chỉ là cờ của một lần chạy: `tune apply
+  // --service-weight` mà không nhớ thì lần `app create` kế tiếp sẽ tính lại theo
+  // mặc định và âm thầm lật ngược lựa chọn của người dùng — cùng loại trôi cấu
+  // hình mà cả module unitfile.ts sinh ra để ngăn.
+  serviceHeapWeight?: number;
 }
 
 function emptyState(): NappState {

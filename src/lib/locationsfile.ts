@@ -2,7 +2,14 @@ import { existsSync, readFileSync } from "node:fs";
 import { writeFile, ensureDir, runCmd } from "./exec";
 import { warn, info } from "./log";
 import type { AppRecord } from "./state";
-import { renderAppLocationsConf, appLocationsPath, appCustomLocationsPath, NGINX_LOCATIONS_DIR } from "../templates/nginx";
+import {
+  renderAppLocationsConf,
+  renderScannerBlockConf,
+  appLocationsPath,
+  appCustomLocationsPath,
+  NGINX_LOCATIONS_DIR,
+  NGINX_SCANNER_BLOCK_CONF,
+} from "../templates/nginx";
 
 /**
  * Ghi file location của app mà KHÔNG âm thầm nuốt mất phần người dùng thêm tay.
@@ -70,12 +77,33 @@ export function ensureCustomLocationsFile(domain: string): void {
 }
 
 /**
+ * File chặn quét lỗ hổng DÙNG CHUNG — bảo đảm nó có mặt trước khi ai đó include.
+ *
+ * Cùng một cái bẫy như ensureCustomLocationsFile, nhưng hậu quả rộng hơn: file
+ * location của MỌI app đều include file này, nên thiếu nó thì nginx không nạp
+ * được cấu hình và TẤT CẢ site trên máy tắt — chỉ vì vừa tạo thêm một app.
+ *
+ * Đặt ở đây, trong hàm DUY NHẤT từng ghi ra dòng include, thay vì bắt từng chỗ
+ * gọi ('app create', 'app set', 'domain add/remove') nhớ gọi thêm một hàm nữa:
+ * chỗ gọi thứ tư quên là lại sập, mà lần đó sẽ không ai nối được với thay đổi
+ * này nữa.
+ *
+ * KHÔNG ghi đè khi file đã có — người dùng có thể vừa chạy 'napp nginx
+ * unscanblock', và tạo một app mới không phải là lý do để đảo ngược việc đó.
+ */
+export function ensureScannerBlockFile(): void {
+  if (existsSync(NGINX_SCANNER_BLOCK_CONF)) return;
+  writeFile(NGINX_SCANNER_BLOCK_CONF, renderScannerBlockConf(true), 0o644);
+}
+
+/**
  * Ghi file location của app. Dùng CHUNG cho cả ba chỗ render lại nó, để việc
  * cảnh báo không phụ thuộc vào chỗ gọi nào nhớ làm.
  */
 export function writeAppLocationsConf(app: AppRecord): void {
   ensureDir(NGINX_LOCATIONS_DIR, 0o755);
   ensureCustomLocationsFile(app.domain);
+  ensureScannerBlockFile();
 
   const path = appLocationsPath(app.domain);
   const rendered = renderAppLocationsConf(app);
@@ -100,6 +128,59 @@ export function writeAppLocationsConf(app: AppRecord): void {
   }
 
   writeFile(path, rendered, 0o644);
+}
+
+// Nằm ở lib chứ không ở commands/app.ts vì cả `napp app set` lẫn `napp nginx sync`
+// đều cần nó (sync dùng để vá vhost của app tạo bằng bản napp cũ, chưa hề có dòng
+// include nào), mà commands/app.ts đã import commands/nginx.ts — để hàm ở đó là
+// tạo ra một vòng import giữa hai file lệnh.
+/** Chèn `include <file>;` vào MỌI khối server đang proxy tới upstream của app. */
+export function injectLocationsInclude(conf: string, upstreamMarker: string, includeLine: string): string {
+  if (conf.includes(includeLine)) return conf; // đã có -> idempotent
+  const out: string[] = [];
+  let i = 0;
+  while (i < conf.length) {
+    const at = conf.indexOf("server", i);
+    if (at === -1) {
+      out.push(conf.slice(i));
+      break;
+    }
+    const open = conf.indexOf("{", at);
+    if (open === -1) {
+      out.push(conf.slice(i));
+      break;
+    }
+    // Tìm dấu } đóng khối bằng cách đếm ngoặc — không thể dùng regex vì khối
+    // server chứa các khối location lồng bên trong.
+    let depth = 0;
+    let end = -1;
+    for (let k = open; k < conf.length; k++) {
+      if (conf[k] === "{") depth++;
+      else if (conf[k] === "}") {
+        depth--;
+        if (depth === 0) {
+          end = k;
+          break;
+        }
+      }
+    }
+    if (end === -1) {
+      out.push(conf.slice(i));
+      break;
+    }
+    const block = conf.slice(at, end + 1);
+    out.push(conf.slice(i, at));
+    if (block.includes(upstreamMarker)) {
+      // Chèn NGAY TRƯỚC dấu đóng khối. Cuối khối chứ không phải đầu: một số
+      // chỉ thị đơn (client_max_body_size...) lấy lần khai báo SAU CÙNG, nên
+      // chèn ở đầu sẽ bị chính vhost ghi đè lại ngay bên dưới.
+      out.push(block.slice(0, -1).replace(/\s*$/, "\n") + `\n    ${includeLine}\n}`);
+    } else {
+      out.push(block);
+    }
+    i = end + 1;
+  }
+  return out.join("");
 }
 
 /** In gợi ý về sidecar — dùng sau khi ghi, khi người dùng vừa đụng tới file này. */

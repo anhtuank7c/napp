@@ -1,15 +1,22 @@
 import { existsSync, readFileSync, copyFileSync } from "node:fs";
-import { execCapture, runCmd, requireRoot, ensureDir, writeFile, commandExists } from "../lib/exec";
+import { execCapture, runCmd, requireRoot, ensureDir, writeFile, commandExists, state as execState } from "../lib/exec";
 import { info, ok, warn, die, section } from "../lib/log";
 import { ipv6Available } from "../lib/network";
-import { loadState, NGINX_AVAILABLE } from "../lib/state";
+import { loadState, slugFor, NGINX_AVAILABLE, type AppRecord } from "../lib/state";
+import { writeAppLocationsConf, injectLocationsInclude } from "../lib/locationsfile";
 import {
   renderNginxHardeningConf,
   renderDefaultServerConf,
   renderNappProxyConf,
+  renderScannerBlockConf,
+  appLocationsPath,
+  appCustomLocationsPath,
   NGINX_DEFAULT_SERVER_CONF,
   NGINX_HARDENING_CONF,
   NGINX_PROXY_CONF,
+  NGINX_LOCATIONS_DIR,
+  NGINX_SCANNER_BLOCK_CONF,
+  NGINX_SCANNER_LOG,
 } from "../templates/nginx";
 
 const DEFAULT_DENY_CERT = "/etc/napp/default-deny.crt";
@@ -114,59 +121,302 @@ export function stripInlineProxyBuffers(content: string): { out: string; changed
   return { out: keep.join("\n"), changed };
 }
 
+/**
+ * Gom mọi file cấu hình bị đụng trong MỘT lệnh để `nginx -t` hỏng thì hoàn tác
+ * được TẤT CẢ, không phải chỉ phần cuối cùng.
+ *
+ * Cần đến mức này vì một lần `napp nginx sync` nay chạm tới bốn loại file
+ * (00-napp-proxy.conf, _scanner-block.conf, <domain>.conf, vhost) nhân với số
+ * app. Hoàn tác nửa vời ở đây không phải "mất cấu hình" mà là nginx KHÔNG NẠP
+ * ĐƯỢC — vd vhost đã có dòng `include` còn file được include thì vừa bị xoá —
+ * và nginx không nạp được nghĩa là MỌI site trên máy tắt, không riêng site nào.
+ *
+ * Phân biệt hai trạng thái, vì hoàn tác của chúng ngược nhau:
+ *   - file ĐÃ CÓ trước lệnh -> chép bản sao trả lại
+ *   - file CHƯA CÓ (do chính lệnh này tạo ra) -> hoàn tác là XOÁ nó đi
+ */
+export class ConfigTx {
+  private items: { path: string; backup?: string }[] = [];
+
+  /**
+   * Ghi nhớ trạng thái file. PHẢI gọi TRƯỚC khi ghi đè nó.
+   *
+   * copyFileSync là lệnh ghi THẬT, không đi qua writeFile/runCmd nên KHÔNG tự
+   * biết --dry-run. Thiếu nhánh dryRun ở đây thì `napp nginx sync --dry-run`
+   * rải '.napp-bak' khắp /etc/nginx rồi bỏ lại: bước dọn dẹp đi qua runCmd, mà
+   * runCmd ở chế độ dry-run chỉ in ra chứ không xoá. Một lệnh mang tiếng "không
+   * thay đổi gì" mà để lại rác là kiểu vi phạm hợp đồng khó chịu nhất.
+   */
+  track(path: string): void {
+    if (this.items.some((i) => i.path === path)) return; // đã theo dõi -> giữ bản sao ĐẦU TIÊN
+    if (!existsSync(path)) {
+      this.items.push({ path });
+      return;
+    }
+    const backup = `${path}.napp-bak`;
+    if (!execState.dryRun) copyFileSync(path, backup);
+    this.items.push({ path, backup });
+  }
+
+  rollback(): void {
+    for (const it of this.items) {
+      if (it.backup) {
+        if (!execState.dryRun) copyFileSync(it.backup, it.path);
+      } else {
+        runCmd("rm", ["-f", it.path], { silentFail: true });
+      }
+    }
+    this.cleanup();
+  }
+
+  /** Xoá các bản sao sau khi đã chắc chắn thành công. */
+  cleanup(): void {
+    for (const it of this.items) if (it.backup) runCmd("rm", ["-f", it.backup], { silentFail: true });
+    this.items = [];
+  }
+}
+
+/** Chặn quét lỗ hổng đang BẬT hay TẮT — trạng thái nằm trọn trong nội dung file. */
+export function scannerBlockEnabled(): boolean {
+  if (!existsSync(NGINX_SCANNER_BLOCK_CONF)) return false;
+  // Bản TẮT chỉ có dòng chú thích; bản BẬT có các khối `location`.
+  return /^\s*location\s/m.test(readFileSync(NGINX_SCANNER_BLOCK_CONF, "utf8"));
+}
+
+/**
+ * Ghi file chặn quét lỗ hổng. Trả về true nếu nội dung thực sự đổi.
+ *
+ * TẮT = ghi bản RỖNG (chỉ chú thích), KHÔNG xoá file: nó đang được mọi vhost
+ * include, mà include trỏ vào file không có thật thì nginx từ chối khởi động
+ * trên toàn máy. Nhờ vậy trạng thái bật/tắt không cần lưu vào state.json —
+ * nội dung của đúng một file là nguồn sự thật duy nhất.
+ */
+function ensureScannerBlockConf(enabled: boolean): boolean {
+  const want = renderScannerBlockConf(enabled);
+  if (existsSync(NGINX_SCANNER_BLOCK_CONF) && readFileSync(NGINX_SCANNER_BLOCK_CONF, "utf8") === want) return false;
+  ensureDir(NGINX_LOCATIONS_DIR, 0o755);
+  writeFile(NGINX_SCANNER_BLOCK_CONF, want, 0o644);
+  return true;
+}
+
+interface BackfillResult {
+  wroteLocations: boolean;
+  patchedVhost: boolean;
+}
+
+/**
+ * Đưa MỘT app về đúng cấu trúc file của bản napp hiện tại.
+ *
+ * Đây là phần dành cho app tạo bằng bản napp CŨ. Cơ chế "file location riêng +
+ * một dòng include" chỉ có từ 1.19.0; app tạo trước đó có vhost KHÔNG hề chứa
+ * dòng include nào, nên mọi thứ napp ghi vào '/etc/nginx/napp-locations/' đều
+ * không tới được chúng — kể cả chặn quét lỗ hổng. Hỏng kiểu im lặng hoàn hảo:
+ * `nginx -t` xanh, lệnh báo thành công, mà site cũ thì không được bảo vệ gì cả.
+ *
+ * Hai bước, đều idempotent:
+ *   1. ghi/tạo '<domain>.conf' từ registry (kèm sidecar '<domain>.custom.conf')
+ *   2. chèn ĐÚNG MỘT dòng `include` vào vhost nếu chưa có — chèn bằng phép cắt
+ *      chuỗi theo khối server, KHÔNG render lại vhost, vì certbot chèn khối SSL
+ *      thẳng vào đó và render lại là xoá HTTPS của site đang chạy.
+ */
+function backfillAppLocations(app: AppRecord, tx: ConfigTx): BackfillResult {
+  const locPath = appLocationsPath(app.domain);
+  const before = existsSync(locPath) ? readFileSync(locPath, "utf8") : null;
+  tx.track(locPath);
+  tx.track(appCustomLocationsPath(app.domain));
+  writeAppLocationsConf(app);
+  const wroteLocations = before !== readFileSync(locPath, "utf8");
+
+  const vhostPath = `${NGINX_AVAILABLE}/${app.domain}.conf`;
+  const vhost = readFileSync(vhostPath, "utf8");
+  const withInclude = injectLocationsInclude(vhost, `proxy_pass http://napp_${slugFor(app.domain)}`, `include ${locPath};`);
+  if (withInclude === vhost) return { wroteLocations, patchedVhost: false };
+
+  tx.track(vhostPath);
+  writeFile(vhostPath, withInclude, 0o644);
+  return { wroteLocations, patchedVhost: true };
+}
+
+/** App đang TẮT chặn quét lỗ hổng riêng lẻ (`napp app set <domain> --no-scan-block`). */
+function appsWithScanBlockOff(): string[] {
+  return Object.values(loadState().apps)
+    .filter((a) => a.scanBlock === false)
+    .map((a) => a.domain);
+}
+
 export function cmdNginxSync(): void {
   requireRoot();
   if (!commandExists("nginx")) die("nginx chưa được cài. Chạy 'napp check --fix' trước.");
-  section("Đồng bộ cấu hình proxy dùng chung cho các vhost napp");
+  section("Đồng bộ cấu hình nginx dùng chung cho các vhost napp");
 
+  const tx = new ConfigTx();
+
+  tx.track(NGINX_PROXY_CONF);
   const wroteProxyConf = ensureNappProxyConf();
-  info(wroteProxyConf ? `Đã ghi ${NGINX_PROXY_CONF} (map $napp_connection_upgrade).` : `${NGINX_PROXY_CONF} đã đúng, giữ nguyên.`);
+  info(
+    wroteProxyConf
+      ? `Đã ghi ${NGINX_PROXY_CONF} (map $napp_connection_upgrade + log_format napp_scan).`
+      : `${NGINX_PROXY_CONF} đã đúng, giữ nguyên.`
+  );
 
-  // Sao lưu trước khi vá để còn hoàn tác nếu nginx -t hỏng.
+  // Chặn quét lỗ hổng: lần đầu (file chưa có) thì BẬT. Đã có thì GIỮ NGUYÊN
+  // trạng thái hiện tại — người dùng chạy `napp nginx unscanblock` có lý do của
+  // họ, và `sync` là lệnh chạy đi chạy lại sau mỗi lần nâng cấp; bật lại sau
+  // lưng họ mỗi lần như vậy là cách chắc chắn nhất để một quyết định có chủ đích
+  // bị xoá mà không ai thấy.
+  const scannerExisted = existsSync(NGINX_SCANNER_BLOCK_CONF);
+  const scannerOn = scannerExisted ? scannerBlockEnabled() : true;
+  tx.track(NGINX_SCANNER_BLOCK_CONF);
+  ensureScannerBlockConf(scannerOn);
+
   const patched: string[] = [];
   const debuffered: string[] = [];
-  const backups = new Map<string, string>();
-  for (const domain of Object.keys(loadState().apps)) {
-    const conf = `${NGINX_AVAILABLE}/${domain}.conf`;
+  const includeAdded: string[] = [];
+  const locationsWritten: string[] = [];
+
+  for (const app of Object.values(loadState().apps)) {
+    const conf = `${NGINX_AVAILABLE}/${app.domain}.conf`;
     if (!existsSync(conf)) {
-      warn(`Bỏ qua '${domain}': không thấy ${conf}.`);
+      warn(`Bỏ qua '${app.domain}': không thấy ${conf}.`);
       continue;
     }
+
+    // (a) Vá tại chỗ các chỉ thị đã lỗi thời NẰM TRONG vhost.
     const before = readFileSync(conf, "utf8");
     const withConnection = before.replace(LEGACY_CONNECTION_LINE, "proxy_set_header Connection $napp_connection_upgrade;");
     const stripped = stripInlineProxyBuffers(withConnection);
-    if (stripped.changed) debuffered.push(domain);
-    const after = stripped.out;
-    if (after === before) continue;
-    const bak = `${conf}.napp-bak`;
-    copyFileSync(conf, bak);
-    backups.set(conf, bak);
-    writeFile(conf, after, 0o644);
-    patched.push(domain);
+    if (stripped.changed) debuffered.push(app.domain);
+    if (stripped.out !== before) {
+      tx.track(conf);
+      writeFile(conf, stripped.out, 0o644);
+      patched.push(app.domain);
+    }
+
+    // (b) File location + dòng include — phần vá cho app tạo bằng bản napp cũ.
+    const res = backfillAppLocations(app, tx);
+    if (res.wroteLocations) locationsWritten.push(app.domain);
+    if (res.patchedVhost) includeAdded.push(app.domain);
   }
 
-  if (patched.length === 0) {
-    info("Không có vhost nào cần vá.");
-  } else {
-    info(`Đã vá vhost: ${patched.join(", ")}`);
-  }
+  info(patched.length === 0 ? "Không có vhost nào cần vá chỉ thị cũ." : `Đã vá chỉ thị cũ trong vhost: ${patched.join(", ")}`);
   if (debuffered.length > 0) {
     info(`Đã gỡ khối bộ đệm proxy nội tuyến (nay lấy từ ${NGINX_PROXY_CONF}) khỏi: ${debuffered.join(", ")}`);
+  }
+  if (includeAdded.length > 0) {
+    info(`Đã chèn dòng 'include' file location vào vhost CHƯA có (app tạo bằng bản napp cũ): ${includeAdded.join(", ")}`);
+  }
+  if (locationsWritten.length > 0) {
+    info(`Đã cập nhật file location: ${locationsWritten.join(", ")}`);
   }
 
   const test = execCapture("nginx", ["-t"]);
   if (test.code !== 0) {
-    for (const [conf, bak] of backups) copyFileSync(bak, conf);
-    if (wroteProxyConf) runCmd("rm", ["-f", NGINX_PROXY_CONF], { silentFail: true });
+    tx.rollback();
     die(`Cấu hình nginx sau khi vá có lỗi — ĐÃ HOÀN TÁC toàn bộ:\n${test.stderr}`);
   }
   runCmd("systemctl", ["reload", "nginx"]);
-  for (const bak of backups.values()) runCmd("rm", ["-f", bak], { silentFail: true });
+  tx.cleanup();
 
   ok("Đã đồng bộ và reload nginx.");
   info("• 'Connection: upgrade' giờ CHỈ gửi cho request WebSocket thật; request thường dùng keep-alive.");
   info("• Bộ đệm proxy: 128k header + 4x256k thân, đặt một chỗ ở mức http — đủ cho route SvelteKit lồng sâu (trước đây 502 'upstream sent too big header').");
   info("• Khối SSL do certbot chèn trong vhost được giữ nguyên (vá tại chỗ, không render lại).");
+  if (scannerOn) {
+    reportScannerBlock(scannerExisted ? "giữ nguyên (đang BẬT)" : "BẬT lần đầu");
+  } else {
+    info(`• Chặn quét lỗ hổng: đang TẮT (giữ nguyên lựa chọn cũ). Bật lại: napp nginx scanblock`);
+  }
+}
+
+/** Phần báo cáo dùng chung cho `nginx sync` và `nginx scanblock`. */
+function reportScannerBlock(stateLabel: string): void {
+  info(`• Chặn quét lỗ hổng: ${stateLabel} — '.php/.asp/.jsp', '/wp-admin/', '/phpmyadmin/', '/cgi-bin/' -> 444, KHÔNG qua Node.`);
+  info(`  Ghi log riêng ở ${NGINX_SCANNER_LOG} (access log của site sạch trở lại): tail -f ${NGINX_SCANNER_LOG}`);
+  info(`  Chạy 'napp fail2ban setup' để bật jail 'napp-scanner' — ban IP ngay từ tường lửa, thứ THẬT SỰ tiết kiệm tài nguyên (444 vẫn phải trả tiền bắt tay TLS).`);
+  const off = appsWithScanBlockOff();
+  if (off.length > 0) info(`  Đang TẮT riêng cho: ${off.join(", ")} (bật lại: napp app set <domain> --scan-block)`);
+}
+
+export function cmdNginxScanBlock(): void {
+  requireRoot();
+  if (!commandExists("nginx")) die("nginx chưa được cài. Chạy 'napp check --fix' trước.");
+  section("Chặn quét lỗ hổng CMS/framework PHP (trả 444, log riêng)");
+
+  const tx = new ConfigTx();
+
+  // log_format napp_scan nằm trong file này và PHẢI được nginx đọc TRƯỚC khi
+  // gặp `access_log ... napp_scan` trong vhost — thiếu nó thì `nginx -t` báo
+  // "unknown log format". conf.d được nginx.conf include trước sites-enabled
+  // nên thứ tự đã đúng sẵn; ở đây chỉ cần bảo đảm file có mặt.
+  tx.track(NGINX_PROXY_CONF);
+  ensureNappProxyConf();
+
+  tx.track(NGINX_SCANNER_BLOCK_CONF);
+  ensureScannerBlockConf(true);
+
+  // Ghi file thôi là chưa đủ: vhost của app tạo bằng bản napp cũ không có dòng
+  // include nào trỏ tới nó. Không có bước này thì lệnh báo thành công còn các
+  // site cũ — đúng những site đã chạy lâu nhất và bị quét nhiều nhất — vẫn để
+  // ngỏ hoàn toàn.
+  const includeAdded: string[] = [];
+  const touched: string[] = [];
+  for (const app of Object.values(loadState().apps)) {
+    if (!existsSync(`${NGINX_AVAILABLE}/${app.domain}.conf`)) {
+      warn(`Bỏ qua '${app.domain}': không thấy vhost ${NGINX_AVAILABLE}/${app.domain}.conf.`);
+      continue;
+    }
+    const res = backfillAppLocations(app, tx);
+    if (res.patchedVhost) includeAdded.push(app.domain);
+    if (res.wroteLocations || res.patchedVhost) touched.push(app.domain);
+  }
+
+  const test = execCapture("nginx", ["-t"]);
+  if (test.code !== 0) {
+    tx.rollback();
+    die(`Cấu hình nginx sau khi bật chặn quét có lỗi — ĐÃ HOÀN TÁC toàn bộ:\n${test.stderr}`);
+  }
+  runCmd("systemctl", ["reload", "nginx"]);
+  tx.cleanup();
+
+  ok("Đã bật chặn quét lỗ hổng cho mọi site napp quản lý.");
+  if (includeAdded.length > 0) {
+    info(`• Đã chèn dòng 'include' vào vhost chưa có (app tạo bằng bản napp cũ): ${includeAdded.join(", ")}`);
+  }
+  if (touched.length === 0) info("• Mọi site đã ở đúng cấu hình, không có gì phải đổi.");
+  reportScannerBlock("BẬT");
+  warn("Danh sách mẫu cố ý HẸP (neo theo đuôi .php/.asp/.jsp và namespace WordPress/phpMyAdmin) để không thể chặn nhầm route thật của app Node.");
+  warn(`Nếu một site của bạn THẬT SỰ phục vụ file .php qua upstream khác: napp app set <domain> --no-scan-block`);
+}
+
+export function cmdNginxUnscanBlock(): void {
+  requireRoot();
+  if (!commandExists("nginx")) die("nginx chưa được cài.");
+  if (!existsSync(NGINX_SCANNER_BLOCK_CONF)) {
+    info("Chặn quét lỗ hổng chưa từng được bật — không có gì để gỡ.");
+    return;
+  }
+  if (!scannerBlockEnabled()) {
+    info("Chặn quét lỗ hổng đang TẮT sẵn. Bật lại: napp nginx scanblock");
+    return;
+  }
+
+  const tx = new ConfigTx();
+  tx.track(NGINX_SCANNER_BLOCK_CONF);
+  // Làm RỖNG chứ KHÔNG xoá — mọi vhost đang include file này, xoá nó là nginx
+  // từ chối khởi động và sập toàn bộ site trên máy. Giữ file lại cũng có nghĩa
+  // là bật lại sau này chỉ là ghi đè một file, không phải vá lại N vhost.
+  ensureScannerBlockConf(false);
+
+  const test = execCapture("nginx", ["-t"]);
+  if (test.code !== 0) {
+    tx.rollback();
+    die(`Cấu hình nginx sau khi gỡ có lỗi — ĐÃ HOÀN TÁC:\n${test.stderr}`);
+  }
+  runCmd("systemctl", ["reload", "nginx"]);
+  tx.cleanup();
+
+  ok("Đã tắt chặn quét lỗ hổng. Request dò .php/wp-admin lại đi qua Node và quay lại access log của site.");
+  info(`• Dòng 'include ${NGINX_SCANNER_BLOCK_CONF};' vẫn nằm trong vhost (file nay rỗng) — bật lại chỉ cần: napp nginx scanblock`);
 }
 
 export function cmdNginxHarden(): void {

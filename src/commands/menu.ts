@@ -22,7 +22,7 @@ import { cmdFirewallSync, cmdFirewallStatus } from "./firewall";
 import { cmdFail2banSetup, cmdFail2banStatus } from "./fail2ban";
 import { cmdTuneApply, cmdTuneShow } from "./tune";
 import { cmdCloudflareSync, cmdCloudflareSchedule, cmdCloudflareUnschedule } from "./cloudflare";
-import { cmdNginxHarden, cmdNginxUnharden, cmdNginxSync } from "./nginx";
+import { cmdNginxHarden, cmdNginxUnharden, cmdNginxSync, cmdNginxScanBlock, cmdNginxUnscanBlock } from "./nginx";
 import { cmdUpdate, cmdVersion } from "./update";
 import { NAPP_VERSION } from "../version";
 import { section, info, warn } from "../lib/log";
@@ -508,6 +508,10 @@ async function menuInfra(): Promise<void> {
       "Đồng bộ cấu hình proxy nginx vào vhost đã có (bộ đệm — sửa 502 route sâu)",
       "Xem đề xuất tối ưu phần cứng",
       "Áp tối ưu phần cứng (nginx/MariaDB/Redis/sysctl)",
+      // Thêm vào CUỐI chứ không chèn cạnh các mục nginx ở trên: chèn giữa là
+      // đánh số lại "Xem/Áp tối ưu phần cứng" — hai mục người dùng đã quen gõ.
+      "Chặn quét lỗ hổng PHP/WordPress (.php, /wp-admin/ -> 444, log riêng)",
+      "Gỡ chặn quét lỗ hổng",
     ]);
     const choice = await ask("Chọn: ");
     if (choice === "0" || choice === "") return;
@@ -527,6 +531,8 @@ async function menuInfra(): Promise<void> {
     else if (choice === "10") await guard(() => cmdNginxSync());
     else if (choice === "11") await guard(() => cmdTuneShow());
     else if (choice === "12") await guard(() => cmdTuneApply({ yes: false, skipRestart: false, syncUnits: false }));
+    else if (choice === "13") await guard(() => cmdNginxScanBlock());
+    else if (choice === "14") await guard(() => cmdNginxUnscanBlock());
   }
 }
 

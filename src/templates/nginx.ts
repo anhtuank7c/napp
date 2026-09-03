@@ -29,6 +29,17 @@ export function appCustomLocationsPath(domain: string): string {
   return `${NGINX_LOCATIONS_DIR}/${domain}.custom.conf`;
 }
 
+// Chặn quét lỗ hổng — file DÙNG CHUNG cho MỌI site, không phải mỗi site một bản.
+// Danh sách mẫu là thứ sẽ còn phải sửa nhiều lần (scanner đổi mẫu liên tục);
+// nhân nó ra N file là N chỗ phải sửa và N cơ hội để chúng trôi khỏi nhau.
+// Tên bắt đầu bằng '_' để không bao giờ đụng tên một domain thật.
+export const NGINX_SCANNER_BLOCK_CONF = `${NGINX_LOCATIONS_DIR}/_scanner-block.conf`;
+// Access log RIÊNG cho request bị chặn — xem chú thích ở renderScannerBlockConf
+// về vì sao KHÔNG dùng 'access_log off'.
+export const NGINX_SCANNER_LOG = "/var/log/nginx/napp-scanner.log";
+// Tên log_format khai báo ở mức http trong 00-napp-proxy.conf.
+export const NGINX_SCANNER_LOG_FORMAT = "napp_scan";
+
 // Biến $napp_connection_upgrade: chỉ gửi 'Connection: upgrade' cho request
 // WebSocket THẬT SỰ. Tên có tiền tố napp_ để không đụng map $connection_upgrade
 // mà người dùng có thể đã tự khai báo ở nơi khác (trùng tên -> nginx báo lỗi).
@@ -45,6 +56,12 @@ map $http_upgrade $napp_connection_upgrade {
     default upgrade;
     ''      '';
 }
+
+# Định dạng log cho request quét lỗ hổng bị chặn (xem _scanner-block.conf).
+# PHẢI khai báo ở mức http như ở đây: 'log_format' không hợp lệ trong server{}.
+# Có thêm $host so với 'combined' vì file log là DÙNG CHUNG cho mọi site — thiếu
+# cột đó thì biết có kẻ đang quét mà không biết nó quét site nào.
+log_format ${NGINX_SCANNER_LOG_FORMAT} '$remote_addr - $host [$time_local] "$request" $status "$http_user_agent"';
 
 ${PROXY_BUFFER_BLOCK}`;
 }
@@ -159,6 +176,122 @@ export interface NginxAppOptions {
   // trông như có tác dụng nhưng không chỗ gọi nào đọc.
 }
 
+
+// Mẫu URI của các đợt quét lỗ hổng CMS/framework PHP.
+//
+// NEO VÀO ĐUÔI FILE VÀ NAMESPACE RIÊNG, KHÔNG ĐOÁN THEO ĐƯỜNG DẪN CHUNG CHUNG.
+// Chế độ hỏng duy nhất đáng sợ ở đây là chặn nhầm route THẬT của app, và nó hỏng
+// im lặng: người dùng thấy trang trắng / kết nối bị ngắt, còn log của site thì
+// sạch bong vì request đã bị chuyển sang file log khác. Vì thế danh sách này
+// KHÔNG có '/admin', '/config', '/vendor', '/backup', '/telescope', '/horizon'
+// — tất cả đều là route hoàn toàn hợp lệ của một app Node. Đuôi '.php'/'.asp'/
+// '.jsp' thì không: một app Node không phục vụ chúng, không bao giờ.
+//
+// Neo theo đuôi cũng đã bắt luôn phần lớn mẫu Laravel/PHP mà KHÔNG cần thêm luật
+// đường dẫn: '/vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php' kết thúc bằng
+// '.php'. Thêm một luật '^/vendor/' chỉ làm tăng rủi ro chặn nhầm mà không bắt
+// thêm được gì.
+//
+// CỐ Ý KHÔNG có luật cho '.env' hay '/.git/': vhost napp đã có sẵn
+// 'location ~ /\.(?!well-known).* { deny all; }'. Thêm luật thứ hai ở đây thì
+// kết quả phụ thuộc vào luật nào được KHAI BÁO TRƯỚC (nginx chọn location regex
+// theo THỨ TỰ KHAI BÁO) — mà vị trí dòng include lại khác nhau giữa vhost tạo
+// mới (include nằm trước) và vhost cũ được vá bằng `napp nginx sync` (include
+// chèn ở cuối khối server). Một luật đổi hành vi theo TUỔI của vhost là thứ
+// không ai lần ra nổi về sau.
+//
+// Dùng `~*` (không phân biệt hoa thường) vì scanner có gửi cả '/WP-ADMIN/'.
+const SCANNER_PATTERNS: { re: string; why: string }[] = [
+  {
+    re: String.raw`\.(php[0-9]?|phtml|phps|asp|aspx|jsp|jspx|cfm|cgi|shtml)$`,
+    why: "đuôi file của runtime mà app Node KHÔNG BAO GIỜ phục vụ",
+  },
+  {
+    re: String.raw`^/(wp-admin|wp-content|wp-includes|wp-json|wordpress)/`,
+    why: "namespace riêng của WordPress",
+  },
+  {
+    re: String.raw`^/(phpmyadmin|phpmyadmin[0-9._-]*|pma|myadmin|mysqladmin|adminer|dbadmin)(/|$)`,
+    why: "trang quản trị database viết bằng PHP",
+  },
+  { re: String.raw`^/cgi-bin/`, why: "CGI cổ điển (Shellshock và họ hàng)" },
+];
+
+/**
+ * File chặn quét lỗ hổng, DÙNG CHUNG cho mọi site napp quản lý.
+ *
+ * BỐI CẢNH — một máy chủ Node công khai nhận hàng nghìn request/ngày dò các CMS
+ * PHP: '/wp-login.php', '/wp-admin/setup-config.php', '/phpmyadmin/', các mẫu
+ * eval-stdin của Laravel/phpunit... Không cái nào HẠI được app Node (không có
+ * PHP nào để chạy), nhưng mỗi cái đều đi trọn đường nginx -> proxy_pass -> router
+ * của framework -> render trang 404. Với SSR (SvelteKit/Next) đó là cả chuỗi
+ * hook/layout chạy để dựng một trang lỗi cho một con bot. Và tất cả đều rơi vào
+ * access log của site, trộn lẫn với traffic thật.
+ *
+ * ĐỪNG KỲ VỌNG SAI VÀO CON SỐ: `return 444` KHÔNG tiết kiệm nhiều CPU như tên
+ * gọi gợi ý. Phần đắt nhất của một request quét là bắt tay TCP + TLS, và nginx
+ * đã trả xong khoản đó TRƯỚC khi kịp nhìn thấy URI. Thứ tiết kiệm được là vòng
+ * qua Node, không phải cái bắt tay. Khoản lời THẬT nằm ở hai chỗ khác: access
+ * log của site sạch trở lại, và fail2ban có một tín hiệu ban gần như hoàn hảo.
+ *
+ * VÌ SAO KHÔNG `access_log off` — đây là chỗ dễ làm hỏng nhất:
+ * Cách hiển nhiên để hết ồn log là tắt log cho các location này. Làm vậy là mất
+ * luôn jail `nginx-botsearch` của fail2ban — nó đọc '/var/log/nginx/*access.log'.
+ * Kết quả: log sạch NHƯNG scanner không bao giờ bị ban, cứ mở kết nối mãi, tức
+ * là đổi một khoản lỗ nhỏ lấy một khoản lỗ to hơn.
+ *
+ * Nên: ghi sang MỘT FILE RIÊNG. Access log của site sạch bong, còn file riêng đó
+ * là tín hiệu hoàn hảo — MỌI dòng trong nó chắc chắn là scanner, nên jail
+ * `napp-scanner` để maxretry=3 / bantime 1 ngày mà không có rủi ro ban nhầm.
+ * Logrotate mặc định của Ubuntu đã xoay vòng '/var/log/nginx/*.log' nên file này
+ * không cần cấu hình rotate riêng.
+ *
+ * LƯU Ý KHI CÓ CLOUDFLARE ĐỨNG TRƯỚC: 444 = đóng kết nối không phản hồi, và
+ * Cloudflare dịch điều đó thành trang lỗi 520 cho người xem. Với scanner thì
+ * không sao, nhưng nếu một luật ở đây chặn nhầm route thật thì người dùng thấy
+ * "520" chứ không phải 404 — trông như server sập. Đó là lý do danh sách mẫu ở
+ * trên hẹp đến mức gần như không thể chặn nhầm.
+ *
+ * @param enabled false -> file rỗng (chỉ chú thích). KHÔNG xoá file: nó đang
+ *   được include, mà include trỏ vào file không có thật thì nginx TỪ CHỐI KHỞI
+ *   ĐỘNG trên TOÀN MÁY — sập mọi site chứ không riêng site nào.
+ */
+export function renderScannerBlockConf(enabled: boolean): string {
+  const header =
+    `# Managed by napp — chặn quét lỗ hổng (CMS/framework PHP). TỰ SINH, đừng sửa tay.\n` +
+    `#   Bật : napp nginx scanblock      Tắt: napp nginx unscanblock\n` +
+    `#   Một site cụ thể: napp app set <domain> --no-scan-block\n` +
+    `# File này được MỌI vhost napp quản lý include (một dòng trong <domain>.conf).\n`;
+
+  if (!enabled) {
+    return (
+      header +
+      `#\n` +
+      `# ĐANG TẮT. File vẫn tồn tại và vẫn được include — TẮT nghĩa là làm RỖNG,\n` +
+      `# không phải xoá: include trỏ vào file không có thật khiến nginx từ chối\n` +
+      `# khởi động trên TOÀN MÁY, sập mọi site chứ không riêng site nào.\n`
+    );
+  }
+
+  const blocks = SCANNER_PATTERNS.map(
+    (p) => `
+    # ${p.why}
+    location ~* ${p.re} {
+        # Log sang file RIÊNG, KHÔNG tắt log — xem chú thích ở nginx.ts:
+        # tắt log là fail2ban mất tín hiệu và scanner không bao giờ bị ban.
+        access_log ${NGINX_SCANNER_LOG} ${NGINX_SCANNER_LOG_FORMAT};
+        return 444;
+    }`
+  ).join("\n");
+
+  return `${header}#
+# 444 = đóng kết nối, không gửi gì cả (không lộ thông tin, không tốn băng thông).
+# Request bị chặn ghi vào ${NGINX_SCANNER_LOG} — mọi dòng trong đó
+# chắc chắn là scanner, nên jail 'napp-scanner' của fail2ban ban được rất chặt
+# mà không sợ ban nhầm. Xem: napp fail2ban setup
+${blocks}
+`;
+}
 
 /**
  * Các `location` riêng của một app, để vhost `include` vào.
@@ -362,6 +495,20 @@ ${hotlinkBlock}
   // LUÔN include, kể cả khi app chưa bật tuỳ chọn nào — file sidecar được
   // lib/locationsfile.ts tạo sẵn (rỗng) trước mỗi lần ghi, nên include không
   // bao giờ trỏ vào file không tồn tại.
+  // Chặn quét lỗ hổng — MỘT dòng include trỏ vào file DÙNG CHUNG, để danh sách
+  // mẫu chỉ tồn tại ở đúng một chỗ trên máy. Bỏ dòng này cho riêng một site
+  // bằng 'napp app set <domain> --no-scan-block' (vd site thật sự có phục vụ
+  // file .php qua một upstream khác, hoặc đang migrate từ WordPress sang).
+  //
+  // Đặt TRƯỚC customInclude: nginx chọn location regex theo THỨ TỰ KHAI BÁO, nên
+  // luật của napp phải đứng trước luật người dùng tự viết mới thắng được.
+  const scannerInclude =
+    app.scanBlock === false
+      ? `\n    # Chặn quét lỗ hổng: ĐÃ TẮT cho site này (napp app set ${app.domain} --scan-block để bật lại).\n`
+      : `\n    # Chặn quét lỗ hổng (wp-admin, .php, phpmyadmin... -> 444, log riêng).\n` +
+        `    # Danh sách mẫu dùng chung cho mọi site, sửa một chỗ: ${NGINX_SCANNER_BLOCK_CONF}\n` +
+        `    include ${NGINX_SCANNER_BLOCK_CONF};\n`;
+
   const customInclude =
     `\n    # Location do BẠN viết. napp KHÔNG BAO GIỜ ghi đè file dưới đây — đặt\n` +
     `    # location riêng vào đó thay vì sửa file này (file này bị render lại\n` +
@@ -370,8 +517,8 @@ ${hotlinkBlock}
 
   const out = `${staticBlock}${aliasBlock}${uploadBlock}`;
   return out.trim().length === 0
-    ? `# Managed by napp — site: ${app.domain}\n# Chưa bật tuỳ chọn nào (--static-root / --static-alias / --upload-dir). File giữ lại vì vhost include nó.\n${customInclude}`
-    : `# Managed by napp — location riêng của ${app.domain}. TỰ SINH, đừng sửa tay.\n# Cập nhật bằng: napp app set ${app.domain} ...\n${out}${customInclude}`;
+    ? `# Managed by napp — site: ${app.domain}\n# Chưa bật tuỳ chọn nào (--static-root / --static-alias / --upload-dir). File giữ lại vì vhost include nó.\n${scannerInclude}${customInclude}`
+    : `# Managed by napp — location riêng của ${app.domain}. TỰ SINH, đừng sửa tay.\n# Cập nhật bằng: napp app set ${app.domain} ...\n${out}${scannerInclude}${customInclude}`;
 }
 
 // Vhost reverse-proxy CHỈ HTTP (giống lara.sh: certbot sẽ tự sửa file này để

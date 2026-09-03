@@ -28,10 +28,10 @@ import { createDatabase, dropDatabase } from "../lib/mysql";
 import { mergeEnvFile } from "../lib/envfile";
 import { unitWorkDir } from "../templates/systemd";
 import { detectHardware } from "../lib/hardware";
-import { nodeMaxOldSpaceMB } from "../templates/tuning";
+import { serviceMemoryHighMB } from "../templates/tuning";
 import { GIT_NONINTERACTIVE_ENV, prepareRepoAuth, setupRepoAuth } from "../lib/repo";
 import { defaultPackageManager, defaultInstallCmd, defaultStartCmd, ensurePackageManager, ensureRuntime } from "../lib/provision";
-import { applyNodeHeaps, writeServiceUnit, currentHeapMB } from "./app";
+import { applyNodeHeaps, writeServiceUnit, currentHeapPlan, unitMix, reportBalance } from "./app";
 
 export interface CreateServiceOptions {
   port?: number; // KHÔNG cấp cổng trừ khi truyền — service thuần worker không listen gì
@@ -365,13 +365,24 @@ EOF`,
     };
     // Heap V8 chỉ đặt cho runtime node. Chia theo TỔNG số đơn vị node (app + service)
     // SAU khi thêm service này để cân đối RAM; user có thể ghi đè NODE_OPTIONS trong .env.
-    const st = loadState();
-    const totalUnitsAfter = Object.keys(st.apps).length + Object.keys(st.services).length + 1;
-    const heapMB = nodeMaxOldSpaceMB(detectHardware(), totalUnitsAfter);
+    //
+    // Background service được phần NHỎ HƠN web app (mặc định một nửa): worker
+    // chậm đi thì không ai thấy, web app chậm đi thì mọi người dùng đều thấy.
+    const plan = currentHeapPlan({ services: 1 });
+    const heapMB = plan.serviceMB;
     // Service mới -> unit chưa có, writeServiceUnit ghi thẳng bản template kèm
     // fingerprint để lần sửa tay đầu tiên của người dùng được nhận ra và giữ lại.
     writeServiceUnit(record, heapMB);
-    if (opts.runtime === "node") info(`NODE_OPTIONS=--max-old-space-size=${heapMB} (heap V8 chia cho ${totalUnitsAfter} đơn vị node; đổi trong .env nếu cần)`);
+    if (opts.runtime === "node") {
+      info(
+        `NODE_OPTIONS=--max-old-space-size=${heapMB} (background service nhận phần nhỏ hơn web app: ` +
+          `${plan.serviceMB} MB so với ${plan.webMB} MB; đổi trong .env nếu cần)`
+      );
+    }
+    info(
+      `Ưu tiên tài nguyên: CPUWeight/IOWeight thấp hơn web app + MemoryHigh ${serviceMemoryHighMB(heapMB)} MB (giới hạn MỀM) — ` +
+        `worker nén ảnh/video sẽ không làm chậm request của người dùng thật khi tranh chấp CPU.`
+    );
     runCmd("systemctl", ["daemon-reload"]);
     runCmd("systemctl", ["enable", unitName]);
     runCmd("systemctl", ["restart", unitName]);
@@ -383,11 +394,8 @@ EOF`,
 
     // Cân đối lại heap V8 giữa các đơn vị node còn lại (service vừa tạo đã chạy
     // với heap đúng nên bỏ qua restart nó).
-    const totalUnits = Object.keys(loadState().apps).length + Object.keys(loadState().services).length;
-    if (totalUnits > 1) {
-      const heapMB = applyNodeHeaps({ restart: true, skipRestartFor: name });
-      info(`Đã cân đối heap V8 còn ${heapMB} MB/đơn vị cho ${totalUnits} đơn vị node (đã restart các đơn vị cũ để áp).`);
-    }
+    const mixNow = unitMix();
+    if (mixNow.webApps + mixNow.services > 1) reportBalance(applyNodeHeaps({ restart: true, skipRestartFor: name }));
 
     console.log();
     console.log("===============================================================");
@@ -531,7 +539,7 @@ export async function cmdServiceSet(name: string, opts: ServiceSetOptions): Prom
     // lại unit NÀY. `authoritative` nói rõ User/Group lần này do napp quyết
     // định: đây chính là thứ người dùng vừa yêu cầu đổi, giữ bản sửa tay cũ ở
     // đây là làm ngược lại ý họ. Các directive khác họ sửa vẫn được giữ nguyên.
-    writeServiceUnit(svc, currentHeapMB(), ["User", "Group"]);
+    writeServiceUnit(svc, currentHeapPlan().serviceMB, ["User", "Group"]);
     runCmd("systemctl", ["daemon-reload"]);
     runCmd("systemctl", ["restart", svcSystemdName(name)]);
 
@@ -656,11 +664,8 @@ export async function cmdServiceRemove(name: string, opts: ServiceRemoveOptions)
     ok(`Đã gỡ service '${name}' khỏi napp.`);
 
     // Cân đối lại heap V8 cho các đơn vị node còn lại — nay được chia phần RAM lớn hơn.
-    const remaining = Object.keys(loadState().apps).length + Object.keys(loadState().services).length;
-    if (remaining > 0) {
-      const heapMB = applyNodeHeaps({ restart: true });
-      info(`Đã cân đối lại heap V8 lên ${heapMB} MB/đơn vị cho ${remaining} đơn vị node còn lại.`);
-    }
+    const mixAfter = unitMix();
+    if (mixAfter.webApps + mixAfter.services > 0) reportBalance(applyNodeHeaps({ restart: true }));
   } finally {
     release();
   }

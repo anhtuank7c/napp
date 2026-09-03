@@ -62,6 +62,8 @@ export const PRESERVABLE_DIRECTIVES = [
   "MemoryMax",
   "MemoryHigh",
   "CPUQuota",
+  "CPUWeight",
+  "IOWeight",
 ] as const;
 
 export type UnitStatus = "missing" | "managed" | "customized" | "unknown";
@@ -292,6 +294,75 @@ export interface HeapPatchResult {
  * tạo/xoá app, mỗi lần `napp tune apply`). Render lại cả file cho một con số là
  * cách chắc chắn nhất để một hôm nào đó thổi bay ExecStart người dùng đã sửa.
  */
+export interface PriorityPatchResult {
+  changed: boolean;
+  applied: string[]; // directive napp vừa đặt/cập nhật
+  preserved: string[]; // directive bỏ qua vì người dùng đã khoá
+}
+
+/**
+ * Vá ƯU TIÊN TÀI NGUYÊN (CPUWeight / IOWeight / MemoryHigh) vào một unit ĐÃ CÓ.
+ *
+ * VÌ SAO PHẢI CÓ HÀM NÀY thay vì chỉ thêm vào template:
+ *
+ * Unit tạo bằng bản napp trước 1.25.0 KHÔNG có các directive này. Mà đường chạy
+ * thường xuyên nhất — `applyNodeHeaps`, gọi mỗi lần tạo/xoá app và mỗi lần
+ * `tune apply` — cố ý chỉ vá đúng CON SỐ trong '--max-old-space-size' và không
+ * đụng dòng nào khác. Nếu để CPUWeight chỉ nằm trong template thì nó chỉ tới
+ * được unit cũ qua `tune apply --sync-units`, thứ gần như không ai chạy: lệnh
+ * báo thành công, `napp tune show` in ra tỷ lệ ưu tiên, mà unit thật thì không
+ * có dòng nào — đúng kiểu hỏng im lặng.
+ *
+ * Nên: một phép vá PHẪU THUẬT riêng, cùng tinh thần với patchUnitHeap — chỉ
+ * chèn/cập nhật đúng những dòng này, mọi dòng khác chép nguyên văn.
+ *
+ * Directive nào người dùng đã khoá bằng '# napp-preserve:' thì BỎ QUA: ai đặt
+ * tay CPUWeight cho một worker cụ thể là đã có lý do, và ghi đè nó ở đây chính
+ * là loại "tác dụng phụ của lệnh khác" mà cả module này sinh ra để ngăn.
+ *
+ * @param want ví dụ { CPUWeight: "200", IOWeight: "200", MemoryHigh: "654M" }.
+ *   Bỏ hẳn một khoá thì directive đó không bị đụng tới (dùng cho MemoryHigh
+ *   trên máy cgroup v1 — nơi nó không tồn tại).
+ */
+export function patchUnitPriority(path: string, want: Record<string, string>): PriorityPatchResult {
+  if (!existsSync(path)) return { changed: false, applied: [], preserved: [] };
+  const original = readFileSync(path, "utf8");
+  const locked = new Set(recordedPreserves(original));
+  const wasManaged = unitStatus(path) === "managed";
+
+  let lines = original.split("\n");
+  const applied: string[] = [];
+  const preserved: string[] = [];
+
+  for (const [name, value] of Object.entries(want)) {
+    if (locked.has(name)) {
+      preserved.push(name);
+      continue;
+    }
+    const blocks = scanServiceDirectives(lines).filter((b) => b.name === name);
+    // Đã đúng giá trị rồi thì không ghi lại — tránh restart vô ích ở caller.
+    if (blocks.length === 1 && (blocks[0]?.lines[0] ?? "").trim() === `${name}=${value}`) continue;
+    lines = replaceServiceDirective(lines, name, [`${name}=${value}`]);
+    applied.push(name);
+  }
+
+  if (applied.length === 0) return { changed: false, applied, preserved };
+
+  const patched = lines.join("\n");
+  if (patched === original) return { changed: false, applied: [], preserved };
+  // Chỉ đóng lại fingerprint khi file TRƯỚC ĐÓ còn nguyên bản napp — file đã bị
+  // sửa tay phải tiếp tục bị coi là "đã sửa" ở những lần ghi sau.
+  writeFile(path, wasManaged ? stamp(patched, recordedPreserves(original)) : patched, 0o644);
+  return { changed: true, applied, preserved };
+}
+
+/** Unit đã có đủ directive ưu tiên chưa (dùng cho `napp check`). */
+export function unitHasPriority(path: string): boolean {
+  if (!existsSync(path)) return false;
+  const names = new Set(scanServiceDirectives(readFileSync(path, "utf8").split("\n")).map((b) => b.name));
+  return names.has("CPUWeight");
+}
+
 export function patchUnitHeap(path: string, heapMB: number): HeapPatchResult {
   if (!existsSync(path)) return { changed: false, note: "unit không tồn tại" };
   const original = readFileSync(path, "utf8");

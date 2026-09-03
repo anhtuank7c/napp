@@ -3,11 +3,14 @@ import { execCapture, runCmd, commandExists, requireRoot, isServiceActive, write
 import { info, ok, warn, section, die } from "../lib/log";
 import { REDIS_TUNING_PATH } from "../templates/tuning";
 import { loadState, NGINX_AVAILABLE, type AppRecord } from "../lib/state";
-import { cmdNginxSync, stripInlineProxyBuffers } from "./nginx";
-import { cmdAppSet } from "./app";
+import { cmdNginxSync, cmdNginxScanBlock, stripInlineProxyBuffers } from "./nginx";
+import { appLocationsPath, NGINX_SCANNER_BLOCK_CONF } from "../templates/nginx";
+import { cmdAppSet, applyNodeHeaps, reportBalance } from "./app";
 import { detectStaticLayout, detectUploadDir, staticSetCommand, type StaticSuggestion } from "../lib/framework";
 import { appServePaths, grantNginxGroupAccess, nginxWorkerUser, pathReadableBy } from "../lib/staticaccess";
 import { unitWorkDir } from "../templates/systemd";
+import { unitHasPriority } from "../lib/unitfile";
+import { SYSTEMD_DIR, serviceNameFor, svcSystemdName } from "../lib/state";
 
 export interface CheckOptions {
   fix: boolean;
@@ -141,6 +144,50 @@ function vhostsWithInlineProxyBuffers(): string[] {
     if (stripInlineProxyBuffers(readFileSync(conf, "utf8")).changed) stale.push(domain);
   }
   return stale;
+}
+
+// Vhost tạo bằng bản trước 1.19.0 KHÔNG có dòng `include` file location nào.
+//
+// Đây là loại hỏng im lặng khó chịu nhất trong nhóm này: napp vẫn ghi
+// '/etc/nginx/napp-locations/<domain>.conf' đầy đủ, `nginx -t` vẫn xanh, mọi
+// lệnh vẫn báo thành công — chỉ là không có ai include file đó, nên KHÔNG MỘT
+// dòng nào trong đó có tác dụng. Asset tĩnh, thư mục upload, chặn hotlink, chặn
+// quét lỗ hổng: tất cả đều "đã cấu hình" mà không chạy.
+function vhostsMissingLocationsInclude(): string[] {
+  const out: string[] = [];
+  for (const domain of Object.keys(loadState().apps)) {
+    const conf = `${NGINX_AVAILABLE}/${domain}.conf`;
+    if (!existsSync(conf)) continue;
+    if (!readFileSync(conf, "utf8").includes(`include ${appLocationsPath(domain)};`)) out.push(domain);
+  }
+  return out;
+}
+
+// Chặn quét lỗ hổng CHƯA BAO GIỜ được cấu hình (file dùng chung không tồn tại).
+//
+// Cố ý chỉ báo khi file KHÔNG CÓ, không báo khi file có mà đang tắt: tắt là kết
+// quả của một lệnh người dùng đã cố ý gõ ('napp nginx unscanblock'), và nhắc lại
+// mỗi lần `napp check` chạy là dạy người dùng bỏ qua cảnh báo của napp.
+function scannerBlockNeverConfigured(): boolean {
+  return Object.keys(loadState().apps).length > 0 && !existsSync(NGINX_SCANNER_BLOCK_CONF);
+}
+
+// Unit tạo bằng bản napp trước 1.25.0 KHÔNG có CPUWeight/IOWeight.
+//
+// Hệ quả: một background worker (nén ảnh, transcode, cào dữ liệu) tranh CPU với
+// web app hoàn toàn NGANG CƠ. Trên VPS 2 lõi, một worker chạy sharp/ffmpeg làm
+// mọi request chậm hẳn — và không có gì trong log để lần ra, vì đây không phải
+// lỗi: đó đúng là cách kernel chia CPU khi không ai nói gì khác.
+function unitsMissingPriority(): string[] {
+  const st = loadState();
+  const out: string[] = [];
+  for (const domain of Object.keys(st.apps)) {
+    if (!unitHasPriority(`${SYSTEMD_DIR}/${serviceNameFor(domain)}.service`)) out.push(domain);
+  }
+  for (const name of Object.keys(st.services)) {
+    if (!unitHasPriority(`${SYSTEMD_DIR}/${svcSystemdName(name)}.service`)) out.push(name);
+  }
+  return out;
 }
 
 // --- asset tĩnh: app nào ĐANG đẩy toàn bộ asset qua Node ---------------------
@@ -296,6 +343,50 @@ export async function cmdCheck(opts: CheckOptions): Promise<void> {
           `Giá trị trong location thắng giá trị mức http, nên các site này vẫn dùng proxy_buffer_size 16k ` +
           `và vẫn trả 502 ('upstream sent too big header') ở route SvelteKit lồng sâu. Sửa: napp nginx sync`,
         fix: () => cmdNginxSync(),
+      });
+    }
+
+    // --- vhost cũ chưa có dòng include file location ---
+    const noInclude = vhostsMissingLocationsInclude();
+    if (noInclude.length > 0) {
+      findings.push({
+        name: "nginx-locations-include",
+        ok: false,
+        message:
+          `${noInclude.length} vhost KHÔNG có dòng 'include' file location của napp (${noInclude.join(", ")}) — vhost tạo bằng bản napp cũ. ` +
+          `napp vẫn ghi /etc/nginx/napp-locations/<domain>.conf đầy đủ nhưng KHÔNG AI include nó, nên asset tĩnh, thư mục upload, ` +
+          `chặn hotlink và chặn quét lỗ hổng đều "đã cấu hình" mà không hề chạy — nginx -t vẫn xanh, không có lỗi nào để lần. Sửa: napp nginx sync`,
+        fix: () => cmdNginxSync(),
+      });
+    }
+
+    // --- unit cũ chưa có ưu tiên CPU/IO ---
+    const noPriority = unitsMissingPriority();
+    if (noPriority.length > 0) {
+      findings.push({
+        name: "systemd-priority",
+        ok: false,
+        message:
+          `${noPriority.length} unit systemd chưa có CPUWeight/IOWeight (${noPriority.join(", ")}) — unit tạo bằng bản napp cũ. ` +
+          `Background worker đang tranh CPU NGANG CƠ với web app: một worker nén ảnh/video làm mọi request chậm hẳn, ` +
+          `mà không có gì trong log để lần ra (đó là cách kernel chia CPU khi không ai nói gì khác). ` +
+          `Sửa: napp tune apply — hoặc chạy fix ở đây (áp bằng daemon-reload, KHÔNG cần restart app).`,
+        // restart:false — CPUWeight/IOWeight/MemoryHigh áp được ngay khi
+        // daemon-reload; chỉ heap mới cần khởi động lại tiến trình.
+        fix: () => reportBalance(applyNodeHeaps({ restart: false })),
+      });
+    }
+
+    // --- chặn quét lỗ hổng chưa từng bật ---
+    if (scannerBlockNeverConfigured()) {
+      findings.push({
+        name: "nginx-scanblock",
+        ok: false,
+        message:
+          `Chưa bật chặn quét lỗ hổng. Request dò CMS PHP ('/wp-login.php', '/phpmyadmin/', '/cgi-bin/'...) đang đi trọn đường ` +
+          `nginx -> Node -> render trang 404, và trộn vào access log của site. Bật: napp nginx scanblock ` +
+          `(kèm 'napp fail2ban setup' để ban IP ngay ở tường lửa — 444 vẫn phải trả tiền bắt tay TLS, ban thì không).`,
+        fix: () => cmdNginxScanBlock(),
       });
     }
 

@@ -37,8 +37,9 @@ import { cmdBackupRun, cmdBackupList, cmdBackupSchedule, cmdBackupUnschedule, DE
 import { cmdFirewallSync, cmdFirewallStatus } from "./commands/firewall";
 import { cmdFail2banSetup, cmdFail2banStatus, cmdFail2banUnban } from "./commands/fail2ban";
 import { cmdTuneShow, cmdTuneApply } from "./commands/tune";
+import { SERVICE_WEIGHT_DEFAULT } from "./templates/tuning";
 import { cmdCloudflareSync, cmdCloudflareSchedule, cmdCloudflareUnschedule } from "./commands/cloudflare";
-import { cmdNginxHarden, cmdNginxUnharden, cmdNginxSync } from "./commands/nginx";
+import { cmdNginxHarden, cmdNginxUnharden, cmdNginxSync, cmdNginxScanBlock, cmdNginxUnscanBlock } from "./commands/nginx";
 import { cmdUpdate, cmdVersion, cmdChangelog } from "./commands/update";
 import { cmdInstallSelf, cmdUninstallSelf } from "./commands/installSelf";
 import { runMenu } from "./commands/menu";
@@ -75,7 +76,24 @@ Bắt đầu nhanh:
 Sau khi cập nhật napp (bản cũ để lại cấu hình đã hỏng, không tự sửa):
   sudo napp nginx sync           gỡ bộ đệm proxy 16k nội tuyến khỏi vhost cũ
                                  -> hết 502 'upstream sent too big header' ở
-                                    route SvelteKit lồng sâu
+                                    route SvelteKit lồng sâu.
+                                 Đồng thời chèn dòng 'include' file location vào
+                                 vhost tạo bằng bản napp cũ, và BẬT chặn quét lỗ
+                                 hổng (.php/wp-admin/phpmyadmin -> 444, log riêng)
+  sudo napp fail2ban setup       bật jail 'napp-scanner' — ban IP quét ngay ở
+                                 tường lửa. Đây mới là chỗ tiết kiệm tài nguyên
+                                 thật: 444 vẫn phải trả tiền bắt tay TLS.
+                                 Cũng sửa 'backend' của các jail nginx: bản cũ
+                                 để backend=systemd nên chúng KHÔNG đọc được
+                                 access log (file), tức chưa từng ban được ai
+  sudo napp tune apply           cân đối lại heap V8 THEO TRỌNG SỐ (web app gấp
+                                 đôi background service) và vá CPUWeight/
+                                 IOWeight/MemoryHigh vào unit tạo từ bản cũ —
+                                 unit cũ không có dòng nào trong số đó, nên
+                                 worker nén ảnh vẫn tranh CPU NGANG CƠ với web
+                                 app. LƯU Ý: heap đổi thì app phải restart.
+                                 Thêm --skip-restart để áp ngay phần ưu tiên
+                                 CPU (daemon-reload là đủ) và hoãn phần heap
   sudo napp check                báo Redis còn maxmemory-policy khác noeviction
                                  (BullMQ mất job), vhost nào còn bộ đệm cũ, VÀ
                                  app nào còn đẩy toàn bộ asset tĩnh qua Node
@@ -85,10 +103,12 @@ Sau khi cập nhật napp (bản cũ để lại cấu hình đã hỏng, không
                                  nginx trả thẳng asset. Tự cấp luôn quyền đọc
                                  cho nginx — thiếu bước đó thì asset trả 403
   sudo napp tune apply --sync-units
-                                 đẩy hardening mới xuống unit systemd tạo từ bản
-                                 napp cũ. Không có cờ này, tune apply chỉ sửa
-                                 đúng dòng --max-old-space-size và không đụng
-                                 ExecStart/Standard*/User/Group bạn sửa tay
+                                 CHỈ khi cần đẩy hardening/template mới xuống
+                                 unit tạo từ bản napp cũ. Không có cờ này,
+                                 tune apply chỉ sửa đúng các dòng cần sửa
+                                 (--max-old-space-size, CPUWeight, IOWeight,
+                                 MemoryHigh) và không đụng ExecStart/Standard*/
+                                 User/Group bạn sửa tay
 
 Worker của một app web (hai nửa của cùng một sản phẩm):
   sudo napp service create <name> --run-as <domain> --share-redis-with <domain>
@@ -303,6 +323,8 @@ app
     [] as string[]
   )
   .option("--max-body <size>", "client_max_body_size của nginx (vd '100M')")
+  .option("--scan-block", "bật lại chặn quét lỗ hổng cho site này (mặc định đã bật)")
+  .option("--no-scan-block", "TẮT chặn quét lỗ hổng cho RIÊNG site này — chỉ cần khi site thật sự phục vụ .php qua upstream khác")
   .action((domain, opts) =>
     cmdAppSet(domain, {
       staticRoot: opts.staticRoot,
@@ -318,6 +340,7 @@ app
       hotlinkStrict: opts.hotlinkStrict,
       hotlinkAllow: (opts.hotlinkAllow ?? []).length > 0 ? opts.hotlinkAllow : undefined,
       maxBody: opts.maxBody,
+      scanBlock: opts.scanBlock,
     })
   );
 
@@ -574,11 +597,19 @@ tune
   .option(
     "--sync-units",
     "render lại TOÀN BỘ unit systemd từ template (đồng bộ hardening mới xuống unit cũ). " +
-      "Mặc định chỉ sửa đúng dòng --max-old-space-size; directive bạn sửa tay vẫn được giữ trong cả hai chế độ"
+      "Mặc định chỉ sửa đúng các dòng cần sửa (--max-old-space-size, CPUWeight, IOWeight, MemoryHigh); " +
+      "directive bạn sửa tay vẫn được giữ trong cả hai chế độ"
+  )
+  .option(
+    "--service-weight <n>",
+    `phần heap của background service so với web app, 0.1–1 (mặc định ${SERVICE_WEIGHT_DEFAULT} = web app gấp đôi worker; ` +
+      `1 = chia đều như trước 1.25.0). Giá trị được LƯU nên mọi lần tạo/xoá app sau vẫn giữ đúng tỷ lệ`,
+    (v) => parseFloat(v)
   )
   .action(async (opts) =>
     cmdTuneApply({
       dbRamPercent: opts.dbRamPercent,
+      serviceWeight: opts.serviceWeight,
       yes: Boolean(opts.yes),
       skipRestart: Boolean(opts.skipRestart),
       syncUnits: Boolean(opts.syncUnits),
@@ -608,8 +639,19 @@ nginx
 nginx.command("unharden").description("gỡ cấu hình hardening nginx (khôi phục hành vi mặc định)").action(() => cmdNginxUnharden());
 nginx
   .command("sync")
-  .description("áp cấu hình proxy dùng chung cho vhost đã có: BỘ ĐỆM đủ cho route SvelteKit sâu (hết 502) + header Connection/WebSocket — giữ nguyên SSL của certbot")
+  .description(
+    "áp cấu hình dùng chung cho vhost ĐÃ CÓ: bộ đệm đủ cho route SvelteKit sâu (hết 502), header Connection/WebSocket, " +
+      "và chèn dòng include file location vào vhost tạo bằng bản napp cũ (chưa có -> mọi cấu hình napp ghi ra đều không tới được site đó) — giữ nguyên SSL của certbot"
+  )
   .action(() => cmdNginxSync());
+nginx
+  .command("scanblock")
+  .description("chặn quét lỗ hổng CMS/framework PHP (.php, /wp-admin/, /phpmyadmin/, /cgi-bin/ -> 444 + log riêng), áp cho MỌI site kể cả app tạo bằng bản napp cũ")
+  .action(() => cmdNginxScanBlock());
+nginx
+  .command("unscanblock")
+  .description("tắt chặn quét lỗ hổng trên toàn máy (một site riêng lẻ: napp app set <domain> --no-scan-block)")
+  .action(() => cmdNginxUnscanBlock());
 
 // ------------------------------------------------------- update/version ---
 program.command("update").description("tự cập nhật napp lên bản mới nhất (OTA qua gist)").action(() => cmdUpdate());

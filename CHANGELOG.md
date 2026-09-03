@@ -2,6 +2,98 @@
 
 Tất cả thay đổi đáng chú ý của `napp` được ghi lại ở đây.
 
+## 1.25.0
+
+- **Web app được ưu tiên hơn background service.** Trước đây napp đối xử với hai loại này **hoàn toàn như nhau**: cùng phần heap, và không có ưu tiên CPU nào cả. Nghĩa là một worker cron chạy mỗi giờ được đúng bằng heap của web app đang phục vụ traffic — và một worker nén ảnh tranh CPU **ngang cơ** với nó.
+
+- **Heap V8 chia theo trọng số.** Mẫu số nay là `số app + số service × 0.5` thay vì tổng số đơn vị. Tổng RAM cấp phát **không đổi**, chỉ phân bổ lại về phía traffic. Máy 4 GB, 2 app + 2 service: trước cả bốn được **327 MB**; nay web **436 MB**, service **218 MB** (tổng vẫn 1308 MB). Đổi tỷ lệ bằng `napp tune apply --service-weight <0.1–1>` (`1` = chia đều như trước).
+
+- **Nhưng heap là lớp yếu nhất — đừng trông chờ vào nó.** `--max-old-space-size` là một **trần**, không phải RAM đặt trước: cho web app heap lớn hơn *không* lấy đi gì của worker, nó chỉ cho web app lớn thêm trước khi thrash GC hoặc chết.
+
+- **`CPUWeight` mới là lớp người dùng thật sự cảm nhận được** (web 200 / service 50). Một worker sharp/ffmpeg chiếm hết lõi làm mọi request chậm hẳn, và không con số heap nào đổi được điều đó dù một mili-giây. `CPUWeight` là tỷ lệ chia **chỉ áp dụng khi có tranh chấp** — worker rảnh thì web app vẫn dùng 100% CPU như thường. Đo trên máy thật, hai tiến trình cùng đốt CPU 100% trên một lõi trong 12 giây: web **9597 ms**, worker **2401 ms** → đúng **4.00 : 1**. Kèm `IOWeight` cùng tỷ lệ.
+
+- **`MemoryHigh` cho background service** (3× heap, sàn 256 MB) — giới hạn **mềm**: vượt ngưỡng thì kernel throttle và thu hồi bộ nhớ của riêng worker đó, **không giết tiến trình**. Cố ý **không** dùng `MemoryMax` (giới hạn cứng, vượt là OOM-kill): biến một worker chậm thành một worker **chết** thì tệ hơn hẳn vấn đề ban đầu. Web app **không** bị đặt `MemoryHigh` chút nào.
+
+- **Áp được cho unit tạo bằng bản napp cũ.** `CPUWeight`/`IOWeight` được vá vào unit hiện có bằng một phép **phẫu thuật riêng** — không render lại unit, không đụng `ExecStart`/`User`/`Group`. Không có bước này thì directive mới chỉ tới được unit cũ qua `--sync-units`, thứ gần như không ai chạy: lệnh báo thành công, `tune show` in ra tỷ lệ ưu tiên, mà unit thật thì trống không. Ưu tiên CPU/IO **áp ngay bằng `daemon-reload`, không cần restart app** (đã kiểm chứng: `cpu.weight` trong kernel đổi 200 → 350 với **cùng PID**); chỉ heap mới bắt buộc restart vì `NODE_OPTIONS` chỉ được đọc lúc tiến trình khởi động.
+
+- **⚠️ Đừng tin `systemctl show -p CPUWeight`.** Nó chỉ đọc lại giá trị đã **cấu hình** trong unit, kể cả khi cgroup controller `cpu` không bật và dòng đó hoàn toàn vô hiệu — đo được trường hợp `systemctl show` trả `200` trong khi hai tiến trình vẫn chia CPU **1:1**. `napp tune apply` nay đối chiếu với `cpu.weight` **thật trong cgroup** và báo cáo kết quả thật.
+
+- **Trung thực về thứ không chạy.** `IOWeight` chỉ hiệu lực với I/O scheduler `bfq` — VPS NVMe thường dùng `none`/`mq-deadline`, ở đó kernel **không tạo cả file `io.weight`**. `MemoryHigh` chỉ tồn tại ở **cgroup v2** (Ubuntu 22.04+). `napp tune show` dò và nói thẳng máy bạn thuộc nhóm nào thay vì in một con số vô nghĩa; trên cgroup v1 napp **bỏ hẳn** dòng `MemoryHigh` thay vì ghi ra một directive kernel sẽ lờ đi.
+
+- `--service-weight` được **lưu vào registry**, không chỉ là cờ của một lần chạy: không nhớ thì lần `app create` kế tiếp sẽ tính lại theo mặc định và âm thầm lật ngược lựa chọn của người dùng.
+
+- **Sửa lỗi: `app create` tính heap chỉ theo số app web**, bỏ qua background service — nên app đầu tiên trên một máy đã có sẵn worker nhận heap **quá lớn**, và chỉ được sửa lại nếu về sau có app thứ hai kích hoạt cân đối. Nay mẫu số luôn tính cả hai loại.
+
+- `napp check` báo thêm: unit nào còn thiếu `CPUWeight`/`IOWeight`. `--fix` áp được mà **không** cần restart app.
+
+- `CPUWeight`/`IOWeight` nằm trong danh sách `# napp-preserve:` — đặt tay giá trị riêng cho một worker cụ thể thì napp không ghi đè.
+
+## 1.24.0
+
+- **Chặn quét lỗ hổng CMS/framework PHP ngay ở nginx** (`napp nginx scanblock`). Một máy chủ Node công khai nhận hàng nghìn request/ngày dò `/wp-login.php`, `/wp-admin/`, `/phpmyadmin/`, `/cgi-bin/` và các mẫu `eval-stdin.php` của Laravel. Không cái nào **hại** được app Node, nhưng mỗi cái đều đi trọn đường `nginx → proxy_pass → router framework → render 404` — với SSR đó là cả chuỗi hook/layout chạy để dựng trang lỗi cho một con bot — rồi rơi vào access log của site. Nay bị trả **444** ngay tại nginx.
+
+  Tắt toàn máy: `napp nginx unscanblock`. Tắt riêng một site: `napp app set <domain> --no-scan-block`.
+
+- **Đừng kỳ vọng sai vào con số.** `return 444` **không** tiết kiệm nhiều CPU như tên gọi gợi ý: phần đắt nhất của một request quét là bắt tay **TCP + TLS**, mà nginx đã trả xong khoản đó **trước** khi nhìn thấy URI. Thứ tiết kiệm được là vòng qua Node. Khoản lời thật nằm ở chỗ khác — access log sạch, và một tín hiệu ban gần như hoàn hảo cho fail2ban.
+
+- **Log riêng, KHÔNG `access_log off`.** Cách hiển nhiên để hết ồn log là tắt log cho các location bị chặn — và làm vậy là mất luôn jail `nginx-botsearch` (nó đọc `/var/log/nginx/*access.log`): log sạch nhưng scanner không bao giờ bị ban, cứ mở kết nối mãi. Nên request bị chặn ghi sang `/var/log/nginx/napp-scanner.log`. Access log của site sạch bong, còn file đó là tín hiệu hoàn hảo: **mọi dòng** trong nó chắc chắn là scanner.
+
+- **Jail fail2ban `napp-scanner`** đọc đúng file đó, nên ban được rất chặt (3 lần / 10 phút → cấm 1 ngày) mà không có rủi ro ban nhầm. **Đây mới là chỗ tiết kiệm tài nguyên thật**: IP bị ban thì gói tin bị bỏ ở tường lửa, trước cả bắt tay TLS.
+
+- **Sửa lỗi: các jail nginx của fail2ban trước đây không đọc được gì.** `[DEFAULT]` đặt `backend = systemd` — đúng cho `sshd`, nhưng backend đó áp cho **mọi** jail, và với nó fail2ban **bỏ qua `logpath`** để đi đọc journal. Nginx ghi access log ra **file**, không ra journal. Hệ quả: `nginx-botsearch`, `nginx-http-auth`, `nginx-limit-req`, `napp-ratelimit` vẫn `enabled`, `fail2ban-client status` vẫn xanh, mà số IP bị ban đứng yên ở 0 mãi mãi — không có lỗi nào in ra để lần. Các jail nginx nay ghi đè `backend = auto`.
+
+- **Danh sách mẫu cố ý hẹp.** Neo vào **đuôi file** (`.php/.asp/.jsp/.cgi`…) và **namespace riêng** (`/wp-admin/`, `/phpmyadmin/`, `/cgi-bin/`), **không** đoán theo đường dẫn: `/admin`, `/config`, `/vendor`, `/backup`, `/telescope` đều là route hoàn toàn hợp lệ của một app Node. Neo theo đuôi cũng đã bắt luôn phần lớn mẫu Laravel/PHP mà không cần thêm luật. Không có luật cho `.env`/`/.git/` vì vhost đã có sẵn `location ~ /\.(?!well-known).*` — thêm luật thứ hai thì kết quả phụ thuộc vào thứ tự khai báo, mà thứ tự đó khác nhau giữa vhost mới và vhost cũ được vá.
+
+- **Áp được cho app tạo bằng bản napp cũ.** Cơ chế "file location riêng + một dòng `include`" chỉ có từ 1.19.0; vhost tạo trước đó **không có dòng include nào**, nên mọi thứ napp ghi vào `/etc/nginx/napp-locations/` đều không tới được chúng — asset tĩnh, upload, chặn hotlink, chặn quét đều "đã cấu hình" mà **không hề chạy**, trong khi `nginx -t` vẫn xanh và mọi lệnh vẫn báo thành công. `napp nginx sync` và `napp nginx scanblock` nay **tự chèn dòng include còn thiếu**, bằng phép cắt chuỗi theo khối `server` — không render lại vhost, nên **khối SSL của certbot giữ nguyên**.
+
+- **`napp check` báo thêm hai thứ**: vhost nào còn thiếu dòng `include`, và chặn quét lỗ hổng chưa từng được bật. Cả hai đều `--fix` được.
+
+- **`napp nginx sync` hoàn tác theo giao dịch.** Một lệnh nay chạm tới bốn loại file nhân với số app. Hoàn tác nửa vời ở đây không phải "mất cấu hình" mà là nginx **không nạp được** (vhost đã có dòng `include` còn file được include thì vừa bị xoá) — tức là **tắt mọi site trên máy**, không riêng site nào.
+
+- Trạng thái bật/tắt nằm trọn trong nội dung **một file dùng chung** `/etc/nginx/napp-locations/_scanner-block.conf`, không lưu vào `state.json`. Tắt = làm **rỗng** file, **không xoá**: mọi vhost đang include nó.
+
+- ⚠️ **Site sau Cloudflare proxy**: 444 là đóng kết nối không phản hồi, và Cloudflare dịch điều đó thành trang lỗi **520** cho người xem. Ngoài ra, ban bằng `ufw` **vô hiệu** với các site này — fail2ban ban đúng IP thật của client (nhờ real-IP), nhưng gói tin đến từ IP edge của Cloudflare nên luật không bao giờ khớp. Với chúng, hãy chặn ở **WAF của Cloudflare**; phần chặn 444 + tách log ở nginx vẫn hoạt động bình thường.
+
+- ⚠️ `napp nginx sync` nay **render lại file location** `/etc/nginx/napp-locations/<domain>.conf` từ registry (trước đây nó chỉ vá vhost). Nếu bạn từng sửa tay file đó, napp **cảnh báo và sao lưu** (`.napp-orphaned`) trước khi ghi đè — chỗ đúng để đặt location riêng vẫn là file sidecar `<domain>.custom.conf`, thứ napp không bao giờ đụng tới.
+
+- Menu tương tác: thêm **mục 13** (chặn quét) và **mục 14** (gỡ chặn) ở nhóm Hạ tầng — thêm vào **cuối** để không đánh số lại "Xem/Áp tối ưu phần cứng" (11, 12).
+
+## 1.23.0
+
+- **Sửa lỗi: file location tự sinh nuốt mất phần bạn thêm tay, không một lời cảnh báo.** `/etc/nginx/napp-locations/<domain>.conf` được render lại **toàn bộ** từ registry ở **ba** chỗ (`app create`, `app set`, `domain add/remove`) — trong khi nó cũng là chỗ **duy nhất** đặt được location riêng. Ai thêm tay một location (ví dụ `/uploads/`) đều mất nó vào lần chạy kế tiếp của bất kỳ lệnh nào trong ba lệnh đó, và triệu chứng (ảnh vỡ, 404) chỉ hiện ra rất lâu sau, vào lúc chẳng liên quan gì tới lệnh đã gây ra.
+
+- **File sidecar `<domain>.custom.conf`** — napp include nó vào cuối file tự sinh và **không bao giờ** ghi đè. Đây là chỗ đúng để đặt location riêng.
+
+- **Cảnh báo trước khi mất.** Trước khi ghi đè, napp so tập tiền tố `location ^~` cũ với mới: tiền tố nào sắp biến mất thì **sao lưu** file cũ (`.napp-orphaned`) và nói rõ mất cái gì, mất đi đâu. Cố ý so tiền tố chứ không dùng fingerprint như unit systemd — file của app tạo bằng bản napp cũ không có fingerprint nào, dùng cách đó là cảnh báo sai hàng loạt ngay lần nâng cấp đầu tiên, và người dùng học được cách bỏ qua mọi cảnh báo của napp.
+
+- **`--auto-static` nhận diện luôn thư mục file tải lên.** Chỉ nhận ca **an toàn**: thư mục tên `uploads`/`upload` nằm **ngay trong** gốc tĩnh công khai của framework (`static/` của SvelteKit, `public/` của Next/Nuxt/Astro/Vite). Những thư mục đó theo định nghĩa đã công khai, nên phục vụ chúng **không mở thêm gì** — nó chỉ vá đúng khoảng trống: file tải lên *sau* lần build gần nhất không có trong output nên trả 404, rồi tự hiện ra sau lần deploy kế tiếp, trông hệt lỗi chập chờn. Cố ý **không** đoán thư mục ngoài gốc tĩnh (`./uploads`, `./storage`, `./media`): chỗ đó app tự chọn, đoán sai là đem file riêng tư ra đường. Vẫn khai báo tay được bằng `--upload-dir`.
+
+- Tiền tố URL được đặt **kèm theo** thư mục nhận diện được: thư mục tên `upload` (số ít) trước đây bị phục vụ ở `/uploads/` vì đó là mặc định của renderer.
+
+- **Chặn hotlink mạnh hơn hẳn.** `--hotlink-protect` nay phát thêm header `Cross-Origin-Resource-Policy: same-site` cho **mọi** location asset, không chỉ kiểm tra `Referer`. Khác biệt cốt lõi: CORP do **trình duyệt người xem** thực thi dựa trên header do **server bạn** gửi, nên trang hotlink không tác động được — trong khi `Referer` là thứ chính trang đó khai báo, một thẻ `<meta name="referrer" content="no-referrer">` là vô hiệu toàn bộ `valid_referers`. CORP cũng **sống sót qua CDN**: Cloudflare cache theo URL rồi trả cho mọi referer mà không hỏi origin, còn CORP nằm trong chính response đã cache. Và nó **không** phá thứ mà chặn Referer gắt phá: bot lấy ảnh preview (Facebook, Zalo, Telegram) tải ảnh ở phía **server** nên không bị áp — link chia sẻ vẫn có ảnh. Dùng `same-site` chứ không `same-origin` vì napp tự thêm alias `www.<domain>` và admin/api thường ở subdomain khác.
+
+- **CORP không được phát khi có `--hotlink-allow`**: CORP chỉ có ba giá trị, không diễn đạt được danh sách cho phép theo domain — phát ra là chặn đúng những đối tác vừa cho phép, và ảnh vỡ ở phía họ mà không ai báo. napp nói rõ khi rơi vào trường hợp này, kèm hướng đi thật (URL ký `secure_link`, hoặc tầng CDN).
+
+- **`--hotlink-strict`** (mới): bỏ `none`/`blocked` khỏi `valid_referers`. Chặt hơn nhưng **mất ảnh preview** khi chia sẻ link và 403 nhầm người dùng sau proxy công ty — napp cảnh báo mỗi lần cờ này bật.
+
+- `napp check` báo thêm: app nào có thư mục tải lên trong gốc tĩnh công khai mà nginx chưa phục vụ. `--fix` sửa được.
+
+## 1.22.0
+
+- **`--auto-static`: napp nhận diện framework từ thư mục build** rồi cho nginx trả thẳng asset, thay vì bắt bạn tự tra tiền tố. Nhận SvelteKit adapter-node (`build/client/_app` → `/_app/`), Next.js (`.next/static` → `/_next/static/`), Nuxt 3/Nitro (`.output/public/_nuxt` → `/_nuxt/`), SolidStart/Vinxi (`.output/public/_build` → `/_build/`), Astro (`dist/client/_astro` hoặc `dist/_astro` → `/_astro/`). Dùng được ở cả `app create` lẫn `app set`.
+
+  Căn cứ là **thư mục có thật**, không phải dependencies: `package.json` ở gốc monorepo không nói được app con dùng adapter nào, và cùng một app SvelteKit thì adapter-node sinh `build/client` còn adapter-static sinh `build` với deps y hệt. Hệ quả: chỉ nhận diện được **sau khi build** — chưa build thì báo không nhận ra, không đoán bừa.
+
+- **`--static-alias <tiền-tố>=<thư-mục>`**: phục vụ bằng `alias` thay vì `root`. Cần cho Next.js — file ở `.next/static/…` nhưng URL là `/_next/static/…`, nên `root .next` đi tìm `.next/_next/static/…` và **toàn bộ** JS/CSS trả 404 (trang trắng). Với Next.js, napp **chỉ** chiếm `/_next/static/`: `/_next/image` và `/_next/data` phải đi qua Node.
+
+- **`/assets/` chỉ được gợi ý, không bao giờ tự áp** — kể cả với `--auto-static`. `/_app/`, `/_next/`, `/_nuxt/`, `/_astro/` là namespace riêng của framework nên chiếm được an toàn; `/assets/` (Remix · React Router v7 · Vite SPA) thì app hoàn toàn có thể dùng làm route thật, mà `location ^~` thắng cả route regex lẫn `proxy_pass` — áp nhầm là route đó **chết hẳn bằng 404**, không log, không lỗi.
+
+- **Sửa lỗi: asset tĩnh trả 403 chứ không phải file.** Thư mục app thuộc user riêng và để `750`, worker nginx chạy bằng user khác (`www-data`) nên không đi xuyên qua nổi `/var/www/<domain>` — nghĩa là **mọi** cấu hình `--static-root`/`--upload-dir` từ trước tới nay đều 403 trên máy sạch, và log nginx ghi `Permission denied`, rất dễ đọc nhầm thành sai đường dẫn. napp nay tự thêm `www-data` vào **nhóm** của app rồi **restart** nginx (reload không đủ: danh sách nhóm chỉ đọc lúc tiến trình khởi tạo). `.env` vẫn an toàn vì để `600`.
+
+- `napp check` báo thêm hai thứ cho app **đang chạy**: app nào còn đẩy toàn bộ asset qua Node dù nhận diện được framework (loại hỏng không có triệu chứng nào ngoài "vào dashboard thấy giựt"), và app nào có cấu hình tĩnh mà nginx không đọc được. `--fix` sửa được cả hai (trừ nhóm `/assets/` rủi ro).
+
+- Menu tương tác: thêm mục "Bật nginx trả asset tĩnh", và bước tạo app có hỏi luôn. **Cố ý hỏi** chứ không bật ngầm — napp đang chiếm một tiền tố URL.
+
 ## 1.21.0
 
 - **Sửa tay unit systemd không còn bị ghi đè.** Trước đây mọi đường dẫn đụng tới unit đều render lại **toàn bộ** file từ template rồi ghi đè. Ai sửa `ExecStart` (thêm cờ runtime, đổi entrypoint), `StandardOutput`/`StandardError` (đẩy log sang journal), hay `User`/`Group` sẽ mất sạch sau lần `napp tune apply` — hoặc thậm chí chỉ vì tạo thêm một app, vì đó cũng là lúc heap phải chia lại. App chết ngay lúc restart, đúng lúc không ai ngờ tới.

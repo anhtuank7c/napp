@@ -16,6 +16,101 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.25.0
+- MỚI: WEB APP ĐƯỢC ƯU TIÊN HƠN BACKGROUND SERVICE. Trước đây napp đối xử với hai
+  loại này hoàn toàn như nhau — cùng phần heap, và KHÔNG có ưu tiên CPU nào cả.
+  Nghĩa là một worker cron chạy mỗi giờ được đúng bằng heap của web app đang phục
+  vụ traffic, và một worker nén ảnh tranh CPU ngang cơ với nó.
+- Heap V8 nay chia theo TRỌNG SỐ: mẫu số là 'số app + số service * 0.5' thay vì
+  tổng số đơn vị. Tổng RAM cấp phát KHÔNG đổi, chỉ phân bổ lại về phía traffic.
+  Ví dụ máy 4GB, 2 app + 2 service: trước cả bốn được 327MB; nay web 436MB,
+  service 218MB (tổng vẫn 1308MB). Đổi tỷ lệ bằng 'tune apply --service-weight'
+  (0.1-1; 1 = chia đều như trước).
+- HEAP LÀ LỚP YẾU NHẤT, đừng trông chờ vào nó. '--max-old-space-size' là một
+  TRẦN chứ không phải RAM đặt trước: cho web app heap lớn hơn KHÔNG lấy đi gì của
+  worker, nó chỉ cho web app lớn thêm trước khi thrash GC hoặc chết.
+- MỚI 'CPUWeight' (web 200 / service 50) và 'IOWeight' trong unit systemd — ĐÂY
+  mới là lớp người dùng thật sự cảm nhận được. Một worker sharp/ffmpeg chiếm hết
+  lõi làm mọi request chậm hẳn, và không con số heap nào đổi được điều đó.
+  CPUWeight là tỷ lệ chia CHỈ áp dụng KHI CÓ TRANH CHẤP: worker rảnh thì web app
+  vẫn dùng 100% CPU như thường. Đo trên máy thật, hai tiến trình cùng đốt CPU
+  100% trên một lõi 12 giây: web 9597ms, worker 2401ms — đúng 4.00 : 1.
+- MỚI 'MemoryHigh' cho background service (3x heap, sàn 256MB): giới hạn MỀM —
+  vượt ngưỡng thì kernel throttle và thu hồi bộ nhớ của riêng worker đó, KHÔNG
+  giết tiến trình. CỐ Ý KHÔNG dùng MemoryMax (giới hạn cứng, vượt là OOM-kill):
+  biến một worker chậm thành một worker CHẾT thì tệ hơn vấn đề ban đầu. Web app
+  KHÔNG bị đặt MemoryHigh.
+- ÁP ĐƯỢC CHO UNIT TẠO BẰNG BẢN NAPP CŨ: CPUWeight/IOWeight được vá vào unit hiện
+  có bằng một phép PHẪU THUẬT riêng (patchUnitPriority) — không render lại unit,
+  không đụng ExecStart/User/Group. Không có bước này thì directive mới chỉ tới
+  được unit cũ qua '--sync-units', thứ gần như không ai chạy: lệnh báo thành
+  công, 'tune show' in ra tỷ lệ ưu tiên, mà unit thật thì trống không.
+  Ưu tiên CPU/IO áp NGAY bằng daemon-reload, KHÔNG cần restart app (đã kiểm
+  chứng: cpu.weight trong kernel đổi 200 -> 350 với cùng PID). Chỉ heap mới bắt
+  buộc restart vì NODE_OPTIONS chỉ được đọc lúc tiến trình khởi động.
+- ĐỪNG TIN 'systemctl show -p CPUWeight': nó chỉ đọc lại giá trị đã CẤU HÌNH
+  trong unit, kể cả khi cgroup controller 'cpu' không bật và dòng đó hoàn toàn vô
+  hiệu — đo được trường hợp systemctl trả 200 trong khi hai tiến trình vẫn chia
+  CPU 1:1. 'tune apply' nay đối chiếu với 'cpu.weight' THẬT trong cgroup và báo
+  cáo kết quả thật.
+- TRUNG THỰC VỀ THỨ KHÔNG CHẠY: IOWeight chỉ hiệu lực với I/O scheduler 'bfq'
+  (VPS NVMe thường dùng 'none'/'mq-deadline' -> kernel không tạo cả file
+  io.weight), và MemoryHigh chỉ tồn tại ở cgroup v2 (Ubuntu 22.04+). 'tune show'
+  dò và nói thẳng máy bạn thuộc nhóm nào; trên cgroup v1 napp BỎ HẲN dòng
+  MemoryHigh thay vì ghi ra một directive kernel sẽ lờ đi.
+- '--service-weight' được LƯU vào registry chứ không chỉ là cờ của một lần chạy:
+  không nhớ thì lần 'app create' kế tiếp sẽ tính lại theo mặc định và âm thầm lật
+  ngược lựa chọn của người dùng.
+- SỬA LỖI: 'app create' tính heap chỉ theo SỐ APP WEB, bỏ qua background service —
+  nên app đầu tiên trên một máy đã có sẵn worker nhận heap quá lớn (và chỉ được
+  sửa lại nếu về sau có app thứ hai). Nay mẫu số luôn tính cả hai loại.
+- 'napp check' báo thêm: unit nào còn thiếu CPUWeight/IOWeight. '--fix' áp được
+  mà KHÔNG cần restart app.
+- CPUWeight/IOWeight nằm trong danh sách '# napp-preserve:' — đặt tay giá trị
+  riêng cho một worker cụ thể thì napp không ghi đè.
+
+## 1.24.0
+- MỚI: 'napp nginx scanblock' — chặn quét lỗ hổng CMS/framework PHP ở tầng nginx.
+  Request dò '/wp-login.php', '/wp-admin/', '/phpmyadmin/', '/cgi-bin/' và mọi
+  đuôi .php/.asp/.jsp bị trả 444 ngay, KHÔNG vòng qua Node. Gỡ bằng
+  'napp nginx unscanblock'; tắt riêng một site: 'napp app set <domain>
+  --no-scan-block'.
+- ĐỪNG KỲ VỌNG SAI VÀO CON SỐ: 444 KHÔNG tiết kiệm nhiều CPU như tên gọi gợi ý —
+  phần đắt nhất của một request quét là bắt tay TCP + TLS, mà nginx đã trả xong
+  khoản đó TRƯỚC khi nhìn thấy URI. Thứ tiết kiệm được là vòng qua Node. Khoản
+  lời thật: access log của site sạch trở lại, và fail2ban có tín hiệu ban gần như
+  hoàn hảo (ban ở tường lửa mới là chỗ bỏ được cả bắt tay).
+- Vì lý do trên, request bị chặn ghi sang FILE LOG RIÊNG
+  '/var/log/nginx/napp-scanner.log' chứ KHÔNG dùng 'access_log off'. Tắt log là
+  jail 'nginx-botsearch' (đọc /var/log/nginx/*access.log) mất luôn tín hiệu: log
+  sạch nhưng scanner không bao giờ bị ban.
+- MỚI: jail fail2ban 'napp-scanner' đọc file log riêng đó — mọi dòng trong nó
+  chắc chắn là scanner nên ban rất chặt (3 lần / 10 phút -> cấm 1 ngày) mà không
+  có rủi ro ban nhầm.
+- SỬA LỖI: các jail nginx của fail2ban trước đây KHÔNG đọc được gì. '[DEFAULT]'
+  đặt 'backend = systemd' (đúng cho sshd), nhưng backend đó khiến fail2ban BỎ QUA
+  'logpath' và đi đọc journal — trong khi nginx ghi access log ra FILE. Jail vẫn
+  'enabled', 'fail2ban-client status' vẫn xanh, số IP bị ban đứng yên ở 0 mãi
+  mãi, không có lỗi nào để lần. Nay các jail nginx ghi đè 'backend = auto'.
+- ÁP ĐƯỢC CHO APP TẠO BẰNG BẢN NAPP CŨ: vhost tạo trước 1.19.0 không có dòng
+  'include' file location nào, nên mọi thứ napp ghi vào /etc/nginx/napp-locations/
+  đều không tới được chúng — kể cả chặn quét. 'napp nginx sync' và
+  'napp nginx scanblock' nay tự chèn dòng include còn thiếu, bằng phép cắt chuỗi
+  theo khối server (KHÔNG render lại vhost, nên khối SSL của certbot giữ nguyên).
+- 'napp check' báo thêm hai thứ: vhost nào còn thiếu dòng include (asset tĩnh,
+  upload, hotlink, chặn quét đều "đã cấu hình" mà không hề chạy — nginx -t vẫn
+  xanh), và chặn quét lỗ hổng chưa từng được bật.
+- 'napp nginx sync' nay hoàn tác THEO GIAO DỊCH: một lệnh chạm tới bốn loại file
+  nhân với số app, và hoàn tác nửa vời ở đây không phải "mất cấu hình" mà là
+  nginx KHÔNG NẠP ĐƯỢC (vhost có dòng include còn file được include thì vừa bị
+  xoá) — tức là TẮT mọi site trên máy.
+- CHÚ Ý: 'napp nginx sync' nay render lại file location '<domain>.conf' từ
+  registry (trước đây chỉ vá vhost). Sửa tay file đó sẽ bị ghi đè — có cảnh báo
+  và sao lưu '.napp-orphaned'. Chỗ đúng để đặt location riêng vẫn là file
+  sidecar '<domain>.custom.conf'.
+- Menu tương tác: thêm mục 13 (chặn quét) và 14 (gỡ chặn) ở nhóm Hạ tầng — thêm
+  vào CUỐI để không đánh số lại "Xem/Áp tối ưu phần cứng" (11, 12).
+
 ## 1.23.0
 - SỬA LỖI: file location TỰ SINH ghi đè mất phần người dùng thêm tay, KHÔNG cảnh
   báo. '/etc/nginx/napp-locations/<domain>.conf' được render lại TOÀN BỘ từ
