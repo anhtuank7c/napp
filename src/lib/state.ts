@@ -76,6 +76,12 @@ export interface AppRecord {
   // có chủ đích: app tạo bằng bản napp cũ cũng phải được bảo vệ sau khi nâng cấp
   // mà không cần ai nhớ bật thêm cờ nào.
   scanBlock?: boolean;
+  // Bật hai cờ chẩn đoán rò rỉ của Node vào NODE_OPTIONS:
+  //   --heapsnapshot-signal=SIGUSR2      chụp heap theo yêu cầu, app vẫn sống
+  //   --heapsnapshot-near-heap-limit=1   TỰ chụp ngay trước khi chết vì OOM
+  // Cả hai đều được phép trong NODE_OPTIONS nên KHÔNG phải sửa code app hay
+  // ExecStart. Chỉ có nghĩa với runtime node (bun dùng JSC, không hiểu cờ V8).
+  leakGuard?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -112,6 +118,12 @@ export interface ServiceRecord {
   // biến toàn bộ filesystem thành chỉ-đọc: worker nén ảnh trong thư mục của app
   // web có đúng quyền Unix vẫn ăn EROFS nếu đường dẫn không nằm ở đây.
   writePaths?: string[];
+  // Bật hai cờ chẩn đoán rò rỉ của Node vào NODE_OPTIONS:
+  //   --heapsnapshot-signal=SIGUSR2      chụp heap theo yêu cầu, app vẫn sống
+  //   --heapsnapshot-near-heap-limit=1   TỰ chụp ngay trước khi chết vì OOM
+  // Cả hai đều được phép trong NODE_OPTIONS nên KHÔNG phải sửa code app hay
+  // ExecStart. Chỉ có nghĩa với runtime node (bun dùng JSC, không hiểu cờ V8).
+  leakGuard?: boolean;
   createdAt: string;
   updatedAt: string;
 }

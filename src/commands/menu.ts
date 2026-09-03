@@ -23,6 +23,7 @@ import { cmdFail2banSetup, cmdFail2banStatus } from "./fail2ban";
 import { cmdTuneApply, cmdTuneShow } from "./tune";
 import { cmdCloudflareSync, cmdCloudflareSchedule, cmdCloudflareUnschedule } from "./cloudflare";
 import { cmdNginxHarden, cmdNginxUnharden, cmdNginxSync, cmdNginxScanBlock, cmdNginxUnscanBlock } from "./nginx";
+import { cmdMemStatus, cmdMemWatch, cmdMemUnwatch } from "./mem";
 import { cmdUpdate, cmdVersion } from "./update";
 import { NAPP_VERSION } from "../version";
 import { section, info, warn } from "../lib/log";
@@ -512,6 +513,9 @@ async function menuInfra(): Promise<void> {
       // đánh số lại "Xem/Áp tối ưu phần cứng" — hai mục người dùng đã quen gõ.
       "Chặn quét lỗ hổng PHP/WordPress (.php, /wp-admin/ -> 444, log riêng)",
       "Gỡ chặn quét lỗ hổng",
+      "Bộ nhớ: xem trạng thái + dấu hiệu rò rỉ",
+      "Bộ nhớ: bật lấy mẫu định kỳ (phát hiện rò rỉ sớm)",
+      "Bộ nhớ: tắt lấy mẫu định kỳ",
     ]);
     const choice = await ask("Chọn: ");
     if (choice === "0" || choice === "") return;
@@ -533,6 +537,13 @@ async function menuInfra(): Promise<void> {
     else if (choice === "12") await guard(() => cmdTuneApply({ yes: false, skipRestart: false, syncUnits: false }));
     else if (choice === "13") await guard(() => cmdNginxScanBlock());
     else if (choice === "14") await guard(() => cmdNginxUnscanBlock());
+    else if (choice === "15") await guard(() => cmdMemStatus());
+    else if (choice === "16")
+      await guard(async () => {
+        const raw = (await ask("Lấy mẫu mỗi bao nhiêu phút (mặc định 15): ")) || "15";
+        cmdMemWatch({ interval: parseInt(raw, 10) || 15 });
+      });
+    else if (choice === "17") await guard(() => cmdMemUnwatch());
   }
 }
 

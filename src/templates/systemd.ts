@@ -53,7 +53,12 @@ export function unitWorkDir(root: string, appDir?: string): string {
 //   - forcedEnv (NODE_ENV/PORT...) đặt SAU EnvironmentFile -> napp ÉP, .env không
 //     ghi đè được (PORT do napp cấp phát, không cho tự đổi).
 function renderUnit(spec: UnitSpec): string {
-  const nodeOptionsLine = spec.nodeOptions ? `Environment=NODE_OPTIONS=${spec.nodeOptions}\n` : "";
+  // PHẢI bọc trong nháy kép. systemd tách 'Environment=' theo DẤU CÁCH, nên
+  // 'Environment=NODE_OPTIONS=--a --b' được hiểu là HAI phép gán: NODE_OPTIONS=--a,
+  // rồi '--b' (không hợp lệ -> bỏ đi). Kết quả: mọi cờ sau cờ đầu tiên biến mất,
+  // và bằng chứng duy nhất là một dòng 'Invalid environment assignment, ignoring'
+  // trong journal mà không ai đọc. Trước 1.26.0 chỉ có đúng một cờ nên không lộ.
+  const nodeOptionsLine = spec.nodeOptions ? `Environment="NODE_OPTIONS=${spec.nodeOptions}"\n` : "";
   const forcedEnvLines = spec.forcedEnv.map((e) => `Environment=${e}`).join("\n");
   // Nhiều đường dẫn cách nhau bằng dấu cách trên MỘT dòng ReadWritePaths. Bỏ
   // trùng để không lặp lại rootDir khi ai đó truyền đúng nó qua --write-dir.
@@ -208,6 +213,38 @@ Description=napp scheduled backup timer
 OnCalendar=${onCalendar}
 Persistent=true
 RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target
+`;
+}
+
+// --- systemd timer cho lấy mẫu bộ nhớ (phát hiện rò rỉ) -----------------
+export function renderMemwatchService(binPath: string): string {
+  return `# Managed by napp — lấy mẫu bộ nhớ các đơn vị node (phát hiện rò rỉ sớm)
+[Unit]
+Description=napp memory sampler (leak detection)
+
+[Service]
+Type=oneshot
+ExecStart=${binPath} mem sample --quiet
+# Việc lấy mẫu chỉ là đọc vài file trong /sys/fs/cgroup — nhường hẳn CPU/đĩa
+# cho app, vì một công cụ chẩn đoán mà làm chậm chính thứ nó theo dõi thì vô lý.
+Nice=15
+IOSchedulingClass=idle
+`;
+}
+
+export function renderMemwatchTimer(onCalendar: string): string {
+  return `# Managed by napp — lịch lấy mẫu bộ nhớ
+[Unit]
+Description=napp memory sampler timer
+
+[Timer]
+OnCalendar=${onCalendar}
+Persistent=true
+# Lệch ngẫu nhiên để nhiều máy cùng cấu hình không lấy mẫu đúng cùng một giây.
+RandomizedDelaySec=30
 
 [Install]
 WantedBy=timers.target

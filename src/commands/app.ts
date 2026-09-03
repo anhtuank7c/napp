@@ -148,15 +148,31 @@ function reportHotlink(app: AppRecord): void {
 // Render lại TOÀN BỘ unit của một app web từ registry, giữ nguyên các directive
 // người dùng đã sửa tay (xem lib/unitfile). Dùng khi cấu hình trong registry đổi
 // (tạo app, đổi user/thư mục ghi) — KHÔNG dùng cho việc chỉ đổi con số heap.
+/**
+ * NODE_OPTIONS napp đặt làm MẶC ĐỊNH cho một đơn vị.
+ *
+ * Đặt TRƯỚC EnvironmentFile trong unit, nên '.env' của app vẫn ghi đè được —
+ * đó là chủ đích. Hệ quả cần nhớ: nếu app khai NODE_OPTIONS trong .env thì mọi
+ * cờ ở đây IM LẶNG mất tác dụng, kể cả cờ chụp heap. 'napp mem snapshot' vì thế
+ * đọc /proc/<pid>/environ để biết cái gì THẬT SỰ đang chạy.
+ */
+export function nodeOptionsFor(rec: { nodeRuntime: AppRecord["nodeRuntime"]; leakGuard?: boolean }, heapMB: number): string | undefined {
+  // bun dùng JavaScriptCore — không hiểu cờ heap lẫn cờ heapsnapshot của V8.
+  if (rec.nodeRuntime !== "node") return undefined;
+  const flags = [`--max-old-space-size=${heapMB}`];
+  if (rec.leakGuard) flags.push("--heapsnapshot-signal=SIGUSR2", "--heapsnapshot-near-heap-limit=1");
+  return flags.join(" ");
+}
+
 export function writeAppUnit(app: AppRecord, heapMB: number, authoritative: string[] = []): void {
-  const nodeOptions = app.nodeRuntime === "node" ? `--max-old-space-size=${heapMB}` : undefined;
+  const nodeOptions = nodeOptionsFor(app, heapMB);
   const path = `${SYSTEMD_DIR}/${serviceNameFor(app.domain)}.service`;
   reportUnitWrite(path, writeManagedUnit(path, renderAppSystemdService(app, execStartLine(app.startCmd), { nodeOptions }), { authoritative }));
 }
 
 /** Như writeAppUnit nhưng cho background service (kèm MemoryHigh — xem dưới). */
 export function writeServiceUnit(svc: ServiceRecord, heapMB: number, authoritative: string[] = []): void {
-  const nodeOptions = svc.nodeRuntime === "node" ? `--max-old-space-size=${heapMB}` : undefined;
+  const nodeOptions = nodeOptionsFor(svc, heapMB);
   const path = `${SYSTEMD_DIR}/${svcSystemdName(svc.name)}.service`;
   // MemoryHigh CHỈ tồn tại ở cgroup v2. Ghi nó ra trên máy cgroup v1 (Ubuntu
   // 20.04) thì systemd nhận directive nhưng kernel bỏ qua — một dòng cấu hình

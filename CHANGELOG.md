@@ -2,6 +2,30 @@
 
 Tất cả thay đổi đáng chú ý của `napp` được ghi lại ở đây.
 
+## 1.26.0
+
+- **`napp mem`: phát hiện rò rỉ bộ nhớ *trước* khi app chết** — và chụp heap để tìm thủ phạm. Không sửa một dòng code nào của app.
+
+- **Tín hiệu đã nằm sẵn ở đó từ đầu.** Mọi unit napp đều có `Restart=always`, nên app rò rỉ chạm trần heap sẽ **chết** rồi được systemd **lặng lẽ khởi động lại** — lặp đi lặp lại nhiều ngày mà không ai hay. systemd đã đếm sẵn số lần đó (`NRestarts`), chỉ là chưa ai đọc ra. `napp mem status` và `napp check` nay đọc ra.
+
+- **`napp mem watch`** — systemd timer lấy mẫu định kỳ (mặc định 15 phút); `napp mem trend` kết luận xu hướng.
+
+- **Đo `anon` trong `memory.stat`, không đo `memory.current`.** `memory.current` gồm cả **page cache** — thứ phình ra co lại theo I/O của cả máy, đủ nhiễu để dìm chết tín hiệu thật.
+
+- **Ba quy tắc để không kêu oan** (kêu oan vài lần là người dùng học cách phớt lờ mọi cảnh báo): chỉ xét đoạn **từ lần restart gần nhất** (ghép hai bên một lần restart cho ra dốc âm vô nghĩa, che mất chính cái rò rỉ đã gây ra nó); so **trung vị** hai phần tư đầu/cuối chứ không so mẫu đầu với mẫu cuối; **dưới 6 giờ dữ liệu thì không kết luận gì** — RSS của Node luôn tăng lúc đầu rồi đi ngang vì V8 không trả bộ nhớ về OS sớm.
+
+- **`napp mem guard <app>`** thêm `--heapsnapshot-near-heap-limit=1` và `--heapsnapshot-signal=SIGUSR2` vào `NODE_OPTIONS`. Cờ đầu khiến Node **tự chụp heap ngay trước khi chạm trần**, thay vì chết mà không để lại gì. **`napp mem snapshot <app>`** chụp tiến trình đang chạy, app vẫn sống — và **chờ tới khi file ngừng tăng kích thước** rồi mới báo xong, vì không có bước đó thì rất dễ đem đi phân tích một file mới ghi được một nửa.
+
+- **An toàn: `SIGUSR2` giết tiến trình Node nếu cờ chưa có hiệu lực** (hành vi mặc định của tín hiệu). napp đọc `/proc/<pid>/environ` để xác nhận cờ **thật sự đang chạy** rồi mới dám gửi, và **từ chối** nếu không chắc. Đọc môi trường thật chứ không đọc file unit — vì `.env` của app ghi đè được `NODE_OPTIONS`.
+
+- **Sửa lỗi nặng: `Environment=NODE_OPTIONS=…` không được bọc nháy kép.** systemd tách directive này theo **dấu cách**, nên nhiều cờ bị hiểu thành nhiều phép gán và **mọi cờ sau cờ đầu tiên bị vứt đi** — bằng chứng duy nhất là một dòng `Invalid environment assignment, ignoring` trong journal mà không ai đọc. Trước bản này chỉ có đúng một cờ nên lỗi chưa lộ; thêm cờ thứ hai là lộ ngay. Đã kiểm chứng trên systemd thật: trước khi sửa tiến trình chỉ nhận `--max-old-space-size`, sau khi sửa nhận đủ cả ba.
+
+- **Số đo thật về chi phí chụp heap** — đừng chụp app web vào giờ cao điểm: file lớn khoảng **gấp đôi heap** và mất **vài phút** để ghi (`heap 96 MB → 184 MB, 176 giây`; `128 MB → 237 MB`). Node **luôn** ghi vào thư mục làm việc của app, không đổi được chỗ. Dừng/restart đơn vị giữa chừng cho ra file **cụt** (đã kiểm chứng: 0 byte).
+
+- `napp check` báo thêm ba thứ: đơn vị bị systemd khởi động lại, đơn vị có bộ nhớ tăng liên tục, và file `.heapsnapshot` còn sót trong thư mục app.
+
+- **Cố ý không biến napp thành APM.** Cần quan sát thật sự thì `prom-client` + Prometheus/Grafana mới đúng công cụ. Và tuyệt đối không dùng `--inspect` trên production — nó mở cổng debugger, ra tới Internet là tương đương RCE.
+
 ## 1.25.0
 
 - **Web app được ưu tiên hơn background service.** Trước đây napp đối xử với hai loại này **hoàn toàn như nhau**: cùng phần heap, và không có ưu tiên CPU nào cả. Nghĩa là một worker cron chạy mỗi giờ được đúng bằng heap của web app đang phục vụ traffic — và một worker nén ảnh tranh CPU **ngang cơ** với nó.

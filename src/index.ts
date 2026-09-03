@@ -37,6 +37,7 @@ import { cmdBackupRun, cmdBackupList, cmdBackupSchedule, cmdBackupUnschedule, DE
 import { cmdFirewallSync, cmdFirewallStatus } from "./commands/firewall";
 import { cmdFail2banSetup, cmdFail2banStatus, cmdFail2banUnban } from "./commands/fail2ban";
 import { cmdTuneShow, cmdTuneApply } from "./commands/tune";
+import { cmdMemStatus, cmdMemTrend, cmdMemSample, cmdMemWatch, cmdMemUnwatch, cmdMemSnapshot, cmdMemGuard } from "./commands/mem";
 import { SERVICE_WEIGHT_DEFAULT } from "./templates/tuning";
 import { cmdCloudflareSync, cmdCloudflareSchedule, cmdCloudflareUnschedule } from "./commands/cloudflare";
 import { cmdNginxHarden, cmdNginxUnharden, cmdNginxSync, cmdNginxScanBlock, cmdNginxUnscanBlock } from "./commands/nginx";
@@ -109,6 +110,16 @@ Sau khi cập nhật napp (bản cũ để lại cấu hình đã hỏng, không
                                  (--max-old-space-size, CPUWeight, IOWeight,
                                  MemoryHigh) và không đụng ExecStart/Standard*/
                                  User/Group bạn sửa tay
+
+Nghi ngờ rò rỉ bộ nhớ (app tự chết rồi tự sống lại mà không ai hay):
+  sudo napp mem status           bộ nhớ hiện tại + SỐ LẦN systemd đã âm thầm
+                                 khởi động lại. Unit napp đều 'Restart=always'
+                                 nên app rò rỉ chết rồi tự dậy, lặp nhiều ngày
+  sudo napp mem watch            lấy mẫu định kỳ -> 'napp mem trend' kết luận
+                                 được xu hướng (cần ít nhất 6 giờ dữ liệu)
+  sudo napp mem guard <app>      bật cờ Node tự chụp heap TRƯỚC khi chết vì OOM
+  sudo napp mem snapshot <app>   chụp heap ngay, app vẫn chạy -> mở bằng
+                                 Chrome DevTools > Memory để tìm thủ phạm
 
 Worker của một app web (hai nửa của cùng một sản phẩm):
   sudo napp service create <name> --run-as <domain> --share-redis-with <domain>
@@ -652,6 +663,36 @@ nginx
   .command("unscanblock")
   .description("tắt chặn quét lỗ hổng trên toàn máy (một site riêng lẻ: napp app set <domain> --no-scan-block)")
   .action(() => cmdNginxUnscanBlock());
+
+// ------------------------------------------------------------------ mem ---
+// Phát hiện rò rỉ bộ nhớ SỚM (trước khi app chết) + chụp heap để tìm thủ phạm.
+const mem = program.command("mem").description("theo dõi bộ nhớ, phát hiện rò rỉ sớm, chụp heap snapshot");
+mem
+  .command("status")
+  .description("bộ nhớ hiện tại, số lần systemd âm thầm khởi động lại, và kết luận xu hướng của từng đơn vị")
+  .action(() => cmdMemStatus());
+mem.command("trend").description("xu hướng bộ nhớ từ dữ liệu đã lấy mẫu (cần ít nhất 6 giờ)").action(() => cmdMemTrend());
+mem
+  .command("watch")
+  .description("bật lấy mẫu bộ nhớ định kỳ qua systemd timer — ĐÂY là thứ cho biết có rò rỉ TRƯỚC khi app chết")
+  .option("--interval <phút>", "khoảng cách giữa hai lần lấy mẫu (mặc định 15)", (v) => parseInt(v, 10), 15)
+  .action((opts) => cmdMemWatch({ interval: opts.interval }));
+mem.command("unwatch").description("tắt lấy mẫu định kỳ (dữ liệu cũ vẫn giữ)").action(() => cmdMemUnwatch());
+mem
+  .command("sample")
+  .description("lấy một mẫu ngay bây giờ (lệnh mà timer chạy)")
+  .option("--quiet", "không in gì khi thành công")
+  .action((opts) => cmdMemSample({ quiet: Boolean(opts.quiet) }));
+mem
+  .command("snapshot <app|service>")
+  .description("chụp heap snapshot của tiến trình ĐANG CHẠY (app không chết) — cần bật 'napp mem guard' trước")
+  .option("-y, --yes", "không hỏi xác nhận")
+  .action(async (id, opts) => cmdMemSnapshot(id, { yes: Boolean(opts.yes) }));
+mem
+  .command("guard <app|service>")
+  .description("bật cờ chẩn đoán rò rỉ (tự chụp heap trước khi OOM + cho phép chụp theo yêu cầu). CÓ restart đơn vị")
+  .action((id) => cmdMemGuard(id, true));
+mem.command("unguard <app|service>").description("tắt cờ chẩn đoán rò rỉ (có restart đơn vị)").action((id) => cmdMemGuard(id, false));
 
 // ------------------------------------------------------- update/version ---
 program.command("update").description("tự cập nhật napp lên bản mới nhất (OTA qua gist)").action(() => cmdUpdate());

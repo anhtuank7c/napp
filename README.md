@@ -21,6 +21,7 @@ cô lập hoàn toàn giữa các app, nginx chỉ đóng vai trò reverse-proxy
 - 🛡️ **fail2ban**: sshd + nginx-botsearch/http-auth/limit-req + jail riêng chống spam 502/504/429
 - 💾 **Backup định kỳ** (database + mã nguồn) qua **systemd timer**, có xoay vòng retention
 - ⚙️ **Tối ưu theo phần cứng thực tế**: `napp tune apply` phát hiện CPU/RAM và điều chỉnh nginx/MariaDB/Redis/sysctl **và NODE_OPTIONS heap V8 cho từng app node** — chạy lại bất cứ khi nào nâng cấp server
+- 🧠 **Phát hiện rò rỉ bộ nhớ TRƯỚC khi app chết** (`napp mem`): đếm số lần systemd âm thầm khởi động lại, theo dõi xu hướng bộ nhớ, và bật cờ Node tự chụp heap ngay trước khi OOM — mở bằng Chrome DevTools để tìm thủ phạm
 - 🥇 **Web app được ưu tiên hơn background service**: heap V8 chia theo trọng số (web gấp đôi worker) và `CPUWeight`/`IOWeight` ở systemd — một worker nén ảnh/video không còn làm chậm request của người dùng thật
 - 🔍 `napp check --fix`: kiểm tra + tự cài Node.js, nginx, certbot, MariaDB, Redis, fail2ban, UFW nếu thiếu
 - 🩺 **`napp doctor`**: soi **bản vá bảo mật đang chờ** (nginx, OpenSSL, OpenSSH…), dịch vụ còn chạy **thư viện cũ** sau khi vá, đối chiếu **CVE nổi bật của nginx**, vòng đời Node.js; quét **rủi ro chuỗi cung ứng** (dependency chain attack) trong dependencies của từng app/service — và `napp doctor upgrade` để lấy bản vá về
@@ -141,6 +142,10 @@ Gõ số rồi Enter, `0` để quay lại/thoát.
 | `sudo napp cloudflare schedule [--time 01:00]` | Lên lịch tự động đồng bộ IP Cloudflare (systemd timer, hàng ngày) |
 | `sudo napp cloudflare unschedule` | Gỡ lịch tự động đồng bộ IP Cloudflare |
 | `sudo napp tune show\|apply` | Xem/áp tối ưu theo phần cứng thực tế |
+| `sudo napp mem status` / `trend` | Bộ nhớ + dấu hiệu rò rỉ (số lần âm thầm restart, xu hướng) |
+| `sudo napp mem watch [--interval 15]` / `unwatch` | Bật/tắt lấy mẫu bộ nhớ định kỳ (systemd timer) |
+| `sudo napp mem guard <app>` / `unguard` | Bật/tắt cờ Node tự chụp heap trước khi OOM (có restart) |
+| `sudo napp mem snapshot <app>` | Chụp heap snapshot của tiến trình đang chạy |
 | `sudo napp update` | Tự cập nhật napp lên bản mới nhất |
 | `napp version` / `changelog` | Phiên bản / lịch sử thay đổi |
 | `sudo napp install` / `uninstall` | Cài/gỡ napp khỏi `/usr/local/bin` |
@@ -916,6 +921,97 @@ lật ngược nó.
 > sudo napp check --fix    # áp ngay, không restart Redis
 > sudo napp tune apply     # sinh lại toàn bộ cấu hình (có restart Redis)
 > ```
+
+---
+
+## 🧠 Rò rỉ bộ nhớ: phát hiện sớm và tìm thủ phạm
+
+Chuyện đã xảy ra với rất nhiều người: app rò rỉ bộ nhớ, chạm trần heap, **chết**
+— và vì mọi unit của napp đều có `Restart=always`, systemd **lặng lẽ khởi động
+lại** nó. Rồi lại chết, lại dậy, ngày này qua ngày khác. Không ai biết cho tới
+lúc nó tệ đến mức nhìn thấy được.
+
+Điều trớ trêu: **systemd đã đếm sẵn số lần đó từ đầu**, chỉ là chưa ai đọc ra.
+
+```bash
+sudo napp mem status     # bộ nhớ hiện tại + SỐ LẦN đã âm thầm restart + kết luận xu hướng
+sudo napp mem watch      # lấy mẫu định kỳ -> mới kết luận được xu hướng
+sudo napp mem trend      # xu hướng từ dữ liệu đã lấy mẫu
+```
+
+### Hai việc khác nhau, đừng gộp làm một
+
+| | Công cụ | Trả lời câu hỏi |
+|---|---|---|
+| **Phát hiện** | `mem status` · `mem watch` · `mem trend` | "Có đang rò rỉ không?" |
+| **Chẩn đoán** | `mem guard` · `mem snapshot` | "Cái gì đang rò rỉ?" |
+
+Cái bạn thiếu khi app chết lần trước là **phát hiện**. Nó gần như miễn phí: chỉ
+đọc vài file trong `/sys/fs/cgroup`, không sửa một dòng code nào của app.
+
+### Đo `anon`, không đo `memory.current`
+
+napp lấy `anon` trong `memory.stat` của cgroup — bộ nhớ ẩn danh (heap, stack).
+`memory.current` bao gồm cả **page cache**, thứ phình ra co lại theo I/O của cả
+máy và đủ nhiễu để dìm chết tín hiệu thật.
+
+Và phần khó nhất không phải đo, mà là **kết luận mà không kêu oan**:
+
+- **Chỉ xét đoạn từ lần restart gần nhất.** Mỗi lần khởi động lại là bộ nhớ về
+  mo; ghép hai bên của một lần restart vào cùng đường xu hướng thì được một cái
+  dốc âm vô nghĩa, che mất đúng cái rò rỉ đã gây ra restart.
+- **So trung vị hai phần tư đầu/cuối**, không so mẫu đầu với mẫu cuối — một mẫu
+  rơi đúng lúc GC vừa chạy lệch tới hàng chục MB.
+- **Dưới 6 giờ dữ liệu thì không kết luận gì.** RSS của Node *luôn* tăng lúc đầu
+  rồi đi ngang (V8 không trả bộ nhớ về OS sớm). Một bộ dò ngây thơ sẽ báo động
+  giả suốt, và bạn sẽ học được cách phớt lờ nó.
+
+### Chẩn đoán: chụp heap
+
+```bash
+sudo napp mem guard <app>       # bật cờ Node (CÓ restart đơn vị một lần)
+sudo napp mem snapshot <app>    # chụp ngay, app VẪN CHẠY
+```
+
+`mem guard` thêm hai cờ vào `NODE_OPTIONS` — **không cần sửa code app**:
+
+| Cờ | Tác dụng |
+|---|---|
+| `--heapsnapshot-near-heap-limit=1` | Node **tự chụp** ngay trước khi chạm trần heap |
+| `--heapsnapshot-signal=SIGUSR2` | Chụp theo yêu cầu, tiến trình vẫn sống |
+
+Cờ đầu chính là thứ vá đúng vết thương của bạn: thay vì chết mà không để lại gì,
+nó để lại toàn bộ hiện trường.
+
+Phân tích: tải file về, mở **Chrome > F12 > Memory > Load**. Chụp **hai lần**
+cách nhau vài giờ rồi chọn **Comparison** — thứ tăng lên giữa hai lần chính là
+chỗ rò rỉ.
+
+> ⚠️ **Chụp heap KHÔNG rẻ, và đây là số đo thật.** File lớn khoảng **gấp đôi
+> heap** và mất **vài phút** để ghi: đo được `heap 96 MB → file 184 MB, 176
+> giây`; `heap 128 MB → 237 MB`. Node **luôn** ghi vào **thư mục làm việc của
+> app** (không đổi được chỗ), nên app rò rỉ tới trần 2 GB để lại một file ~4 GB
+> ngay trong cây mã nguồn. **Đừng restart đơn vị trong lúc đang ghi** — file sẽ
+> cụt và không mở được (đã kiểm chứng: dừng giữa chừng cho ra file 0 byte).
+
+> ⚠️ **SIGUSR2 GIẾT tiến trình Node nếu chưa bật cờ.** Đó là hành vi mặc định của
+> tín hiệu này. Vì vậy `napp mem snapshot` đọc `/proc/<pid>/environ` để xác nhận
+> cờ **thật sự đang có hiệu lực** rồi mới dám gửi — và từ chối nếu không chắc.
+> Nó đọc môi trường THẬT chứ không đọc file unit, vì `.env` của app ghi đè được
+> `NODE_OPTIONS` (napp cố ý đặt nó **trước** `EnvironmentFile`).
+
+> **`--heapsnapshot-near-heap-limit` chụp khi SẮP chạm trần, và app thường vẫn
+> chạy tiếp** sau đó (V8 gom rác rồi đi tiếp). Có file snapshot **không** đồng
+> nghĩa app đã chết.
+
+### Cái napp cố ý KHÔNG làm
+
+napp **không** phải APM. Nếu bạn cần quan sát thật sự (biểu đồ, cảnh báo, lịch
+sử dài hạn) thì `prom-client` + Prometheus/Grafana hoặc một APM có sẵn mới là
+công cụ đúng. `napp mem` chỉ làm phần 20% rẻ nhất mà tín hiệu mạnh nhất.
+
+Và **tuyệt đối không** dùng `--inspect` trên production: nó mở một cổng debugger,
+và cổng đó nếu ra tới Internet thì tương đương thực thi mã từ xa.
 
 ---
 

@@ -10,6 +10,7 @@ import { detectStaticLayout, detectUploadDir, staticSetCommand, type StaticSugge
 import { appServePaths, grantNginxGroupAccess, nginxWorkerUser, pathReadableBy } from "../lib/staticaccess";
 import { unitWorkDir } from "../templates/systemd";
 import { unitHasPriority } from "../lib/unitfile";
+import { allUnits, readUnitMemory, readSamples, analyseTrend, strayHeapSnapshots } from "../lib/memwatch";
 import { SYSTEMD_DIR, serviceNameFor, svcSystemdName } from "../lib/state";
 
 export interface CheckOptions {
@@ -170,6 +171,19 @@ function vhostsMissingLocationsInclude(): string[] {
 // mỗi lần `napp check` chạy là dạy người dùng bỏ qua cảnh báo của napp.
 function scannerBlockNeverConfigured(): boolean {
   return Object.keys(loadState().apps).length > 0 && !existsSync(NGINX_SCANNER_BLOCK_CONF);
+}
+
+// Đơn vị mà systemd ĐÃ ÂM THẦM khởi động lại — dấu hiệu rò rỉ bộ nhớ rõ nhất,
+// và cũng là thứ dễ bỏ lỡ nhất. Mọi unit napp đều có 'Restart=always', nên app
+// chạm trần heap sẽ chết rồi tự sống lại, lặp đi lặp lại hàng ngày mà không có
+// gì nổi lên trên bề mặt. Chính systemd đã đếm sẵn con số này, chỉ là chưa ai đọc.
+function unitsRestarting(): { unit: string; restarts: number; result?: string }[] {
+  const out: { unit: string; restarts: number; result?: string }[] = [];
+  for (const ref of allUnits()) {
+    const m = readUnitMemory(ref);
+    if (m.restarts > 0) out.push({ unit: m.unit, restarts: m.restarts, result: m.lastResult });
+  }
+  return out;
 }
 
 // Unit tạo bằng bản napp trước 1.25.0 KHÔNG có CPUWeight/IOWeight.
@@ -374,6 +388,43 @@ export async function cmdCheck(opts: CheckOptions): Promise<void> {
         // restart:false — CPUWeight/IOWeight/MemoryHigh áp được ngay khi
         // daemon-reload; chỉ heap mới cần khởi động lại tiến trình.
         fix: () => reportBalance(applyNodeHeaps({ restart: false })),
+      });
+    }
+
+    // --- rò rỉ bộ nhớ: đơn vị bị khởi động lại / xu hướng tăng / snapshot sót ---
+    const restarting = unitsRestarting();
+    if (restarting.length > 0) {
+      findings.push({
+        name: "memory-restarts",
+        ok: false,
+        message:
+          `${restarting.length} đơn vị đã bị systemd KHỞI ĐỘNG LẠI ` +
+          `(${restarting.map((r) => `${r.unit}: ${r.restarts} lần${r.result ? `, gần nhất ${r.result}` : ""}`).join(" · ")}). ` +
+          `Unit napp đều có 'Restart=always' nên app chạm trần heap sẽ chết rồi TỰ SỐNG LẠI, lặp nhiều ngày mà không ai hay — ` +
+          `đây là dấu hiệu rò rỉ bộ nhớ rõ nhất. Xem: napp mem status · nguyên nhân: journalctl -u <unit> | grep -i "out of memory"`,
+        // KHÔNG có fix tự động: đây là lỗi trong CODE của app, napp không sửa hộ được.
+      });
+    }
+    const leaking = allUnits().map((u) => analyseTrend(readSamples(), u.unit)).filter((t) => t.verdict === "leak");
+    if (leaking.length > 0) {
+      findings.push({
+        name: "memory-trend",
+        ok: false,
+        message:
+          `${leaking.length} đơn vị có bộ nhớ TĂNG LIÊN TỤC kể từ lần khởi động gần nhất ` +
+          `(${leaking.map((t) => `${t.unit}: +${t.growthMB} MB/${t.spanHours}h, ~${t.mbPerDay} MB/ngày`).join(" · ")}). ` +
+          `Chụp heap để tìm thủ phạm: napp mem guard <app> rồi napp mem snapshot <app>`,
+      });
+    }
+    const stray = strayHeapSnapshots();
+    if (stray.length > 0) {
+      findings.push({
+        name: "memory-heapsnapshot",
+        ok: false,
+        message:
+          `Có file .heapsnapshot còn sót trong thư mục app (${stray.map((s) => `${s.id}: ${s.files.length} file, ${s.files.reduce((n, f) => n + f.mb, 0)} MB`).join(" · ")}) — ` +
+          `đây là BẰNG CHỨNG app đã chạm trần heap và Node đã tự chụp lại trước khi chết. ` +
+          `Tải về phân tích bằng Chrome DevTools > Memory, rồi XOÁ đi (file rất to). Chi tiết: napp mem status`,
       });
     }
 
