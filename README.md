@@ -96,7 +96,7 @@ Gõ số rồi Enter; `0` để quay lại, ở menu chính `0` là thoát. Menu
 mỗi bước.
 
 ```
- 1. Kiểm tra & sửa môi trường        xem · tự cài/sửa phần còn thiếu
+ 1. Kiểm tra & sửa môi trường        trạng thái từng database engine · xem · tự cài/sửa · chọn engine cần có
  2. App web (N)                       Tạo app mới · <domain> ›
       <domain> ›                      xem · deploy · restart · dừng/khởi động · log
                                       biến môi trường › · domain phụ › · SSL › · nginx ›

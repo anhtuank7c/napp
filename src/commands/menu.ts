@@ -48,7 +48,18 @@ import {
   DEFAULT_RETENTION_DAYS,
   BACKUP_TIMER_NAME,
 } from "./backup";
-import { activeEngines, driverFor, DB_ENGINES, unitEngine, type DbEngine } from "../lib/db";
+import {
+  activeEngines,
+  driverFor,
+  DB_ENGINES,
+  unitEngine,
+  selectedEngines,
+  setSelectedEngines,
+  engineSelectionMade,
+  unmanagedEngines,
+  validateEngineSet,
+  type DbEngine,
+} from "../lib/db";
 import { cmdDbEngineList, cmdDbEngineAdd, cmdDbEngineRemove, cmdDbEngineDefault } from "./dbengine";
 import { cmdFirewallSync, cmdFirewallStatus } from "./firewall";
 import { cmdFail2banSetup, cmdFail2banStatus, cmdFail2banUnban } from "./fail2ban";
@@ -68,7 +79,7 @@ import { MEMWATCH_TIMER_NAME } from "../lib/memwatch";
 import { timerState } from "../lib/timer";
 import { cmdUpdate, cmdVersion, cmdChangelog } from "./update";
 import { NAPP_VERSION } from "../version";
-import { section, info, warn, printDie, colorText, NappError } from "../lib/log";
+import { section, info, ok, warn, printDie, colorText, NappError } from "../lib/log";
 
 async function ask(q: string): Promise<string> {
   return (await promptAsk(q)).trim();
@@ -426,12 +437,82 @@ async function askUnit(actionLabel: string): Promise<string | undefined> {
 }
 
 // ------------------------------------------------------------ 1. Môi trường
+
+/** Một dòng trạng thái cho từng engine napp đang quản lý (+ engine đã cài nhưng không quản lý). */
+function engineStatusLines(): string[] {
+  const selected = selectedEngines();
+  const lines: string[] = [];
+  if (selected.length === 0) {
+    lines.push(`Database: ${colorText("dim", "không dùng (đã chọn)")}`);
+  } else {
+    const parts = selected.map((e) => {
+      const d = driverFor(e);
+      const st = !d.isInstalled() ? colorText("yellow", "✗ chưa cài") : d.isRunning() ? colorText("green", "● đang chạy") : colorText("yellow", "○ đã dừng");
+      return `${d.label} ${st}`;
+    });
+    lines.push(`Database cần có: ${parts.join(" · ")}${engineSelectionMade() ? "" : colorText("dim", "  (chưa từng chọn — mặc định MariaDB)")}`);
+  }
+  const unmanaged = unmanagedEngines();
+  if (unmanaged.length) lines.push(colorText("dim", `Đã cài nhưng napp không quản lý: ${unmanaged.map((e) => driverFor(e).label).join(", ")}`));
+  return lines;
+}
+
+/**
+ * Chọn lại tập engine cần có trên máy. Bỏ tick một engine đang cài thì HỎI:
+ * gỡ khỏi máy, hay chỉ ngừng quản lý (engine vẫn chạy). Tick thêm thì cài luôn.
+ * Gỡ chạy TRƯỚC thêm: đổi MariaDB -> MySQL phải gỡ cái cũ trước, không thì apt
+ * xung đột (và driver sẽ từ chối cài).
+ */
+async function chooseEnginesFlow(): Promise<void> {
+  const current = selectedEngines();
+  const sel = await askMultiSelect("Database engine cần có trên máy ([x] = cần có; bỏ hết = không dùng database):", [
+    ...DB_ENGINES.map((e) => ({
+      key: e,
+      label: `${driverFor(e).label}${driverFor(e).isInstalled() ? colorText("dim", " — đã cài") : ""}${e === "mariadb" || e === "mysql" ? colorText("dim", " (MariaDB và MySQL chỉ chọn một)") : ""}`,
+      default: current.includes(e),
+    })),
+  ]);
+  const next = DB_ENGINES.filter((e) => sel.has(e));
+  validateEngineSet(next);
+  const adding = next.filter((e) => !current.includes(e));
+  const removing = current.filter((e) => !next.includes(e));
+  if (adding.length === 0 && removing.length === 0) {
+    // Vẫn ghi lại nếu đây là lần đầu chọn: chốt mặc định thành lựa chọn tường minh.
+    if (!engineSelectionMade()) setSelectedEngines(next);
+    return info("Không thay đổi gì.");
+  }
+  console.log();
+  if (removing.length) info(`Bỏ: ${removing.map((e) => driverFor(e).label).join(", ")}`);
+  if (adding.length) info(`Thêm (sẽ cài nếu chưa có): ${adding.map((e) => driverFor(e).label).join(", ")}`);
+  if (!(await askYesNo("Tiếp tục?"))) return info("Không thay đổi gì.");
+
+  for (const e of removing) {
+    const d = driverFor(e);
+    if (d.isInstalled() && (await askYesNo(`Gỡ ${d.label} khỏi máy? (dữ liệu được GIỮ; 'không' = chỉ ngừng quản lý, ${d.label} vẫn chạy)`))) {
+      cli(`db engine delete ${e}`);
+      await cmdDbEngineRemove(e, { purge: false, force: false, yes: true });
+    } else {
+      cli(`db engine set ${selectedEngines().filter((x) => x !== e).join(",") || "none"}`);
+      setSelectedEngines(selectedEngines().filter((x) => x !== e));
+      ok(`napp ngừng quản lý ${d.label}.`);
+    }
+  }
+  if (adding.length) {
+    cli(`db engine create ${adding.join(" ")}`);
+    await cmdDbEngineAdd(adding, { yes: false });
+  } else if (next.length === 0) {
+    setSelectedEngines([]); // bỏ hết = chủ động không dùng database
+  }
+}
+
 async function menuCheck(): Promise<void> {
   await menuLoop(() => ({
     title: "Kiểm tra & sửa môi trường",
+    header: engineStatusLines(),
     items: [
       { label: "Kiểm tra (chỉ xem, không thay đổi gì)", run: () => (cli("check"), cmdCheck({ fix: false, yes: false })) },
       { label: "Kiểm tra và TỰ CÀI / SỬA phần còn thiếu", run: () => (cli("check --fix"), cmdCheck({ fix: true, yes: false })) },
+      { label: "Chọn database engine cần có trên máy (thêm / bỏ)", run: chooseEnginesFlow },
     ],
   }));
 }

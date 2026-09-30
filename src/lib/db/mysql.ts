@@ -118,6 +118,18 @@ function makeMysqlDriver(variant: Variant): DbDriver {
     },
 
     install() {
+      // Chặn ở ĐÂY (mọi đường cài đều đi qua) chứ không chỉ ở tầng chọn engine:
+      // 'check --fix' trên máy chưa từng chọn engine sẽ mặc định MariaDB, trong
+      // khi máy có thể đang chạy MySQL cài tay. 'apt-get install -y mariadb-server'
+      // khi đó GỠ MySQL để nhường chỗ và MariaDB tiếp quản /var/lib/mysql của nó.
+      const other = variant === "mariadb" ? mysqlDriver : mariadbDriver;
+      if (other.isInstalled()) {
+        die(
+          `Máy đang có ${other.label} — cài ${label} sẽ khiến apt GỠ ${other.label} (hai gói xung đột, dùng chung /var/lib/mysql).\n` +
+            `  Muốn dùng ${other.label} đang có: sudo napp db engine set ${other.engine}\n` +
+            `  Muốn chuyển hẳn sang ${label}: backup, 'sudo napp db engine delete ${other.engine}', rồi cài ${label} và import lại.`
+        );
+      }
       preflightInstall(label, 3306, "/var/lib/mysql", 1024);
       info(`Đang cài đặt ${label} server...`);
       aptInstall(packages);

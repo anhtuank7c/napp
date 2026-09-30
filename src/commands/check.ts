@@ -40,7 +40,10 @@ interface Finding {
   name: string;
   ok: boolean;
   message: string;
-  fix?: () => void;
+  // Không có fix = napp không tự sửa được mục này (chỉ báo + hướng dẫn).
+  fix?: () => unknown;
+  // Mục là cài một database engine -> sau khi sửa cần nhắc chia lại RAM.
+  engine?: string;
 }
 
 function osRelease(): Record<string, string> {
@@ -569,12 +572,25 @@ export async function cmdCheck(opts: CheckOptions): Promise<void> {
   if (selected.length === 0) ok("Database: không dùng (đã chọn) — thêm sau bằng 'napp db engine create <engine>'.");
   for (const e of selected) {
     const d = driverFor(e);
-    if (!d.isInstalled()) {
+    // Chọn MariaDB (hoặc mặc định MariaDB vì chưa từng chọn) nhưng máy đang có
+    // MySQL cài tay, hay ngược lại: cài cái đã chọn là apt GỠ cái đang có. Báo
+    // rõ, KHÔNG đưa ra fix tự động.
+    const rival = e === "mariadb" ? "mysql" : e === "mysql" ? "mariadb" : undefined;
+    if (!d.isInstalled() && rival && driverFor(rival).isInstalled() && !selected.includes(rival)) {
+      findings.push({
+        name: e,
+        ok: false,
+        message:
+          `${d.label} ${engineSelectionMade() ? "đã được chọn" : "là mặc định"} nhưng máy đang có ${driverFor(rival).label} — cài ${d.label} sẽ khiến apt GỠ ${driverFor(rival).label}. ` +
+          `napp KHÔNG tự sửa mục này. Dùng ${driverFor(rival).label} đang có: sudo napp db engine set ${rival}`,
+      });
+    } else if (!d.isInstalled()) {
       findings.push({
         name: e,
         ok: false,
         message: `${d.label} chưa cài (engine đã chọn — không cần thì bỏ bằng 'napp check --db none' hoặc 'napp db engine delete ${e}').`,
         fix: () => d.install(),
+        engine: e,
       });
     } else if (!d.isRunning()) {
       findings.push({ name: e, ok: false, message: `${d.label} đã cài nhưng chưa chạy.`, fix: () => runCmd("systemctl", ["enable", "--now", d.unit()]) });
@@ -675,15 +691,51 @@ export async function cmdCheck(opts: CheckOptions): Promise<void> {
     return;
   }
 
+  const fixable = findings.filter((f) => f.fix);
+  const manual = findings.filter((f) => !f.fix);
+  if (fixable.length === 0) {
+    console.log();
+    info(`Không có mục nào napp tự sửa được — ${manual.length} mục ở trên cần bạn xử lý theo hướng dẫn.`);
+    return;
+  }
+
   console.log();
-  const proceed = await confirm(`Tiến hành cài đặt/khởi động ${findings.length} thành phần còn thiếu ở trên?`, opts.yes);
+  const proceed = await confirm(
+    `Tiến hành cài đặt/sửa ${fixable.length} mục: ${fixable.map((f) => f.name).join(", ")}?` +
+      (manual.length ? ` (${manual.length} mục còn lại cần xử lý tay: ${manual.map((f) => f.name).join(", ")})` : ""),
+    opts.yes
+  );
   if (!proceed) {
     info("Đã huỷ. Không thay đổi gì.");
     return;
   }
 
-  for (const f of findings) {
-    if (f.fix) f.fix();
+  // Mỗi mục chạy RIÊNG: một mục lỗi (vd MongoDB từ chối vì CPU thiếu AVX) không
+  // được chặn các mục sau (fail2ban, UFW...) như trước đây.
+  const failed: { name: string; error: string }[] = [];
+  const done: string[] = [];
+  for (const f of fixable) {
+    section(`Sửa: ${f.name}`);
+    try {
+      await f.fix!();
+      done.push(f.name);
+    } catch (e) {
+      const msg = (e as Error).message;
+      failed.push({ name: f.name, error: msg });
+      warn(`[${f.name}] không sửa được: ${msg}`);
+    }
   }
-  ok("Hoàn tất --fix. Chạy lại 'napp check' để xác nhận.");
+
+  console.log();
+  if (done.length) ok(`Đã sửa: ${done.join(", ")}`);
+  if (failed.length) {
+    warn(`KHÔNG sửa được ${failed.length} mục:`);
+    for (const x of failed) console.log(`  - [${x.name}] ${x.error.split("\n")[0]}`);
+  }
+  if (manual.length) info(`Còn ${manual.length} mục cần xử lý tay: ${manual.map((f) => f.name).join(", ")}`);
+  // Vừa cài database engine: phần RAM của DB và heap Node đang theo phân bổ cũ.
+  if (fixable.some((f) => f.engine && done.includes(f.name))) {
+    info("Vừa cài database engine — chạy 'sudo napp tune apply' (lúc thấp điểm) để chia lại RAM cho database và heap Node.");
+  }
+  info("Chạy lại 'napp check' để xác nhận.");
 }

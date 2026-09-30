@@ -16,6 +16,16 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.29.1
+- SỬA LỖI NGUY HIỂM: 'check --fix' (mặc định MariaDB) có thể khiến apt GỠ MySQL
+  cài tay. Nay driver từ chối cài MariaDB khi đã có MySQL (và ngược lại); check
+  báo rõ và chỉ lệnh 'napp db engine set mysql', không tự sửa.
+- check --fix: mỗi mục chạy riêng, một mục lỗi không chặn mục sau; có tổng kết
+  đã sửa / lỗi / cần xử lý tay; nhắc 'tune apply' sau khi cài engine.
+- Menu "Kiểm tra & sửa môi trường": hiện trạng thái từng engine cần có + mục
+  "Chọn database engine cần có trên máy" (tick thêm = cài; bỏ tick = gỡ hoặc chỉ
+  ngừng quản lý; bỏ hết = không dùng database).
+
 ## 1.29.0
 - MENU CHIA THEO NGỮ CẢNH: chọn một app/service là vào menu của riêng nó (deploy,
   restart, dừng/khởi động, log, env, domain phụ, SSL, nginx, leak guard, chụp

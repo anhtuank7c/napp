@@ -2,6 +2,14 @@
 
 Tất cả thay đổi đáng chú ý của `napp` được ghi lại ở đây.
 
+## 1.29.1
+
+- **Sửa lỗi nguy hiểm: `check --fix` có thể GỠ MySQL đang chạy.** Máy chưa từng chọn engine thì napp mặc định MariaDB; nếu máy đang có MySQL cài tay, `--fix` "sửa" MariaDB còn thiếu bằng `apt-get install -y mariadb-server` — apt gỡ MySQL để nhường chỗ và MariaDB tiếp quản `/var/lib/mysql`. Kiểm tra cổng chỉ chặn được khi MySQL đang chạy. Nay driver MariaDB/MySQL **từ chối cài** khi máy đang có bên kia (chặn ở mọi đường cài, không chỉ `check`), còn `check` báo rõ tình huống và chỉ lệnh dùng engine đang có (`napp db engine set mysql`) — không đưa ra fix tự động.
+
+- **`check --fix`: một mục lỗi không còn chặn các mục sau.** Trước đây cài MongoDB thất bại (vd CPU thiếu AVX) là dừng luôn, fail2ban/UFW/Redis phía sau không được cài. Nay mỗi mục chạy riêng, cuối cùng có tổng kết: đã sửa / không sửa được (kèm lý do) / cần xử lý tay. Câu hỏi xác nhận chỉ đếm những mục napp thật sự tự sửa được. Vừa cài database engine thì nhắc chạy `tune apply` để chia lại RAM.
+
+- **Menu "Kiểm tra & sửa môi trường" theo sát lựa chọn database:** đầu màn hình hiện từng engine cần có kèm trạng thái (● đang chạy / ○ đã dừng / ✗ chưa cài), engine đã cài nhưng napp không quản lý, hoặc "không dùng database". Mục mới **"Chọn database engine cần có trên máy"**: tick/bỏ tick — tick thêm là cài luôn; bỏ tick một engine đang cài thì hỏi *gỡ khỏi máy* (dữ liệu giữ lại) hay *chỉ ngừng quản lý*; bỏ hết = không dùng database. Chọn cả MariaDB lẫn MySQL bị từ chối ngay.
+
 ## 1.29.0
 
 - **Menu chia theo ngữ cảnh:** chọn **thứ** muốn làm việc trước, rồi mọi thao tác trên nó nằm cùng một chỗ. Chọn một app là vào **menu của riêng app đó** (xem · deploy · restart · dừng/khởi động · log · biến môi trường · domain phụ · SSL · nginx · leak guard · chụp heap · xoá) — không còn cảnh chọn "Restart" rồi chọn app, chọn "Log" rồi chọn lại đúng app đó. Service cũng vậy, kèm "Danh tính & quyền ghi" (run-as, write-dir).
