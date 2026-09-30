@@ -16,6 +16,12 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.30.1
+- Gợi ý phím luôn thấy được và nói đúng Esc làm gì: "Esc quay lại" / "Esc thoát
+  napp" / "Esc huỷ". Terminal hẹp: bỏ gợi ý ít quan trọng, không cắt gợi ý Esc.
+- Esc hoặc Ctrl+C ở menu chính hỏi "Thoát napp?" Có/Không (mặc định Không).
+  Ctrl+C thêm lần nữa tại câu hỏi = thoát; "0. Thoát napp" vẫn thoát ngay.
+
 ## 1.30.0
 - Menu chọn bằng phím mũi tên: ↑/↓ di chuyển, Enter chọn, Esc quay lại. Danh
   sách chọn nhiều: Space tick/bỏ tick, 'a' tick/bỏ tất cả, Enter xác nhận.

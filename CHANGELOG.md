@@ -2,6 +2,12 @@
 
 Tất cả thay đổi đáng chú ý của `napp` được ghi lại ở đây.
 
+## 1.30.1
+
+- **Gợi ý phím luôn nhìn thấy được, và nói đúng Esc làm gì ở màn hình đó:** `Esc quay lại` ở menu con, `Esc thoát napp` ở menu chính, `Esc huỷ` trong danh sách chọn, `Esc ở lại` trong câu hỏi thoát. Tên phím in đậm màu thay vì làm mờ cả dòng (nhiều terminal SSH hiển thị chữ mờ gần như vô hình). Terminal hẹp thì bỏ bớt gợi ý ít quan trọng — gợi ý Esc không bao giờ bị cắt.
+
+- **Esc (hoặc Ctrl+C) ở menu chính hỏi "Thoát napp?" với Có/Không**, mặc định **Không**: Enter hoặc Esc là ở lại, chọn "Có" mới thoát. Ctrl+C thêm lần nữa ngay tại câu hỏi này = thoát. Chọn "0. Thoát napp" vẫn thoát ngay (đó là chủ đích rõ ràng).
+
 ## 1.30.0
 
 - **Chọn bằng phím mũi tên ở mọi nơi trong menu:** `↑`/`↓` di chuyển, `Enter` chọn, `Esc` quay lại. Danh sách nhiều lựa chọn (database engine cần có, những gì xoá kèm khi gỡ app/service, lần đầu chọn engine trong `check --fix`) dùng `Space` để tick/bỏ tick, `a` để tick/bỏ tất cả, `Enter` xác nhận. Áp dụng cho mọi menu, mọi danh sách chọn một (app, service, database, engine, runtime, package manager...) và mọi danh sách chọn nhiều.

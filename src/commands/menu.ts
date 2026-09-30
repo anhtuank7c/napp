@@ -228,7 +228,7 @@ const menuCursor = new Map<string, number>();
  * "0" (quay lại / thoát), "" (Enter trống, chỉ ở chế độ gõ số) hoặc `escValue`.
  * Terminal thật: ↑/↓ + Enter, gõ số để nhảy, Esc = `escValue`. Pipe: gõ số như cũ.
  */
-async function pickFromMenu(title: string, labels: string[], exitLabel: string, header?: string[], escValue = "0"): Promise<string> {
+async function pickFromMenu(title: string, labels: string[], exitLabel: string, header?: string[], escValue = "0", escLabel?: string): Promise<string> {
   if (!interactive()) {
     printMenu(title, labels, exitLabel, header);
     return ask("Chọn: ");
@@ -238,7 +238,7 @@ async function pickFromMenu(title: string, labels: string[], exitLabel: string, 
     ...labels.map((l, i) => ({ label: `${String(i + 1).padStart(2)}. ${l}`, value: String(i + 1) })),
     { label: ` 0. ${exitLabel}`, value: "0" },
   ];
-  const v = await select({ choices, initial: menuCursor.get(title) ?? 0, escValue, zeroIndex: labels.length, summary: false });
+  const v = await select({ choices, initial: menuCursor.get(title) ?? 0, escValue, escLabel, zeroIndex: labels.length, summary: false });
   const idx = Number(v);
   if (Number.isInteger(idx) && idx >= 1) menuCursor.set(title, idx - 1);
   return v;
@@ -1323,6 +1323,29 @@ function topItems(): Item[] {
   ];
 }
 
+/**
+ * Esc / Ctrl+C ở menu chính: hỏi Có/Không, mặc định KHÔNG (ở lại). Esc trong
+ * câu hỏi này = ở lại; Ctrl+C thêm lần nữa = thoát (bấm Ctrl+C hai lần là cách
+ * thoát quen tay ở mọi chương trình dòng lệnh).
+ */
+async function confirmQuit(): Promise<boolean> {
+  try {
+    return await select<boolean>({
+      message: colorText("yellow", "Thoát napp?"),
+      choices: [
+        { label: "Không, ở lại", value: false },
+        { label: "Có, thoát napp", value: true },
+      ],
+      escValue: false,
+      escLabel: "ở lại",
+      summary: false,
+    });
+  } catch (e) {
+    if (e instanceof PromptCancelled) return true;
+    throw e;
+  }
+}
+
 export async function runMenu(): Promise<void> {
   // Ctrl+C khi một lệnh hệ thống đang chạy (git, apt, certbot...): terminal đang
   // ở chế độ thường nên tín hiệu tới CẢ lệnh con lẫn napp. Lệnh con dừng, lỗi
@@ -1342,31 +1365,32 @@ export async function runMenu(): Promise<void> {
   process.on("uncaughtException", onCrash);
   process.on("unhandledRejection", onCrash);
 
-  let lastSigint = 0;
   try {
     while (true) {
       const items = topItems();
       let choice: string;
       try {
-        // Esc ở menu chính KHÔNG thoát (bấm nhầm quá dễ) — chỉ nhắc.
-        choice = await pickFromMenu(`napp v${NAPP_VERSION} — Quản lý server Node.js`, items.map((i) => `${i.label} ›`), "Thoát napp", undefined, "esc");
+        choice = await pickFromMenu(
+          `napp v${NAPP_VERSION} — Quản lý server Node.js`,
+          items.map((i) => `${i.label} ›`),
+          "Thoát napp",
+          undefined,
+          "esc",
+          "thoát napp"
+        );
       } catch (e) {
+        // Ctrl+C ở menu chính: hỏi như Esc (bấm nhầm là chuyện thường).
         if (!(e instanceof PromptCancelled) || e.reason === "eof") throw e;
-        // Ctrl+C ở menu chính: lần đầu chỉ nhắc (bấm nhầm là chuyện thường), lần
-        // thứ hai trong 3 giây mới thoát.
-        if (Date.now() - lastSigint < 3000) break;
-        lastSigint = Date.now();
-        notice = colorText("yellow", "Chọn 0 để thoát napp (hoặc bấm Ctrl+C lần nữa trong 3 giây).");
+        choice = "esc";
+      }
+      if (choice === "esc") {
+        if (await confirmQuit()) break;
         continue;
       }
       // CHỈ thoát khi chủ đích chọn 0/q. Trước đây Enter trống cũng thoát — bấm
       // nhầm một phím là văng khỏi napp.
       if (choice === "0" || choice.toLowerCase() === "q") break;
       if (choice === "") continue;
-      if (choice === "esc") {
-        notice = colorText("yellow", "Chọn '0. Thoát napp' để thoát.");
-        continue;
-      }
       const n = Number(choice);
       const item = Number.isInteger(n) ? items[n - 1] : undefined;
       if (item) await submenu(async () => void (await item.run()));

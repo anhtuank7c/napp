@@ -152,7 +152,8 @@ interface KeyLoopOptions {
   count: number;
   initial: number;
   render: (cursor: number) => string[];
-  footer: string;
+  /** Gợi ý phím, xếp theo độ QUAN TRỌNG giảm dần: thiếu chỗ thì bỏ từ cuối lên. */
+  footer: [key: string, what: string][];
   onKey: (name: string, cursor: number) => KeyResult;
 }
 
@@ -192,7 +193,7 @@ function keyLoop(opts: KeyLoopOptions): Promise<unknown> {
         if (start) lines[0] = `  ↑ còn ${start} mục`;
         if (below) lines[lines.length - 1] = `  ↓ còn ${below} mục`;
       }
-      lines = [...lines.map((l) => fit(l, width)), fit(`\x1b[2m${opts.footer}\x1b[0m`, width)];
+      lines = [...lines.map((l) => fit(l, width)), footerLine(opts.footer, width)];
       out.write((drawn ? `\x1b[${drawn}A\r\x1b[J` : "") + lines.join("\n") + "\n");
       drawn = lines.length;
     };
@@ -253,6 +254,19 @@ function keyLoop(opts: KeyLoopOptions): Promise<unknown> {
   });
 }
 
+/**
+ * Dòng gợi ý phím dưới danh sách. Tên phím in đậm màu; KHÔNG làm mờ cả dòng
+ * (nhiều terminal SSH hiển thị chữ mờ gần như vô hình). Thiếu chỗ thì bỏ gợi ý
+ * ÍT quan trọng nhất (cuối danh sách) — không bao giờ cắt ngang gợi ý Esc như
+ * khi cắt cả dòng bằng "…".
+ */
+function footerLine(parts: [string, string][], width: number): string {
+  const len = (ps: [string, string][]) => 2 + ps.reduce((n, [k, w]) => n + k.length + 1 + w.length, 0) + 3 * Math.max(0, ps.length - 1);
+  let use = parts.slice();
+  while (use.length > 1 && len(use) > width) use = use.slice(0, -1);
+  return "  " + use.map(([k, w]) => `\x1b[1;33m${k}\x1b[0m ${w}`).join(" \x1b[2m·\x1b[0m ");
+}
+
 function digitTarget(name: string, count: number, zeroIndex?: number): number | undefined {
   if (!name.startsWith("digit:")) return undefined;
   const n = parseInt(name.slice(6), 10);
@@ -273,6 +287,8 @@ export async function select<T>(opts: {
   choices: Choice<T>[];
   initial?: number;
   escValue?: T;
+  /** Esc làm gì ở màn hình này, cho dòng gợi ý (mặc định "quay lại"). */
+  escLabel?: string;
   zeroIndex?: number;
   /** In lại "› lựa chọn" sau khi chọn (mặc định: có khi có message). */
   summary?: boolean;
@@ -297,7 +313,12 @@ export async function select<T>(opts: {
   const value = (await keyLoop({
     count: choices.length,
     initial: def,
-    footer: "  ↑/↓ di chuyển · Enter chọn · gõ số để nhảy tới" + (opts.escValue !== undefined ? " · Esc quay lại" : " · Esc huỷ"),
+    footer: [
+      ["Esc", opts.escValue !== undefined ? opts.escLabel ?? "quay lại" : "huỷ"],
+      ["↑/↓", "di chuyển"],
+      ["Enter", "chọn"],
+      ["0-9", "nhảy tới mục"],
+    ],
     render: (cursor) => choices.map((c, i) => (i === cursor ? `${POINTER} ${highlight(c.label)}` : `  ${c.label}`)),
     onKey: (name, cursor) => {
       const target = digitTarget(name, choices.length, opts.zeroIndex);
@@ -338,7 +359,13 @@ export async function checkbox<T>(opts: { message: string; choices: (Choice<T> &
   await keyLoop({
     count: opts.choices.length,
     initial: 0,
-    footer: "  ↑/↓ di chuyển · Space chọn/bỏ · a = chọn/bỏ tất cả · Enter xác nhận · Esc huỷ",
+    footer: [
+      ["Space", "chọn/bỏ"],
+      ["Enter", "xác nhận"],
+      ["Esc", "huỷ"],
+      ["↑/↓", "di chuyển"],
+      ["a", "chọn/bỏ tất cả"],
+    ],
     render: (cursor) =>
       opts.choices.map((c, i) => {
         const box = checked[i] ? "\x1b[32m[x]\x1b[0m" : "[ ]";
