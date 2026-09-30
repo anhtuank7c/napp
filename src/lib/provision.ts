@@ -1,4 +1,5 @@
-import { execCapture, runCmd, commandExists } from "./exec";
+import { runCmd, commandExists, whichAll } from "./exec";
+import { realpathSync } from "node:fs";
 import { info, ok, die } from "./log";
 import type { Runtime, PackageManager } from "./state";
 
@@ -45,9 +46,16 @@ export function defaultStartCmd(runtime: Runtime, pm: PackageManager): string {
 // commandExists (chỉ dò PATH của root): pnpm/bun cài trong home của root sẽ KHÔNG
 // tính là hệ thống, và đó chính là bẫy khiến bước cài deps báo 'command not found'.
 export function commandExistsSystemWide(cmd: string): boolean {
-  const res = execCapture("bash", ["-lc", `p="$(command -v ${cmd} 2>/dev/null)" && readlink -f "$p"`]);
-  if (res.code !== 0) return false;
-  return /^\/(usr|opt|bin|sbin)\//.test(res.stdout.trim());
+  // Tra trong tiến trình (không mở login shell — xem commandExists). Đúng nếu có
+  // BẤT KỲ bản nào, sau khi giải symlink, nằm ở thư mục hệ thống: bản trong
+  // /usr/local/bin vẫn dùng được kể cả khi PATH của root thấy ~/.bun/bin trước.
+  return whichAll(cmd).some((p) => {
+    try {
+      return /^\/(usr|opt|bin|sbin)\//.test(realpathSync(p));
+    } catch {
+      return false;
+    }
+  });
 }
 
 // Đảm bảo trình quản lý gói dùng được ở mức hệ thống trước khi tạo app/service.

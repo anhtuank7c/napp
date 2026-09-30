@@ -16,6 +16,14 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.30.3
+- NAPP HẾT LAG: mỗi lần hỏi "chương trình X có cài chưa" từng mở một login shell
+  (100-500ms/lần, 46 chỗ gọi). Nay tra thẳng PATH + thư mục hệ thống trong tiến
+  trình. Đo: vẽ menu "Kiểm tra & sửa môi trường" 665ms -> 12ms; activeEngines()
+  524ms -> 7ms; mở+đóng menu 1 810ms -> 129ms (~90ms là Node khởi động).
+- Node chỉ có qua nvm trong home của root nay không tính là "đã cài" (systemd và
+  sudo vốn không thấy node đó).
+
 ## 1.30.2
 - Bỏ dòng "0. Quay lại / Thoát napp" ở mọi menu và mục "Huỷ" trong danh sách
   chọn — gợi ý phím đã nói Esc làm gì. Gõ 0 vẫn làm đúng như Esc. Pipe/script

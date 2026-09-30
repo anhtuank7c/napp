@@ -1,3 +1,4 @@
+import { existsSync, readFileSync } from "node:fs";
 import { execCapture, runCmd, requireRoot, commandExists, writeFile } from "../lib/exec";
 import { info, ok, die } from "../lib/log";
 import { fetchCloudflareIpRanges } from "../lib/cloudflare";
@@ -22,8 +23,8 @@ export async function cmdCloudflareSync(opts: { quiet?: boolean } = {}): Promise
 
   // Đảm bảo nginx.conf (khối http) có include conf.d/*.conf — hầu hết cài
   // đặt mặc định trên Ubuntu đã có sẵn dòng include này.
-  const nginxConf = execCapture("bash", ["-lc", "grep -c 'include /etc/nginx/conf.d' /etc/nginx/nginx.conf || true"]).stdout.trim();
-  if (nginxConf === "0") {
+  const nginxMain = "/etc/nginx/nginx.conf";
+  if (existsSync(nginxMain) && !readFileSync(nginxMain, "utf8").includes("include /etc/nginx/conf.d")) {
     console.log(
       "[CẢNH BÁO] /etc/nginx/nginx.conf có vẻ chưa include /etc/nginx/conf.d/*.conf trong khối http {}. " +
         "Hãy thêm dòng `include /etc/nginx/conf.d/*.conf;` thủ công rồi chạy lại."

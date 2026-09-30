@@ -2,6 +2,14 @@
 
 Tất cả thay đổi đáng chú ý của `napp` được ghi lại ở đây.
 
+## 1.30.3
+
+- **napp hết "lag": nguyên nhân không phải JavaScript mà là cách hỏi "chương trình X có cài chưa".** Mỗi lần hỏi, napp mở một **login shell** (`bash -lc "command -v X"`) — nạp lại `/etc/profile`, `.bashrc`, cả nvm nếu có — mất 100-500ms mỗi lần, ở 46 chỗ trong code, và bị gọi nhiều nhất cho engine **chưa cài** (3/4 engine trên một máy bình thường). Đo được: vẽ menu "Kiểm tra & sửa môi trường" tốn ~665ms, gần như toàn bộ là mấy login shell đó.
+
+- Nay tra thẳng PATH + các thư mục chương trình hệ thống ngay trong tiến trình, không mở shell nào. Đo lại cùng thao tác: vẽ menu 1 **665ms -> 12ms**; `activeEngines()` (dùng khi tính heap, tune, backup, tạo app) **524ms -> 7ms**; mở rồi đóng menu 1 từ đầu tới cuối **810ms -> 129ms** (trong đó ~90ms là thời gian Node khởi động). Hai chỗ mở shell chỉ để tra cứu khác (kiểm tra pnpm/bun cài ở mức hệ thống, đọc `nginx.conf` khi đồng bộ Cloudflare) cũng bỏ.
+
+- Khác biệt duy nhất về kết quả: Node chỉ có qua nvm trong thư mục home của root nay **không** được tính là "đã cài". Đúng ra phải vậy từ đầu — systemd và `sudo` không thấy node đó, nên app chạy bằng nó sẽ không khởi động được (đúng lý do `install.sh` luôn cài Node ở mức hệ thống).
+
 ## 1.30.2
 
 - **Bỏ dòng "0. Quay lại" / "0. Thoát napp" ở mọi cấp menu** và mục "Huỷ" trong các danh sách chọn: dòng gợi ý phím đã nói rõ `Esc` làm gì ở từng màn hình. Gõ `0` vẫn làm **đúng như Esc** (menu con: quay lại; menu chính: hỏi "Thoát napp?"; danh sách chọn: huỷ) — thói quen cũ không mất. Gõ nhanh `1` rồi `0` vẫn là nhảy tới mục 10.

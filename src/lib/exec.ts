@@ -1,6 +1,6 @@
 import { spawnSync, type SpawnSyncOptionsWithStringEncoding } from "node:child_process";
-import { mkdirSync, writeFileSync, appendFileSync, chmodSync, existsSync } from "node:fs";
-import { dirname } from "node:path";
+import { mkdirSync, writeFileSync, appendFileSync, chmodSync, existsSync, statSync, accessSync, constants as fsConstants } from "node:fs";
+import { dirname, join, delimiter } from "node:path";
 import { dryRunNotice, die } from "./log";
 
 // Cờ toàn cục --dry-run, được set một lần khi parse CLI args ở index.ts.
@@ -37,9 +37,49 @@ export function execCapture(cmd: string, args: string[] = []): RunResult {
   };
 }
 
+// Thư mục chương trình hệ thống — luôn xét, kể cả khi PATH hiện tại thiếu (vd
+// chạy từ systemd timer, hoặc PATH của sudo không có sbin).
+const SYSTEM_BIN_DIRS = ["/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin", "/snap/bin"];
+
+function isExecutableFile(p: string): boolean {
+  try {
+    if (!statSync(p).isFile()) return false;
+    accessSync(p, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Mọi đường dẫn thực thi được của `cmd` trên PATH + thư mục hệ thống, theo thứ tự. */
+export function whichAll(cmd: string): string[] {
+  if (cmd.includes("/")) return isExecutableFile(cmd) ? [cmd] : [];
+  const dirs = [...(process.env.PATH ?? "").split(delimiter), ...SYSTEM_BIN_DIRS].filter(Boolean);
+  // Windows (chỉ máy dev): chương trình mang đuôi .exe/.cmd... theo PATHEXT.
+  const exts = process.platform === "win32" ? ["", ...(process.env.PATHEXT ?? ".EXE;.CMD;.BAT").toLowerCase().split(";")] : [""];
+  const out: string[] = [];
+  for (const d of [...new Set(dirs)]) {
+    for (const ext of exts) {
+      const p = join(d, cmd + ext);
+      if (isExecutableFile(p)) {
+        out.push(p);
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+// Tra NGAY trong tiến trình, không mở shell. Trước đây mỗi lần hỏi là một login
+// shell ('bash -lc command -v ...'): nạp lại /etc/profile + .bashrc (+ nvm nếu có)
+// — 100-500ms MỖI LẦN, gọi ở 46 chỗ, nhiều nhất cho engine CHƯA cài (3/4 engine
+// trên máy thường). Đó là nguồn chính của cảm giác "napp lag": menu "Kiểm tra &
+// sửa môi trường" mất ~665ms chỉ để vẽ, gần như toàn bộ là mấy login shell này.
+//
+// Không cache: 'check --fix' cài chương trình rồi kiểm tra lại ngay trong cùng
+// một lần chạy; tra thẳng filesystem chỉ tốn vài micro-giây.
 export function commandExists(cmd: string): boolean {
-  const res = execCapture("bash", ["-lc", `command -v ${shQuote(cmd)}`]);
-  return res.code === 0 && res.stdout.trim().length > 0;
+  return whichAll(cmd).length > 0;
 }
 
 // Quote an toàn cho bash -lc (dùng khi cần build một dòng lệnh phức hợp,
