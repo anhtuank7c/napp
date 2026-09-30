@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { ask } from "../lib/prompt";
 import { execCapture, runCmd, requireRoot, writeFile, ensureDir, commandExists } from "../lib/exec";
 import { info, ok, warn, die, section, colorText } from "../lib/log";
 import { writeManagedUnit } from "../lib/unitfile";
@@ -270,10 +271,7 @@ export async function cmdMemSnapshot(id: string, opts: { yes?: boolean } = {}): 
   );
 
   if (!opts.yes) {
-    const readline = await import("node:readline/promises");
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    const ans = await rl.question("Tiếp tục? [y/N] ");
-    rl.close();
+    const ans = await ask("Tiếp tục? [y/N] ");
     if (!/^y(es)?$/i.test(ans.trim())) {
       info("Đã huỷ.");
       return;

@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { ask } from "../lib/prompt";
 import { gunzipSync } from "node:zlib";
 import { execCapture, runCmd, commandExists, requireRoot, isServiceActive } from "../lib/exec";
 import { info, ok, warn, danger, colorText, section, step, die, type LogColor } from "../lib/log";
@@ -49,10 +50,7 @@ function printSeverity(sev: Severity, text: string): void {
 
 async function confirm(question: string, autoYes: boolean): Promise<boolean> {
   if (autoYes) return true;
-  const readline = await import("node:readline/promises");
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  const ans = await rl.question(`${question} [y/N] `);
-  rl.close();
+  const ans = await ask(`${question} [y/N] `);
   return /^y(es)?$/i.test(ans.trim());
 }
 

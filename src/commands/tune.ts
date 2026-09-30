@@ -1,4 +1,5 @@
 import { execCapture, runCmd, requireRoot, ensureDir, writeFile, commandExists, isServiceActive } from "../lib/exec";
+import { ask } from "../lib/prompt";
 import { info, ok, warn, die, section } from "../lib/log";
 import { detectHardware, formatHardware, detectResourceControl, formatResourceControl } from "../lib/hardware";
 import {
@@ -234,10 +235,7 @@ export async function cmdTuneApply(opts: TuneApplyOptions): Promise<void> {
   console.log();
 
   if (!opts.yes) {
-    const readline = await import("node:readline/promises");
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    const ans = await rl.question("Áp dụng cấu hình trên và khởi động lại nginx/database/Redis + các app? [y/N] ");
-    rl.close();
+    const ans = await ask("Áp dụng cấu hình trên và khởi động lại nginx/database/Redis + các app? [y/N] ");
     if (!/^y(es)?$/i.test(ans.trim())) {
       info("Đã huỷ. Không thay đổi gì.");
       return;

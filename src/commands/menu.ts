@@ -1,4 +1,4 @@
-import readline from "node:readline/promises";
+import { ask as promptAsk, askBlock, PromptCancelled } from "../lib/prompt";
 import { cmdCheck } from "./check";
 import { cmdDoctor, cmdDoctorSystem, cmdDoctorDeps, cmdDoctorUpgrade } from "./doctor";
 import { cmdAppCreate, cmdAppDeploy, cmdAppRemove, cmdAppList, cmdAppRestart, cmdAppLogs, cmdAppSet, listAppSummaries } from "./app";
@@ -27,12 +27,10 @@ import { cmdNginxHarden, cmdNginxUnharden, cmdNginxSync, cmdNginxScanBlock, cmdN
 import { cmdMemStatus, cmdMemWatch, cmdMemUnwatch } from "./mem";
 import { cmdUpdate, cmdVersion } from "./update";
 import { NAPP_VERSION } from "../version";
-import { section, info, warn } from "../lib/log";
-
-let rl: readline.Interface;
+import { section, info, warn, printDie, colorText, NappError } from "../lib/log";
 
 async function ask(q: string): Promise<string> {
-  return (await rl.question(q)).trim();
+  return (await promptAsk(q)).trim();
 }
 
 async function askYesNo(q: string, def = false): Promise<boolean> {
@@ -47,15 +45,16 @@ async function askYesNo(q: string, def = false): Promise<boolean> {
 // biệt. Bắt buộc phải đọc nhiều dòng: readline chỉ lấy 1 dòng nên nếu chỉ
 // dùng ask() thì key dán vào sẽ bị cắt cụt ở dòng '-----BEGIN' đầu tiên.
 async function askSshKey(): Promise<string | undefined> {
-  const first = (await rl.question("Deploy key — DÁN nội dung key (bắt đầu '-----BEGIN'), hoặc nhập ĐƯỜNG DẪN file:\n")).trim();
+  // Đọc cả khối trong MỘT lần hỏi: đóng/mở lại bộ đọc giữa hai dòng là mất
+  // phần còn lại của lần dán.
+  const lines = await askBlock(
+    "Deploy key — DÁN nội dung key (bắt đầu '-----BEGIN'), hoặc nhập ĐƯỜNG DẪN file:\n",
+    (first) => /^-----BEGIN /.test(first),
+    (line) => /-----END [A-Z0-9 ]*PRIVATE KEY-----/.test(line)
+  );
+  const first = (lines[0] ?? "").trim();
   if (!first) return undefined;
   if (!/^-----BEGIN /.test(first)) return first; // 1 dòng, không phải header key -> coi là đường dẫn
-  const lines = [first];
-  // Đọc tiếp từng dòng key (không trim nội dung) tới khi gặp dòng END.
-  while (!/-----END [A-Z0-9 ]*PRIVATE KEY-----/.test(lines[lines.length - 1]!)) {
-    const line = await rl.question("");
-    lines.push(line.replace(/\r$/, ""));
-  }
   return lines.join("\n");
 }
 
@@ -195,25 +194,90 @@ async function askRetentionDays(): Promise<number> {
   return Number.isInteger(n) && n > 0 ? n : DEFAULT_RETENTION_DAYS;
 }
 
-function printMenu(title: string, items: string[]): void {
+// Thông báo in ngay dưới menu ở lần vẽ kế tiếp. Cần vì printMenu xoá màn hình:
+// in thẳng ra lúc đó thì người dùng không kịp đọc.
+let notice: string | undefined;
+
+function printMenu(title: string, items: string[], exitLabel = "Quay lại"): void {
   console.clear();
   section(title);
   items.forEach((label, i) => console.log(`  ${i + 1}. ${label}`));
-  console.log(`  0. Quay lại / Thoát`);
+  console.log(`  0. ${exitLabel}`);
   console.log();
+  if (notice) {
+    console.log(notice);
+    console.log();
+    notice = undefined;
+  }
 }
 
+/** Chờ Enter trước khi vẽ lại menu (menu xoá màn hình). Ctrl+C ở đây = bỏ qua. */
 async function pause(): Promise<void> {
-  await ask("\nNhấn Enter để tiếp tục...");
+  try {
+    await ask("\nNhấn Enter để quay lại menu...");
+  } catch (e) {
+    if (e instanceof PromptCancelled && e.reason === "sigint") return;
+    throw e;
+  }
 }
 
+/**
+ * In lỗi RÕ RÀNG rồi để menu chạy tiếp — không bao giờ để lỗi của một lệnh
+ * (thường là lệnh bên thứ ba: apt, git, certbot, systemctl...) đá người dùng
+ * ra khỏi napp mà không để lại manh mối nào.
+ */
+function reportError(e: unknown): void {
+  console.error();
+  if (e instanceof NappError) {
+    // die() của napp: thông báo đã viết sẵn cho người dùng, kèm cách sửa.
+    printDie(e.message);
+  } else if (["EACCES", "EPERM"].includes((e as NodeJS.ErrnoException)?.code ?? "")) {
+    printDie(`Không đủ quyền: ${(e as Error).message}\n  Mở napp bằng quyền root: sudo napp`);
+  } else if ((e as NodeJS.ErrnoException)?.code === "ENOSPC") {
+    printDie(`Hết dung lượng đĩa: ${(e as Error).message}\n  Dọn bớt (vd: sudo journalctl --vacuum-size=200M, sudo apt-get clean) rồi thử lại.`);
+  } else {
+    // Không phải lỗi napp chủ động báo -> là lỗi của chính napp. Nói thẳng ra và
+    // đưa đủ thông tin để báo lại, thay vì một dòng khó hiểu.
+    const err = e instanceof Error ? e : new Error(String(e));
+    printDie(`Lỗi không mong đợi trong napp: ${err.message}`);
+    const stack = (err.stack ?? "").split("\n").slice(1, 7).join("\n");
+    if (stack) console.error(colorText("dim", stack));
+    console.error("  Đây là lỗi của napp. Hãy báo lại kèm các dòng trên: https://github.com/anhtuank7c/napp/issues");
+  }
+  console.error(colorText("dim", "  napp vẫn đang chạy — xử lý theo hướng dẫn ở trên rồi thử lại từ menu."));
+}
+
+/** Chạy một lệnh từ menu: lỗi gì cũng được báo rõ và quay lại menu. */
 async function guard(fn: () => Promise<void> | void): Promise<void> {
   try {
     await fn();
   } catch (e) {
-    warn((e as Error).message);
+    if (e instanceof PromptCancelled) {
+      if (e.reason === "eof") throw e; // stdin đã đóng: không còn ai để hỏi -> runMenu thoát có lời
+      notice = colorText("dim", "Đã huỷ.");
+      return;
+    }
+    reportError(e);
   }
   await pause();
+}
+
+/**
+ * Vào một menu con. Ctrl+C tại câu hỏi "Chọn:" của menu con = quay về menu
+ * chính. Lỗi lọt ra ngoài guard (không nên có — đây là lưới an toàn cuối) được
+ * báo rõ thay vì làm sập cả napp.
+ */
+async function submenu(fn: () => Promise<void>): Promise<void> {
+  try {
+    await fn();
+  } catch (e) {
+    if (e instanceof PromptCancelled) {
+      if (e.reason === "eof") throw e;
+      return;
+    }
+    reportError(e);
+    await pause();
+  }
 }
 
 async function menuApp(): Promise<void> {
@@ -628,35 +692,80 @@ async function menuDoctor(): Promise<void> {
 }
 
 export async function runMenu(): Promise<void> {
-  rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  // Ctrl+C khi một lệnh hệ thống đang chạy (git, apt, certbot...): terminal đang
+  // ở chế độ thường nên tín hiệu tới CẢ lệnh con lẫn napp. Lệnh con dừng, lỗi
+  // được báo qua guard; napp thì KHÔNG được chết theo — không có listener này
+  // thì Node thoát ngay, không một dòng giải thích.
+  const onSigint = () => {
+    process.stdout.write("\n");
+    warn("Ctrl+C: đã gửi tín hiệu ngắt tới lệnh đang chạy. napp không thoát — sẽ quay lại menu khi lệnh dừng.");
+  };
+  // Lưới an toàn cuối: lỗi bắn ra từ callback bất đồng bộ (không nằm trong
+  // await nào của menu) — báo rõ, menu vẫn chạy.
+  const onCrash = (e: unknown) => {
+    reportError(e);
+    notice = colorText("yellow", "Vừa có lỗi ngoài dự kiến (xem phía trên trước khi menu vẽ lại).");
+  };
+  process.on("SIGINT", onSigint);
+  process.on("uncaughtException", onCrash);
+  process.on("unhandledRejection", onCrash);
+
+  let lastSigint = 0;
   try {
     while (true) {
-      printMenu(`napp v${NAPP_VERSION} — Quản lý server Node.js`, [
-        "Kiểm tra môi trường máy chủ",
-        "Quản lý App (web, có domain)",
-        "Quản lý Background Service (chạy ngầm)",
-        "Quản lý SSL",
-        "Quản lý Database",
-        "Redis",
-        "Sao lưu định kỳ",
-        "Hạ tầng (Firewall / fail2ban / Cloudflare / Tối ưu)",
-        "Bảo mật: bản vá hệ thống & rủi ro dependencies (doctor)",
-        "Cập nhật napp",
-      ]);
-      const choice = await ask("Chọn: ");
-      if (choice === "0" || choice === "" || choice.toLowerCase() === "q") break;
+      printMenu(
+        `napp v${NAPP_VERSION} — Quản lý server Node.js`,
+        [
+          "Kiểm tra môi trường máy chủ",
+          "Quản lý App (web, có domain)",
+          "Quản lý Background Service (chạy ngầm)",
+          "Quản lý SSL",
+          "Quản lý Database",
+          "Redis",
+          "Sao lưu định kỳ",
+          "Hạ tầng (Firewall / fail2ban / Cloudflare / Tối ưu)",
+          "Bảo mật: bản vá hệ thống & rủi ro dependencies (doctor)",
+          "Cập nhật napp",
+        ],
+        "Thoát napp"
+      );
+      let choice: string;
+      try {
+        choice = await ask("Chọn: ");
+      } catch (e) {
+        if (!(e instanceof PromptCancelled) || e.reason === "eof") throw e;
+        // Ctrl+C ở menu chính: lần đầu chỉ nhắc (bấm nhầm là chuyện thường), lần
+        // thứ hai trong 3 giây mới thoát.
+        if (Date.now() - lastSigint < 3000) break;
+        lastSigint = Date.now();
+        notice = colorText("yellow", "Chọn 0 để thoát napp (hoặc bấm Ctrl+C lần nữa trong 3 giây).");
+        continue;
+      }
+      // CHỈ thoát khi chủ đích chọn 0/q. Trước đây Enter trống cũng thoát — bấm
+      // nhầm một phím là văng khỏi napp.
+      if (choice === "0" || choice.toLowerCase() === "q") break;
+      if (choice === "") continue;
       if (choice === "1") await guard(() => cmdCheck({ fix: false, yes: false }));
-      else if (choice === "2") await menuApp();
-      else if (choice === "3") await menuService();
-      else if (choice === "4") await menuCert();
-      else if (choice === "5") await menuDb();
+      else if (choice === "2") await submenu(menuApp);
+      else if (choice === "3") await submenu(menuService);
+      else if (choice === "4") await submenu(menuCert);
+      else if (choice === "5") await submenu(menuDb);
       else if (choice === "6") await guard(() => cmdRedisAllocations());
-      else if (choice === "7") await menuBackup();
-      else if (choice === "8") await menuInfra();
-      else if (choice === "9") await menuDoctor();
+      else if (choice === "7") await submenu(menuBackup);
+      else if (choice === "8") await submenu(menuInfra);
+      else if (choice === "9") await submenu(menuDoctor);
       else if (choice === "10") await guard(() => cmdUpdate());
+      else notice = colorText("yellow", `Lựa chọn không hợp lệ: '${choice}'. Gõ số từ 0 đến 10.`);
     }
+    info("Đã thoát napp.");
+  } catch (e) {
+    // stdin đã đóng (Ctrl+D, SSH rớt, chạy qua pipe hết dữ liệu): không còn ai
+    // để hỏi nên thoát — nhưng thoát CÓ LỜI, không lặng lẽ.
+    if (e instanceof PromptCancelled) info("Đầu vào đã đóng — thoát napp.");
+    else throw e;
   } finally {
-    rl.close();
+    process.off("SIGINT", onSigint);
+    process.off("uncaughtException", onCrash);
+    process.off("unhandledRejection", onCrash);
   }
 }

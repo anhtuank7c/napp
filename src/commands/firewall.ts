@@ -1,4 +1,5 @@
 import { readFileSync, existsSync, readdirSync } from "node:fs";
+import { ask } from "../lib/prompt";
 import { execCapture, runCmd, requireRoot, commandExists } from "../lib/exec";
 import { info, ok, warn, die, section } from "../lib/log";
 import { fetchCloudflareIpRanges } from "../lib/cloudflare";
@@ -46,18 +47,15 @@ export async function cmdFirewallSync(opts: FirewallSyncOptions): Promise<void> 
   log(`Phát hiện cổng SSH hiện tại: ${sshPort}`);
 
   if (!opts.yes && !opts.quiet) {
-    const readline = await import("node:readline/promises");
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     warn(
       "AN TOÀN: hãy giữ một phiên SSH/console THỨ HAI đang mở song song trước khi tiếp tục — " +
         "nếu cổng SSH bị dò sai hoặc rule bị cấu hình nhầm, phiên hiện tại có thể bị khoá ngay lập tức."
     );
-    const ans = await rl.question(
+    const ans = await ask(
       `Sẽ cấu hình UFW: deny incoming mặc định, allow outgoing, allow SSH cổng ${sshPort}, ` +
         `${opts.restrictToCloudflare ? "allow 80/443 CHỈ từ IP Cloudflare" : "allow 80/443 cho mọi người"}.\n` +
         `Tiếp tục? [y/N] `
     );
-    rl.close();
     if (!/^y(es)?$/i.test(ans.trim())) {
       info("Đã huỷ.");
       return;

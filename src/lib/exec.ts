@@ -49,6 +49,43 @@ export function shQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
+// Thông báo khi một lệnh hệ thống (apt, git, certbot, systemctl, mysql...) thất
+// bại. Mục tiêu: người đọc biết NGAY chuyện gì xảy ra và làm gì tiếp, thay vì
+// một dòng "mã 1" trơ trọi.
+function failureMessage(
+  cmd: string,
+  display: string,
+  res: { status: number | null; signal: NodeJS.Signals | null; error?: Error; stdout?: string | null; stderr?: string | null },
+  captured: boolean,
+  who = ""
+): string {
+  if (res.error) {
+    if (/ENOENT/.test(res.error.message)) {
+      return `Không tìm thấy chương trình '${cmd}' trên máy này${who}. Cài gói chứa nó (thường là: sudo napp check --fix) rồi thử lại.`;
+    }
+    return `Không chạy được '${cmd}'${who}: ${res.error.message}`;
+  }
+  if (res.signal) {
+    return (
+      `Lệnh bị ngắt bởi tín hiệu ${res.signal}${res.signal === "SIGINT" ? " (Ctrl+C)" : ""}${who}: ${display}\n` +
+      `  Việc đang làm dở có thể chưa hoàn tất — chạy lại thao tác này khi sẵn sàng.`
+    );
+  }
+  const head = `Lệnh thất bại (mã ${res.status ?? 1})${who}: ${display}`;
+  if (!captured) {
+    // stdio kế thừa: lỗi thật của chương trình đã in ra màn hình ngay phía trên.
+    return `${head}\n  Nguyên nhân cụ thể là thông báo của chính '${cmd}' in ngay phía trên dòng này.`;
+  }
+  // stdio bị bắt (vd gửi SQL qua stdin): phải tự in lại, không thì mất sạch.
+  const out = `${res.stderr ?? ""}\n${res.stdout ?? ""}`
+    .split("\n")
+    .map((l) => l.trimEnd())
+    .filter(Boolean);
+  if (out.length === 0) return head;
+  const tail = out.slice(-15).map((l) => `    ${l}`).join("\n");
+  return `${head}\n  Thông báo của '${cmd}':\n${tail}`;
+}
+
 // Thực thi một lệnh THAY ĐỔI hệ thống. Ở chế độ --dry-run: chỉ in ra, không
 // chạy thật. Ném NappError (qua die) nếu lệnh thất bại và không silent.
 export function runCmd(
@@ -70,11 +107,11 @@ export function runCmd(
   });
   if (res.error) {
     if (opts.silentFail) return { code: 127, stdout: "", stderr: String(res.error.message) };
-    die(`Không thể chạy lệnh '${cmd}': ${res.error.message}`);
+    die(failureMessage(cmd, display, res, opts.input !== undefined));
   }
   const code = res.status ?? 1;
   if (code !== 0 && !opts.silentFail) {
-    die(`Lệnh thất bại (mã ${code}): ${display}`);
+    die(failureMessage(cmd, display, res, opts.input !== undefined));
   }
   return { code, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
 }
@@ -112,13 +149,11 @@ export function runAs(
   const res = spawnSync("sudo", sudoArgs, { encoding: "utf8", stdio: "inherit", cwd: opts.cwd ?? "/" });
   if (res.error) {
     if (opts.silentFail) return { code: 127, stdout: "", stderr: String(res.error.message) };
-    const hint = /ENOENT/.test(String(res.error.message))
-      ? " ('sudo' chưa được cài trên máy này — chạy 'napp check --fix' trước.)"
-      : "";
-    die(`Không thể chạy lệnh với user ${user}: ${res.error.message}${hint}`);
+    // spawn ở đây là 'sudo' — ENOENT nghĩa là thiếu sudo, không phải thiếu lệnh con.
+    die(failureMessage("sudo", display, res, false));
   }
   const code = res.status ?? 1;
-  if (code !== 0 && !opts.silentFail) die(`Lệnh thất bại (mã ${code}) dưới user ${user}: ${display}`);
+  if (code !== 0 && !opts.silentFail) die(failureMessage(cmd, display, res, false, ` (chạy bằng user ${user})`));
   return { code, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
 }
 

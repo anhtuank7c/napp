@@ -2,6 +2,7 @@ import { Command, Option } from "commander";
 import { legacy, legacyGroup, rawOpt, warnRenamed } from "./lib/cli";
 import { setDryRun, state as execState } from "./lib/exec";
 import { printDie, NappError } from "./lib/log";
+import { PromptCancelled } from "./lib/prompt";
 import { NAPP_VERSION } from "./version";
 
 import { cmdCheck } from "./commands/check";
@@ -922,6 +923,11 @@ if (process.argv.length <= 2) {
     if (e instanceof NappError) {
       printDie(e.message);
       process.exit(1);
+    }
+    // Ctrl+C / Ctrl+D ngay tại câu hỏi xác nhận: người dùng chủ động huỷ, không phải lỗi.
+    if (e instanceof PromptCancelled) {
+      console.error(e.message);
+      process.exit(130);
     }
     // Lỗi commander (vd: --help, tham số sai) đã tự in ra; không log lại.
     if (e && typeof e === "object" && "code" in e) {

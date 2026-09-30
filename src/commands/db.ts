@@ -1,4 +1,5 @@
 import { requireRoot, ensureDir } from "../lib/exec";
+import { ask } from "../lib/prompt";
 import { validateDbName } from "../lib/validate";
 import { info, ok, die, section, warn } from "../lib/log";
 import { resolveEngine, driverFor, installedEngines } from "../lib/db";
@@ -29,10 +30,7 @@ export async function cmdDbDrop(name: string, opts: { yes: boolean; user?: strin
   const driver = driverFor(engine);
   validateDbName(name, driver.maxNameLength);
   if (!opts.yes) {
-    const readline = await import("node:readline/promises");
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    const ans = await rl.question(`Xoá database ${driver.label} '${name}' vĩnh viễn? Hành động không thể hoàn tác. [y/N] `);
-    rl.close();
+    const ans = await ask(`Xoá database ${driver.label} '${name}' vĩnh viễn? Hành động không thể hoàn tác. [y/N] `);
     if (!/^y(es)?$/i.test(ans.trim())) {
       info("Đã huỷ.");
       return;

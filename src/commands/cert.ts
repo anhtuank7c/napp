@@ -1,4 +1,5 @@
 import { execCapture, runCmd, requireRoot, commandExists } from "../lib/exec";
+import { ask } from "../lib/prompt";
 import { validateDomain } from "../lib/validate";
 import { info, ok, warn, die } from "../lib/log";
 import { requireApp, getAcmeEmail, setAcmeEmail } from "../lib/state";
@@ -134,12 +135,9 @@ export async function cmdCertRevoke(domain: string, opts: { yes: boolean }): Pro
   requireCertbot();
 
   if (!opts.yes) {
-    const readline = await import("node:readline/promises");
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    const ans = await rl.question(
+    const ans = await ask(
       `Thao tác này sẽ THU HỒI và XOÁ chứng chỉ của '${domain}'. Website sẽ mất HTTPS hợp lệ cho tới khi phát hành lại.\nTiếp tục? [y/N] `
     );
-    rl.close();
     if (!/^y(es)?$/i.test(ans.trim())) {
       info("Đã huỷ.");
       return;

@@ -1,4 +1,5 @@
 import { existsSync, rmSync, readFileSync } from "node:fs";
+import { ask } from "../lib/prompt";
 import { execCapture, runCmd, runAs, ensureDir, requireRoot, commandExists, writeFile, appendFile } from "../lib/exec";
 import { info, ok, warn, die, section } from "../lib/log";
 import { validateDomain, validatePort, validateRepoUrl, validateBranch, validateEnvKey } from "../lib/validate";
@@ -942,15 +943,12 @@ export async function cmdAppRemove(domain: string, opts: AppRemoveOptions): Prom
   ];
 
   if (!opts.yes) {
-    const readline = await import("node:readline/promises");
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    const ans = await rl.question(
+    const ans = await ask(
       `Thao tác này sẽ gỡ app '${domain}' khỏi napp và XOÁ:\n` +
         willDelete.map((w) => `  - ${w}`).join("\n") +
         (willKeep.length ? `\nGIỮ lại:\n` + willKeep.map((w) => `  - ${w}`).join("\n") : "") +
         `\nTiếp tục? [y/N] `
     );
-    rl.close();
     if (!/^y(es)?$/i.test(ans.trim())) {
       info("Đã huỷ.");
       return;

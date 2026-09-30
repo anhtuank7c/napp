@@ -1,4 +1,5 @@
 import { execCapture, runCmd, requireRoot, commandExists } from "../lib/exec";
+import { ask } from "../lib/prompt";
 import { info, ok, die, section } from "../lib/log";
 import { loadState, REDIS_DB_MAX } from "../lib/state";
 
@@ -32,10 +33,7 @@ export async function cmdRedisFlush(dbIndex: number, opts: { yes: boolean }): Pr
     die(`DB index không hợp lệ: ${dbIndex} (0-${REDIS_DB_MAX - 1})`);
   }
   if (!opts.yes) {
-    const readline = await import("node:readline/promises");
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    const ans = await rl.question(`Xoá TOÀN BỘ dữ liệu trong Redis DB #${dbIndex}? [y/N] `);
-    rl.close();
+    const ans = await ask(`Xoá TOÀN BỘ dữ liệu trong Redis DB #${dbIndex}? [y/N] `);
     if (!/^y(es)?$/i.test(ans.trim())) {
       info("Đã huỷ.");
       return;

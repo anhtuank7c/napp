@@ -2,6 +2,18 @@
 
 Tất cả thay đổi đáng chú ý của `napp` được ghi lại ở đây.
 
+## 1.28.1
+
+- **Sửa lỗi nặng: menu napp tự tắt không một lời** ngay sau khi một lệnh hỏi xác nhận (Áp tối ưu phần cứng, Xoá app, Gỡ SSL, Xoá database...). Nguyên nhân: mỗi lệnh tự mở một bộ đọc stdin riêng trong khi menu vẫn giữ bộ đọc của nó — bộ đọc kia nuốt mất câu trả lời, rồi khi đóng nó **dừng stdin**, không còn gì giữ tiến trình sống và Node thoát với **mã 0**, không lỗi, không thông báo. Đã tái hiện được, và đã kiểm chứng bản cũ chết đúng như vậy còn bản mới trả lời xong quay lại menu. Nay mọi câu hỏi (menu lẫn trong lệnh) đi qua một chỗ duy nhất (`lib/prompt.ts`).
+
+- **Lệnh bên thứ ba thất bại không còn đá bạn khỏi napp.** Lỗi được in rõ bằng `[LỖI]` kèm cách sửa, rồi quay lại menu. Thông báo cũng nói được nhiều hơn "mã 1": thiếu chương trình -> nói tên chương trình và cách cài; bị Ctrl+C -> nói là bị ngắt; lệnh nhận dữ liệu qua stdin (vd SQL gửi vào `mysql`) -> in lại **chính thông báo lỗi của lệnh đó** (trước đây bị nuốt mất); lỗi quyền (`EACCES`) -> bảo mở bằng `sudo napp`; hết đĩa -> cách dọn. Lỗi thật của napp được gọi đúng tên, kèm vài dòng stack để báo lại.
+
+- **Ctrl+C khi `git`/`apt`/`certbot` đang treo nay ngắt được lệnh đó** và napp quay lại menu. Trước đây terminal bị giữ ở raw mode suốt phiên menu nên Ctrl+C không tới được lệnh con (và lệnh con hỏi gì cũng không hiện chữ gõ vào). Ctrl+C tại một câu hỏi = huỷ thao tác đó; ở menu con = về menu chính; ở menu chính phải bấm **hai lần** trong 3 giây mới thoát.
+
+- **Chỉ thoát napp khi chủ đích chọn `0`** (hoặc `q`). Trước đây bấm Enter trống ở menu chính cũng thoát. Lựa chọn sai được báo lại thay vì lặng lẽ vẽ lại menu. Stdin đóng (SSH rớt, Ctrl+D) thì thoát **có lời**.
+
+- Chạy lệnh trực tiếp (không qua menu) mà huỷ tại câu hỏi xác nhận: thoát mã 130 với thông báo rõ, không còn trông như một vụ sập.
+
 ## 1.28.0
 
 - **Mọi lệnh theo một khuôn, như gọi REST API:** `napp <resource> [<sub-resource>] <verb> [<id>] [--flags]`. Đọc tên một lệnh là đoán được các lệnh còn lại. Trước đây cùng một ý có nhiều động từ — tạo là `create`/`add`/`issue`, xoá là `remove`/`drop`/`revoke`, sửa là `set`/`env-set`/`apply`/`sync`/`setup`, xem là `list`/`status`/`info`/`allocations`/`trend` — và công tắc bật/tắt có tới bốn hình dạng (`harden`/`unharden`, `scanblock`/`unscanblock`, `watch`/`unwatch`, `schedule`/`unschedule`).

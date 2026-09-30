@@ -16,6 +16,17 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.28.1
+- SỬA LỖI NẶNG: menu tự tắt không một lời (thoát mã 0) sau khi một lệnh hỏi xác
+  nhận — hai bộ đọc stdin giành nhau, bộ kia đóng là dừng stdin. Nay mọi câu hỏi
+  đi qua một chỗ (lib/prompt.ts).
+- Lệnh bên thứ ba lỗi không đá khỏi napp: in [LỖI] rõ ràng + cách sửa, quay lại
+  menu. Thiếu chương trình / bị Ctrl+C / lỗi quyền / hết đĩa đều được gọi đúng
+  tên; lệnh nhận SQL qua stdin nay in lại thông báo lỗi của chính nó.
+- Ctrl+C ngắt được git/apt/certbot đang treo (trước đây terminal kẹt ở raw
+  mode); Ctrl+C tại câu hỏi = huỷ; ở menu chính bấm 2 lần mới thoát.
+- Chỉ thoát khi chọn 0/q (Enter trống không còn thoát). Stdin đóng -> thoát có lời.
+
 ## 1.28.0
 - NGỮ PHÁP LỆNH THỐNG NHẤT, như REST API:
     napp <resource> [<sub-resource>] <verb> [<id>] [--flags]

@@ -1,4 +1,5 @@
 import { readFileSync, existsSync } from "node:fs";
+import { ask } from "../lib/prompt";
 import { execCapture, runCmd, commandExists, requireRoot, isServiceActive, writeFile, ensureDir } from "../lib/exec";
 import { info, ok, warn, section, die } from "../lib/log";
 import { REDIS_TUNING_PATH } from "../templates/tuning";
@@ -55,10 +56,7 @@ function osRelease(): Record<string, string> {
 
 async function confirm(question: string, autoYes: boolean): Promise<boolean> {
   if (autoYes) return true;
-  const readline = await import("node:readline/promises");
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  const ans = await rl.question(`${question} [y/N] `);
-  rl.close();
+  const ans = await ask(`${question} [y/N] `);
   return /^y(es)?$/i.test(ans.trim());
 }
 
@@ -92,10 +90,7 @@ async function promptEngineSelection(): Promise<DbEngine[] | undefined> {
   console.log("Chọn database engine muốn cài (chọn nhiều thì cách nhau dấu phẩy, vd '1,3'):");
   DB_ENGINES.forEach((e, i) => console.log(`  ${i + 1}. ${e}${e === DEFAULT_DB_ENGINE ? " (mặc định)" : ""}`));
   console.log("  0. không dùng database");
-  const readline = await import("node:readline/promises");
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  const ans = (await rl.question(`Lựa chọn [1]: `)).trim();
-  rl.close();
+  const ans = (await ask(`Lựa chọn [1]: `)).trim();
   if (ans === "") return [DEFAULT_DB_ENGINE];
   if (ans === "0") return [];
   const mapped = ans

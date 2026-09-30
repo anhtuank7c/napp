@@ -1,4 +1,5 @@
 import { requireRoot, ensureDir, runCmd } from "../lib/exec";
+import { ask as promptAsk } from "../lib/prompt";
 import { info, ok, warn, die, section } from "../lib/log";
 import { detectHardware } from "../lib/hardware";
 import { loadState, saveState } from "../lib/state";
@@ -19,11 +20,7 @@ import { dbBackupDir } from "./db";
 import { cmdTuneApply } from "./tune";
 
 async function ask(question: string): Promise<string> {
-  const readline = await import("node:readline/promises");
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  const ans = await rl.question(question);
-  rl.close();
-  return ans.trim();
+  return (await promptAsk(question)).trim();
 }
 
 /** App/service đang dùng database của engine này (theo registry). */
