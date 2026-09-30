@@ -2,6 +2,22 @@
 
 Tất cả thay đổi đáng chú ý của `napp` được ghi lại ở đây.
 
+## 1.28.0
+
+- **Mọi lệnh theo một khuôn, như gọi REST API:** `napp <resource> [<sub-resource>] <verb> [<id>] [--flags]`. Đọc tên một lệnh là đoán được các lệnh còn lại. Trước đây cùng một ý có nhiều động từ — tạo là `create`/`add`/`issue`, xoá là `remove`/`drop`/`revoke`, sửa là `set`/`env-set`/`apply`/`sync`/`setup`, xem là `list`/`status`/`info`/`allocations`/`trend` — và công tắc bật/tắt có tới bốn hình dạng (`harden`/`unharden`, `scanblock`/`unscanblock`, `watch`/`unwatch`, `schedule`/`unschedule`).
+
+- **Bộ động từ cố định:** `list` · `show <id>` · `create <id>` · `update <id>` · `delete <id>` · `set`/`unset` (env, danh sách engine) · `enable`/`disable` (**mọi** công tắc) · `apply` (đồng bộ). Hành động riêng chỉ có: `deploy start stop restart logs` · `renew` · `flush` · `snapshot sample` · `unban`.
+
+- **Quy ước cờ:** `-y/--yes` = bỏ xác nhận, ở mọi lệnh; `--force` chỉ để vượt qua một lần từ chối vì an toàn; cờ bật/tắt đi thành cặp `--x`/`--no-x`. `--db` giờ **chỉ** có nghĩa "tạo database" (trên `create`) — xoá kèm database là `--database` (trước đây `app remove --db` nghĩa ngược lại). `backup … --keep` đổi thành `--keep-count` cho đi cặp với `--keep-days`.
+
+- **Tài nguyên con về đúng chỗ:** domain phụ là `app alias list|create|delete` (không còn là lệnh `domain` riêng); biến môi trường là `app env list|set|unset` và `service env …`; `db backup` gộp vào `backup create --database`; Redis DB index là `redis db list|flush`.
+
+- **Lệnh mới:** `app show` / `service show` (cấu hình + trạng thái một đơn vị); `app|service env list [--reveal]` (giá trị bí mật bị che) và `env unset`; `show` cho mọi công tắc — `backup schedule show`, `cloudflare schedule show`, `mem watch show` (lịch, lần chạy tới/trước, lệnh thật sự được chạy), `nginx hardening show`, `nginx scan-block show`.
+
+- **Tên cũ vẫn chạy** (ẩn khỏi `--help`, in một dòng nhắc tên mới — CHỈ khi gõ trong terminal, không làm bẩn journal của timer) và sẽ bỏ ở 2.0. **Ngoại lệ vĩnh viễn:** `backup run`, `cloudflare sync`, `mem sample` — unit systemd napp đã ghi lên server gọi đúng các tên đó. Unit tạo từ bản này dùng tên mới; `napp check` báo (không phải lỗi) unit nào còn gọi tên cũ. Bảng đối chiếu đầy đủ ở README, mục "Tên lệnh trước 1.28".
+
+- **Cố ý đổi hành vi:** `napp backup schedule`, `napp cloudflare schedule`, `napp mem watch` gõ **không kèm gì** trước đây = bật lịch với giá trị mặc định; nay dừng với mã lỗi và in các lệnh con — gõ để xem có gì mà âm thầm tạo timer là đúng loại bất ngờ cần bỏ. Kèm cờ kiểu cũ (`--time …`) thì vẫn chạy như trước.
+
 ## 1.27.0
 
 - **Tự chọn database engine: MariaDB (mặc định), MySQL, PostgreSQL, MongoDB — cài một, vài, hoặc không cài gì.** Trước đây `napp check --fix` luôn cài MariaDB. Nay lựa chọn được lưu trong `/etc/napp/state.json`; chưa từng chọn thì vẫn là MariaDB, nên **nâng cấp napp không thay đổi gì trên server đang chạy**, và app tạo bằng bản cũ được hiểu là dùng MariaDB.

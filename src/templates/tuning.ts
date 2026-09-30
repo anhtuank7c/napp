@@ -230,7 +230,7 @@ maxmemory ${plan.redisMaxMemoryMB}mb
 #
 # Đánh đổi: khi Redis đầy, lệnh ghi sẽ lỗi OOM chứ không tự dọn dẹp. Hãy ĐẶT TTL
 # cho key cache của app (Redis vẫn xoá key hết hạn bình thường — noeviction chỉ
-# tắt việc trục xuất key CHƯA hết hạn) và theo dõi 'napp redis info'
+# tắt việc trục xuất key CHƯA hết hạn) và theo dõi 'napp redis show'
 # (used_memory so với maxmemory).
 maxmemory-policy noeviction
 

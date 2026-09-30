@@ -47,7 +47,7 @@ export function cmdFail2banSetup(opts: { sshPort?: number }): void {
   ok("Đã áp cấu hình fail2ban: sshd, nginx-botsearch, nginx-http-auth, nginx-limit-req, napp-ratelimit, napp-scanner.");
   info(`• Jail 'napp-scanner' đọc ${NGINX_SCANNER_LOG} — mọi dòng trong đó đều là request quét đã bị nginx chặn, nên ban rất chặt (3 lần / 10 phút -> cấm 1 ngày) mà không sợ ban nhầm.`);
   info("• Các jail nginx nay ghi đè 'backend = auto': backend systemd ở [DEFAULT] khiến fail2ban BỎ QUA logpath và đi đọc journal — nginx ghi log ra file nên các jail đó trước đây không thấy gì để đọc.");
-  info("• Chưa bật chặn quét lỗ hổng ở nginx? Chạy: napp nginx scanblock");
+  info("• Chưa bật chặn quét lỗ hổng ở nginx? Chạy: napp nginx scan-block enable");
 }
 
 export function cmdFail2banStatus(): void {

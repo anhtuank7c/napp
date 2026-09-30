@@ -96,7 +96,7 @@ export async function cmdCertIssue(domain: string, opts: CertIssueOptions): Prom
     die(
       "Cần email cho Let's Encrypt (để nhận cảnh báo hết hạn/bảo mật). Truyền --email <email>,\n" +
         "  hoặc --no-email để đăng ký KHÔNG email (không khuyến nghị). Ví dụ:\n" +
-        `    sudo napp cert issue ${domain} --email ban@example.com`
+        `    sudo napp cert create ${domain} --email ban@example.com`
     );
   }
 

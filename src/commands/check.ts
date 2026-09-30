@@ -199,7 +199,7 @@ function vhostsMissingLocationsInclude(): string[] {
 // Chặn quét lỗ hổng CHƯA BAO GIỜ được cấu hình (file dùng chung không tồn tại).
 //
 // Cố ý chỉ báo khi file KHÔNG CÓ, không báo khi file có mà đang tắt: tắt là kết
-// quả của một lệnh người dùng đã cố ý gõ ('napp nginx unscanblock'), và nhắc lại
+// quả của một lệnh người dùng đã cố ý gõ ('napp nginx scan-block disable'), và nhắc lại
 // mỗi lần `napp check` chạy là dạy người dùng bỏ qua cảnh báo của napp.
 function scannerBlockNeverConfigured(): boolean {
   return Object.keys(loadState().apps).length > 0 && !existsSync(NGINX_SCANNER_BLOCK_CONF);
@@ -298,13 +298,13 @@ function installFail2ban(): void {
   info("Đang cài đặt fail2ban...");
   aptGet(["install", "-y", "fail2ban"]);
   runCmd("systemctl", ["enable", "--now", "fail2ban"]);
-  ok("Đã cài fail2ban (chạy 'napp fail2ban setup' để áp cấu hình jail)");
+  ok("Đã cài fail2ban (chạy 'napp fail2ban apply' để áp cấu hình jail)");
 }
 
 function installUfw(): void {
   info("Đang cài đặt UFW...");
   aptGet(["install", "-y", "ufw"]);
-  ok("Đã cài UFW (chạy 'napp firewall sync' để bật và cấu hình)");
+  ok("Đã cài UFW (chạy 'napp firewall apply' để bật và cấu hình)");
 }
 
 function installGit(): void {
@@ -387,7 +387,7 @@ export async function cmdCheck(opts: CheckOptions): Promise<void> {
         message:
           `${stale.length} vhost còn khối bộ đệm proxy CŨ ngay trong 'location /' (${stale.join(", ")}). ` +
           `Giá trị trong location thắng giá trị mức http, nên các site này vẫn dùng proxy_buffer_size 16k ` +
-          `và vẫn trả 502 ('upstream sent too big header') ở route SvelteKit lồng sâu. Sửa: napp nginx sync`,
+          `và vẫn trả 502 ('upstream sent too big header') ở route SvelteKit lồng sâu. Sửa: napp nginx apply`,
         fix: () => cmdNginxSync(),
       });
     }
@@ -401,7 +401,7 @@ export async function cmdCheck(opts: CheckOptions): Promise<void> {
         message:
           `${noInclude.length} vhost KHÔNG có dòng 'include' file location của napp (${noInclude.join(", ")}) — vhost tạo bằng bản napp cũ. ` +
           `napp vẫn ghi /etc/nginx/napp-locations/<domain>.conf đầy đủ nhưng KHÔNG AI include nó, nên asset tĩnh, thư mục upload, ` +
-          `chặn hotlink và chặn quét lỗ hổng đều "đã cấu hình" mà không hề chạy — nginx -t vẫn xanh, không có lỗi nào để lần. Sửa: napp nginx sync`,
+          `chặn hotlink và chặn quét lỗ hổng đều "đã cấu hình" mà không hề chạy — nginx -t vẫn xanh, không có lỗi nào để lần. Sửa: napp nginx apply`,
         fix: () => cmdNginxSync(),
       });
     }
@@ -433,7 +433,7 @@ export async function cmdCheck(opts: CheckOptions): Promise<void> {
           `${restarting.length} đơn vị đã bị systemd KHỞI ĐỘNG LẠI ` +
           `(${restarting.map((r) => `${r.unit}: ${r.restarts} lần${r.result ? `, gần nhất ${r.result}` : ""}`).join(" · ")}). ` +
           `Unit napp đều có 'Restart=always' nên app chạm trần heap sẽ chết rồi TỰ SỐNG LẠI, lặp nhiều ngày mà không ai hay — ` +
-          `đây là dấu hiệu rò rỉ bộ nhớ rõ nhất. Xem: napp mem status · nguyên nhân: journalctl -u <unit> | grep -i "out of memory"`,
+          `đây là dấu hiệu rò rỉ bộ nhớ rõ nhất. Xem: napp mem show · nguyên nhân: journalctl -u <unit> | grep -i "out of memory"`,
         // KHÔNG có fix tự động: đây là lỗi trong CODE của app, napp không sửa hộ được.
       });
     }
@@ -445,7 +445,7 @@ export async function cmdCheck(opts: CheckOptions): Promise<void> {
         message:
           `${leaking.length} đơn vị có bộ nhớ TĂNG LIÊN TỤC kể từ lần khởi động gần nhất ` +
           `(${leaking.map((t) => `${t.unit}: +${t.growthMB} MB/${t.spanHours}h, ~${t.mbPerDay} MB/ngày`).join(" · ")}). ` +
-          `Chụp heap để tìm thủ phạm: napp mem guard <app> rồi napp mem snapshot <app>`,
+          `Chụp heap để tìm thủ phạm: napp mem guard enable <app> rồi napp mem snapshot <app>`,
       });
     }
     const stray = strayHeapSnapshots();
@@ -456,7 +456,7 @@ export async function cmdCheck(opts: CheckOptions): Promise<void> {
         message:
           `Có file .heapsnapshot còn sót trong thư mục app (${stray.map((s) => `${s.id}: ${s.files.length} file, ${s.files.reduce((n, f) => n + f.mb, 0)} MB`).join(" · ")}) — ` +
           `đây là BẰNG CHỨNG app đã chạm trần heap và Node đã tự chụp lại trước khi chết. ` +
-          `Tải về phân tích bằng Chrome DevTools > Memory, rồi XOÁ đi (file rất to). Chi tiết: napp mem status`,
+          `Tải về phân tích bằng Chrome DevTools > Memory, rồi XOÁ đi (file rất to). Chi tiết: napp mem show`,
       });
     }
 
@@ -467,8 +467,8 @@ export async function cmdCheck(opts: CheckOptions): Promise<void> {
         ok: false,
         message:
           `Chưa bật chặn quét lỗ hổng. Request dò CMS PHP ('/wp-login.php', '/phpmyadmin/', '/cgi-bin/'...) đang đi trọn đường ` +
-          `nginx -> Node -> render trang 404, và trộn vào access log của site. Bật: napp nginx scanblock ` +
-          `(kèm 'napp fail2ban setup' để ban IP ngay ở tường lửa — 444 vẫn phải trả tiền bắt tay TLS, ban thì không).`,
+          `nginx -> Node -> render trang 404, và trộn vào access log của site. Bật: napp nginx scan-block enable ` +
+          `(kèm 'napp fail2ban apply' để ban IP ngay ở tường lửa — 444 vẫn phải trả tiền bắt tay TLS, ban thì không).`,
         fix: () => cmdNginxScanBlock(),
       });
     }
@@ -485,7 +485,7 @@ export async function cmdCheck(opts: CheckOptions): Promise<void> {
           `${safe.length} app đang đẩy TOÀN BỘ asset tĩnh qua tiến trình Node ` +
           `(${safe.map((c) => `${c.app.domain}: ${c.suggestion.framework}`).join(", ")}). ` +
           `Mỗi trang kéo hàng trăm chunk .js/.css xếp hàng trên event loop đơn luồng — app chậm mà không có lỗi nào để lần. ` +
-          `Sửa: ${safe.map((c) => `napp app set ${c.app.domain} --auto-static`).join(" · ")}`,
+          `Sửa: ${safe.map((c) => `napp app update ${c.app.domain} --auto-static`).join(" · ")}`,
         fix: () => {
           for (const c of safe) cmdAppSet(c.app.domain, { autoStatic: true });
         },
@@ -512,7 +512,7 @@ export async function cmdCheck(opts: CheckOptions): Promise<void> {
           `${uploads.length} app có thư mục file tải lên nằm trong gốc tĩnh công khai nhưng nginx CHƯA phục vụ ` +
           `(${uploads.map((u) => `${u.app.domain}: ${u.dir}`).join(", ")}). ` +
           `File tải lên SAU lần build gần nhất trả 404 dù có thật trên đĩa, rồi tự hiện ra sau lần deploy kế tiếp — ` +
-          `trông hệt lỗi chập chờn. Sửa: ${uploads.map((u) => `napp app set ${u.app.domain} --upload-dir ${u.dir}`).join(" · ")}`,
+          `trông hệt lỗi chập chờn. Sửa: ${uploads.map((u) => `napp app update ${u.app.domain} --upload-dir ${u.dir}`).join(" · ")}`,
         fix: () => {
           for (const u of uploads) cmdAppSet(u.app.domain, { uploadDir: u.dir, uploadPrefix: u.prefix });
         },
@@ -561,7 +561,7 @@ export async function cmdCheck(opts: CheckOptions): Promise<void> {
   }
 
   // Database — chỉ những engine người dùng đã chọn (mặc định MariaDB). Engine
-  // đã gỡ bằng 'napp db engine remove' không còn trong danh sách nên --fix
+  // đã gỡ bằng 'napp db engine delete' không còn trong danh sách nên --fix
   // KHÔNG cài lại nó.
   if (opts.db !== undefined) {
     requireRoot();
@@ -571,14 +571,14 @@ export async function cmdCheck(opts: CheckOptions): Promise<void> {
     if (chosen) setSelectedEngines(chosen);
   }
   const selected = selectedEngines();
-  if (selected.length === 0) ok("Database: không dùng (đã chọn) — thêm sau bằng 'napp db engine add <engine>'.");
+  if (selected.length === 0) ok("Database: không dùng (đã chọn) — thêm sau bằng 'napp db engine create <engine>'.");
   for (const e of selected) {
     const d = driverFor(e);
     if (!d.isInstalled()) {
       findings.push({
         name: e,
         ok: false,
-        message: `${d.label} chưa cài (engine đã chọn — không cần thì bỏ bằng 'napp check --db none' hoặc 'napp db engine remove ${e}').`,
+        message: `${d.label} chưa cài (engine đã chọn — không cần thì bỏ bằng 'napp check --db none' hoặc 'napp db engine delete ${e}').`,
         fix: () => d.install(),
       });
     } else if (!d.isRunning()) {
@@ -592,7 +592,7 @@ export async function cmdCheck(opts: CheckOptions): Promise<void> {
   for (const x of exposedEngines()) warn(exposureMessage(x));
   const unmanaged = unmanagedEngines();
   if (unmanaged.length > 0) {
-    info(`Đã cài nhưng napp KHÔNG quản lý: ${unmanaged.join(", ")} (không tune/backup/tự cài lại). Nhận quản lý: napp db engine add <engine>`);
+    info(`Đã cài nhưng napp KHÔNG quản lý: ${unmanaged.join(", ")} (không tune/backup/tự cài lại). Nhận quản lý: napp db engine create <engine>`);
   }
 
   // Redis
@@ -624,6 +624,18 @@ export async function cmdCheck(opts: CheckOptions): Promise<void> {
     findings.push({ name: "redis", ok: false, message: "Redis chưa cài (tuỳ chọn — bỏ qua nếu app không dùng cache/queue Redis).", fix: installRedis });
   }
 
+  // Timer tạo bởi napp < 1.28 gọi tên lệnh cũ. Vẫn chạy (tên cũ là lệnh ẩn
+  // vĩnh viễn) nên chỉ là thông tin, không phải lỗi cần --fix.
+  for (const [unit, oldRe, again] of [
+    ["napp-backup", /\sbackup run\s/, "napp backup schedule enable --time HH:MM"],
+    ["napp-cloudflare-sync", /\scloudflare sync\b/, "napp cloudflare schedule enable --time HH:MM"],
+  ] as const) {
+    const path = `${SYSTEMD_DIR}/${unit}.service`;
+    if (existsSync(path) && oldRe.test(readFileSync(path, "utf8"))) {
+      info(`${path} còn gọi tên lệnh cũ (vẫn chạy bình thường). Muốn cập nhật: sudo ${again}`);
+    }
+  }
+
   // fail2ban
   if (isServiceActive("fail2ban")) ok("fail2ban đang chạy");
   else if (commandExists("fail2ban-client")) {
@@ -641,7 +653,7 @@ export async function cmdCheck(opts: CheckOptions): Promise<void> {
   if (commandExists("ufw")) {
     const status = execCapture("ufw", ["status"]).stdout;
     if (/Status: active/i.test(status)) ok("UFW đã cài và đang active");
-    else warn("UFW đã cài nhưng CHƯA active — chạy 'napp firewall sync' để bật (script sẽ tự thêm rule SSH trước khi bật để tránh khoá bạn ra ngoài).");
+    else warn("UFW đã cài nhưng CHƯA active — chạy 'napp firewall apply' để bật (script sẽ tự thêm rule SSH trước khi bật để tránh khoá bạn ra ngoài).");
   } else {
     findings.push({ name: "ufw", ok: false, message: "UFW chưa cài (khuyến nghị để giới hạn cổng mở).", fix: installUfw });
   }

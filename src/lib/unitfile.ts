@@ -218,7 +218,7 @@ function stamp(text: string, preserved: string[]): string {
 
 export interface WriteManagedUnitOptions {
   // Directive napp CỐ Ý đặt lại lần này vì cấu hình trong registry đã đổi
-  // (ví dụ `napp service set --run-as` đổi User/Group). Những tên này bỏ qua
+  // (ví dụ `napp service update --run-as` đổi User/Group). Những tên này bỏ qua
   // cơ chế giữ nguyên, và bị gỡ khỏi danh sách '# napp-preserve:'.
   authoritative?: string[];
 }

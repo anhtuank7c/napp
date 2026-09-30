@@ -25,7 +25,7 @@ import {
 } from "../lib/state";
 import { acquireLock } from "../lib/lock";
 import { resolveEngine, driverFor, unitEngine, type DbEngine } from "../lib/db";
-import { mergeEnvFile } from "../lib/envfile";
+import { mergeEnvFile, removeEnvKeys, printEnvFile } from "../lib/envfile";
 import { unitWorkDir } from "../templates/systemd";
 import { detectHardware } from "../lib/hardware";
 import { serviceMemoryHighMB } from "../templates/tuning";
@@ -100,7 +100,7 @@ function assertServiceAbsent(name: string, user: string, borrowedUser: boolean):
     die(
       `Background service '${name}' (hoặc tài nguyên cùng tên) ĐÃ TỒN TẠI — không tạo trùng.\n` +
         conflicts.map((c) => `  - ${c}`).join("\n") +
-        `\n  Muốn tạo lại? Hãy xoá trước bằng: napp service remove ${name}`
+        `\n  Muốn tạo lại? Hãy xoá trước bằng: napp service delete ${name}`
     );
   }
 }
@@ -647,13 +647,13 @@ export async function cmdServiceRemove(name: string, opts: ServiceRemoveOptions)
           driverFor(unitEngine(svc)).drop(svc.dbName, svc.dbUser);
           ok(`Đã xoá database '${svc.dbName}'.`);
         } catch (e) {
-          warn(`Không xoá được database '${svc.dbName}' (${(e as Error).message}). Hãy tự xoá sau bằng 'napp db drop ${svc.dbName} --engine ${unitEngine(svc)} --yes --user ${svc.dbUser ?? svc.dbName}'.`);
+          warn(`Không xoá được database '${svc.dbName}' (${(e as Error).message}). Hãy tự xoá sau bằng 'napp db delete ${svc.dbName} --engine ${unitEngine(svc)} --yes --user ${svc.dbUser ?? svc.dbName}'.`);
         }
       } else {
         info("Service không có database riêng — bỏ qua.");
       }
     } else if (svc.dbName) {
-      info(`Giữ lại database '${svc.dbName}'. Muốn xoá sau: napp db drop ${svc.dbName} --engine ${unitEngine(svc)} --yes --user ${svc.dbUser ?? svc.dbName}`);
+      info(`Giữ lại database '${svc.dbName}'. Muốn xoá sau: napp db delete ${svc.dbName} --engine ${unitEngine(svc)} --yes --user ${svc.dbUser ?? svc.dbName}`);
     }
 
     removeServiceFromState(name);
@@ -751,4 +751,50 @@ export function cmdServiceEnvSet(name: string, pairs: string[]): void {
   runCmd("chown", [`${svc.user}:${svc.user}`, svcEnv]);
   runCmd("chmod", ["600", svcEnv]);
   ok(`Đã cập nhật .env cho service '${name}'. Chạy 'napp service restart ${name}' để áp dụng.`);
+}
+
+export function cmdServiceEnvList(name: string, opts: { reveal: boolean }): void {
+  requireRoot();
+  validateServiceName(name);
+  const svc = requireService(name);
+  const svcEnv = `${unitWorkDir(svc.workDir, svc.appDir)}/.env`;
+  section(`.env của service '${name}' (${svcEnv})`);
+  printEnvFile(svcEnv, opts.reveal);
+}
+
+export function cmdServiceEnvUnset(name: string, keys: string[]): void {
+  requireRoot();
+  validateServiceName(name);
+  const svc = requireService(name);
+  for (const k of keys) validateEnvKey(k);
+  const svcEnv = `${unitWorkDir(svc.workDir, svc.appDir)}/.env`;
+  const removed = removeEnvKeys(svcEnv, keys, 0o600);
+  const missing = keys.filter((k) => !removed.includes(k));
+  if (missing.length > 0) warn(`Không có trong .env: ${missing.join(", ")}`);
+  if (removed.length === 0) return;
+  runCmd("chown", [`${svc.user}:${svc.user}`, svcEnv]);
+  ok(`Đã xoá ${removed.join(", ")} khỏi .env của service '${name}'. Chạy 'napp service restart ${name}' để áp dụng.`);
+}
+
+export function cmdServiceShow(name: string): void {
+  validateServiceName(name);
+  const svc = requireService(name);
+  const unit = svcSystemdName(name);
+  const running = execCapture("systemctl", ["is-active", "--quiet", unit]).code === 0;
+  section(`Service ${name}`);
+  const rows: [string, string | undefined][] = [
+    ["Trạng thái", running ? "đang chạy" : "ĐÃ DỪNG"],
+    ["Mã nguồn", svc.workDir + (svc.appDir ? ` (worker ở ${svc.appDir})` : "")],
+    ["Repo", svc.repoUrl ? `${svc.repoUrl} @ ${svc.branch}` : "- (worker mẫu)"],
+    ["Chạy bằng", `${svc.user}${svc.runAsUnit ? ` (mượn của '${svc.runAsUnit}')` : ""} · systemd ${unit}`],
+    ["Ghi thêm vào", svc.writePaths?.length ? svc.writePaths.join(", ") : "-"],
+    ["Cổng nội bộ", svc.port !== undefined ? `127.0.0.1:${svc.port}` : "-"],
+    ["Runtime", `${svc.nodeRuntime} · ${svc.packageManager ?? "npm"}`],
+    ["Lệnh", `install: ${svc.installCmd} · build: ${svc.buildCmd || "-"} · start: ${svc.startCmd}`],
+    ["Database", svc.dbName ? `${driverFor(unitEngine(svc)).label} '${svc.dbName}' (user ${svc.dbUser ?? svc.dbName})` : "-"],
+    ["Redis DB", svc.redisDbIndex !== undefined ? `#${svc.redisDbIndex}` : "-"],
+    ["Leak guard", svc.leakGuard ? "bật" : undefined],
+    ["Tạo lúc", svc.createdAt],
+  ];
+  for (const [k, v] of rows) if (v !== undefined) console.log(`  ${k.padEnd(14)}: ${v}`);
 }

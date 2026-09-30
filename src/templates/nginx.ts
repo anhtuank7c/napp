@@ -16,7 +16,7 @@ export const NGINX_PROXY_CONF = "/etc/nginx/conf.d/00-napp-proxy.conf";
 // khi cấp chứng chỉ, nên render lại vhost là XOÁ HTTPS của site đang chạy. Tách
 // ra file riêng thì đổi cấu hình về sau chỉ là ghi đè MỘT file mà napp sở hữu
 // trọn vẹn — không cần chạm vào vhost lần nào nữa, không có gì của certbot để
-// làm hỏng. Đây cũng là lý do `napp nginx sync` chỉ dám vá bằng thay chuỗi.
+// làm hỏng. Đây cũng là lý do `napp nginx apply` chỉ dám vá bằng thay chuỗi.
 export const NGINX_LOCATIONS_DIR = "/etc/nginx/napp-locations";
 
 export function appLocationsPath(domain: string): string {
@@ -44,7 +44,7 @@ export const NGINX_SCANNER_LOG_FORMAT = "napp_scan";
 // WebSocket THẬT SỰ. Tên có tiền tố napp_ để không đụng map $connection_upgrade
 // mà người dùng có thể đã tự khai báo ở nơi khác (trùng tên -> nginx báo lỗi).
 export function renderNappProxyConf(): string {
-  return `# Managed by napp — TỰ ĐỘNG SINH RA, đừng sửa tay (chạy \`napp nginx sync\` để cập nhật).
+  return `# Managed by napp — TỰ ĐỘNG SINH RA, đừng sửa tay (chạy \`napp nginx apply\` để cập nhật).
 # Quyết định giá trị header 'Connection' gửi lên upstream:
 #   - Request WebSocket (có Upgrade: websocket) -> 'Connection: upgrade'
 #   - Request HTTP thường (Upgrade rỗng)        -> Connection RỖNG
@@ -91,7 +91,7 @@ proxy_busy_buffers_size 256k;
 
 // Cấu hình hardening ở mức http (áp cho toàn nginx).
 export function renderNginxHardeningConf(): string {
-  return `# Managed by napp — hardening nginx (chạy \`napp nginx harden\`).
+  return `# Managed by napp — hardening nginx (chạy \`napp nginx hardening enable\`).
 # Ẩn phiên bản nginx trong header/response lỗi để đỡ lộ thông tin cho kẻ dò quét.
 server_tokens off;
 `;
@@ -132,7 +132,7 @@ export function renderDefaultServerConf(opts: DefaultServerOptions): string {
 }`;
 
   return `# Managed by napp — CHẶN request không khớp domain (truy cập thẳng IP, Host lạ).
-# TỰ SINH bởi \`napp nginx harden\`; gỡ bằng \`napp nginx unharden\`. ĐỪNG sửa tay.
+# TỰ SINH bởi \`napp nginx hardening enable\`; gỡ bằng \`napp nginx hardening disable\`. ĐỪNG sửa tay.
 server {
     listen 80 default_server;${v6_80}
     server_name _;
@@ -149,7 +149,7 @@ ${block443}
 // của Cloudflare edge, không phải IP người dùng thật.
 export function renderCloudflareRealIpSnippet(ipv4: string[], ipv6: string[]): string {
   const lines: string[] = [
-    "# Managed by napp — TỰ ĐỘNG SINH RA, đừng sửa tay (chạy `napp cloudflare sync` để cập nhật).",
+    "# Managed by napp — TỰ ĐỘNG SINH RA, đừng sửa tay (chạy `napp cloudflare apply` để cập nhật).",
     "# Khôi phục IP client thật khi request đi qua Cloudflare proxy.",
     "# Nếu server KHÔNG dùng Cloudflare proxy cho một site nào đó, đơn giản là",
     "# request sẽ không đến từ các dải IP này nên $remote_addr giữ nguyên IP gốc.",
@@ -196,7 +196,7 @@ export interface NginxAppOptions {
 // 'location ~ /\.(?!well-known).* { deny all; }'. Thêm luật thứ hai ở đây thì
 // kết quả phụ thuộc vào luật nào được KHAI BÁO TRƯỚC (nginx chọn location regex
 // theo THỨ TỰ KHAI BÁO) — mà vị trí dòng include lại khác nhau giữa vhost tạo
-// mới (include nằm trước) và vhost cũ được vá bằng `napp nginx sync` (include
+// mới (include nằm trước) và vhost cũ được vá bằng `napp nginx apply` (include
 // chèn ở cuối khối server). Một luật đổi hành vi theo TUỔI của vhost là thứ
 // không ai lần ra nổi về sau.
 //
@@ -259,8 +259,8 @@ const SCANNER_PATTERNS: { re: string; why: string }[] = [
 export function renderScannerBlockConf(enabled: boolean): string {
   const header =
     `# Managed by napp — chặn quét lỗ hổng (CMS/framework PHP). TỰ SINH, đừng sửa tay.\n` +
-    `#   Bật : napp nginx scanblock      Tắt: napp nginx unscanblock\n` +
-    `#   Một site cụ thể: napp app set <domain> --no-scan-block\n` +
+    `#   Bật : napp nginx scan-block enable      Tắt: napp nginx scan-block disable\n` +
+    `#   Một site cụ thể: napp app update <domain> --no-scan-block\n` +
     `# File này được MỌI vhost napp quản lý include (một dòng trong <domain>.conf).\n`;
 
   if (!enabled) {
@@ -288,7 +288,7 @@ export function renderScannerBlockConf(enabled: boolean): string {
 # 444 = đóng kết nối, không gửi gì cả (không lộ thông tin, không tốn băng thông).
 # Request bị chặn ghi vào ${NGINX_SCANNER_LOG} — mọi dòng trong đó
 # chắc chắn là scanner, nên jail 'napp-scanner' của fail2ban ban được rất chặt
-# mà không sợ ban nhầm. Xem: napp fail2ban setup
+# mà không sợ ban nhầm. Xem: napp fail2ban apply
 ${blocks}
 `;
 }
@@ -296,7 +296,7 @@ ${blocks}
 /**
  * Các `location` riêng của một app, để vhost `include` vào.
  *
- * Tách khỏi `renderAppNginxConf` để `app create` và `app set` dùng CHUNG một
+ * Tách khỏi `renderAppNginxConf` để `app create` và `app update` dùng CHUNG một
  * nguồn: nếu mỗi bên tự dựng lấy thì cấu hình của app tạo mới và app sửa sau sẽ
  * trôi khỏi nhau mà không ai phát hiện.
  *
@@ -497,14 +497,14 @@ ${hotlinkBlock}
   // bao giờ trỏ vào file không tồn tại.
   // Chặn quét lỗ hổng — MỘT dòng include trỏ vào file DÙNG CHUNG, để danh sách
   // mẫu chỉ tồn tại ở đúng một chỗ trên máy. Bỏ dòng này cho riêng một site
-  // bằng 'napp app set <domain> --no-scan-block' (vd site thật sự có phục vụ
+  // bằng 'napp app update <domain> --no-scan-block' (vd site thật sự có phục vụ
   // file .php qua một upstream khác, hoặc đang migrate từ WordPress sang).
   //
   // Đặt TRƯỚC customInclude: nginx chọn location regex theo THỨ TỰ KHAI BÁO, nên
   // luật của napp phải đứng trước luật người dùng tự viết mới thắng được.
   const scannerInclude =
     app.scanBlock === false
-      ? `\n    # Chặn quét lỗ hổng: ĐÃ TẮT cho site này (napp app set ${app.domain} --scan-block để bật lại).\n`
+      ? `\n    # Chặn quét lỗ hổng: ĐÃ TẮT cho site này (napp app update ${app.domain} --scan-block để bật lại).\n`
       : `\n    # Chặn quét lỗ hổng (wp-admin, .php, phpmyadmin... -> 444, log riêng).\n` +
         `    # Danh sách mẫu dùng chung cho mọi site, sửa một chỗ: ${NGINX_SCANNER_BLOCK_CONF}\n` +
         `    include ${NGINX_SCANNER_BLOCK_CONF};\n`;
@@ -512,17 +512,17 @@ ${hotlinkBlock}
   const customInclude =
     `\n    # Location do BẠN viết. napp KHÔNG BAO GIỜ ghi đè file dưới đây — đặt\n` +
     `    # location riêng vào đó thay vì sửa file này (file này bị render lại\n` +
-    `    # mỗi lần 'napp app set' / 'napp domain add' chạy).\n` +
+    `    # mỗi lần 'napp app update' / 'napp app alias create' chạy).\n` +
     `    include ${appCustomLocationsPath(app.domain)};\n`;
 
   const out = `${staticBlock}${aliasBlock}${uploadBlock}`;
   return out.trim().length === 0
     ? `# Managed by napp — site: ${app.domain}\n# Chưa bật tuỳ chọn nào (--static-root / --static-alias / --upload-dir). File giữ lại vì vhost include nó.\n${scannerInclude}${customInclude}`
-    : `# Managed by napp — location riêng của ${app.domain}. TỰ SINH, đừng sửa tay.\n# Cập nhật bằng: napp app set ${app.domain} ...\n${out}${scannerInclude}${customInclude}`;
+    : `# Managed by napp — location riêng của ${app.domain}. TỰ SINH, đừng sửa tay.\n# Cập nhật bằng: napp app update ${app.domain} ...\n${out}${scannerInclude}${customInclude}`;
 }
 
 // Vhost reverse-proxy CHỈ HTTP (giống lara.sh: certbot sẽ tự sửa file này để
-// thêm khối SSL khi 'napp cert issue' chạy `certbot --nginx`).
+// thêm khối SSL khi 'napp cert create' chạy `certbot --nginx`).
 export function renderAppNginxConf(app: AppRecord, opts: NginxAppOptions = {}): string {
   const allNames = [app.domain, `www.${app.domain}`, ...app.aliasDomains, ...(opts.extraServerNames ?? [])];
   const serverNames = Array.from(new Set(allNames)).join(" ");
@@ -535,7 +535,7 @@ export function renderAppNginxConf(app: AppRecord, opts: NginxAppOptions = {}): 
   const ipv6Line = opts.ipv6 === false ? "" : "\n    listen [::]:80;";
 
   return `# Managed by napp — site: ${app.domain}
-# Chỉ HTTP. Chạy 'napp cert issue ${app.domain}' để thêm HTTPS (certbot tự sửa file này).
+# Chỉ HTTP. Chạy 'napp cert create ${app.domain}' để thêm HTTPS (certbot tự sửa file này).
 upstream napp_${sanitizeUpstreamName(app.domain)} {
     server 127.0.0.1:${app.port};
     keepalive 32;
@@ -557,7 +557,7 @@ server {
     # Location riêng của app (asset build / file tải lên / chặn hotlink).
     # Nằm ở file riêng để đổi cấu hình về sau KHÔNG phải render lại vhost này —
     # certbot chèn khối SSL vào đây, render lại là mất HTTPS. Sửa bằng:
-    #   napp app set ${app.domain} --static-root ... --upload-dir ...
+    #   napp app update ${app.domain} --static-root ... --upload-dir ...
     include ${appLocationsPath(app.domain)};
     location = /favicon.ico { access_log off; log_not_found off; }
     location = /robots.txt  { access_log off; log_not_found off; }

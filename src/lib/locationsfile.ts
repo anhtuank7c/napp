@@ -17,7 +17,7 @@ import {
  * BỐI CẢNH — vì sao cần hàm này:
  *
  * File '/etc/nginx/napp-locations/<domain>.conf' được render lại TOÀN BỘ từ
- * registry ở BA chỗ khác nhau: 'app create', 'app set', và 'domain add/remove'.
+ * registry ở BA chỗ khác nhau: 'app create', 'app update', và 'app alias create/delete'.
  * Đầu file ghi "TỰ SINH, đừng sửa tay", nhưng nó đồng thời là chỗ DUY NHẤT
  * người dùng có thể đặt location riêng — nên ai cần một location napp chưa hỗ
  * trợ đều buộc phải sửa vào đây. Lần chạy kế tiếp của bất kỳ lệnh nào trong ba
@@ -66,8 +66,8 @@ export function ensureCustomLocationsFile(domain: string): void {
     path,
     `# Location RIÊNG của bạn cho ${domain} — napp KHÔNG BAO GIỜ ghi đè file này.\n` +
       `#\n` +
-      `# File '<domain>.conf' bên cạnh là file TỰ SINH: 'napp app set' và\n` +
-      `# 'napp domain add' render lại toàn bộ nó từ registry, nên mọi thứ bạn thêm\n` +
+      `# File '<domain>.conf' bên cạnh là file TỰ SINH: 'napp app update' và\n` +
+      `# 'napp app alias create' render lại toàn bộ nó từ registry, nên mọi thứ bạn thêm\n` +
       `# vào đó sẽ biến mất. Đặt location riêng vào ĐÂY thì chúng tồn tại mãi.\n` +
       `#\n` +
       `# File này được include BÊN TRONG khối 'server' của vhost, nên viết thẳng\n` +
@@ -84,7 +84,7 @@ export function ensureCustomLocationsFile(domain: string): void {
  * được cấu hình và TẤT CẢ site trên máy tắt — chỉ vì vừa tạo thêm một app.
  *
  * Đặt ở đây, trong hàm DUY NHẤT từng ghi ra dòng include, thay vì bắt từng chỗ
- * gọi ('app create', 'app set', 'domain add/remove') nhớ gọi thêm một hàm nữa:
+ * gọi ('app create', 'app update', 'app alias create/delete') nhớ gọi thêm một hàm nữa:
  * chỗ gọi thứ tư quên là lại sập, mà lần đó sẽ không ai nối được với thay đổi
  * này nữa.
  *
@@ -122,7 +122,7 @@ export function writeAppLocationsConf(app: AppRecord): void {
         `${path}: ghi đè sẽ XOÁ ${lost.length} location đang phục vụ (${lost.join(" ")}).\n` +
           `  Bản sao đầy đủ của file cũ: ${bak}\n` +
           `  Nếu đó là location BẠN thêm tay: chuyển nó sang ${appCustomLocationsPath(app.domain)} — napp không bao giờ ghi đè file đó.\n` +
-          `  Nếu đó là cấu hình napp (vd '/uploads/'): khai báo lại bằng 'napp app set ${app.domain} --upload-dir <thư-mục>' để nó nằm trong registry.`
+          `  Nếu đó là cấu hình napp (vd '/uploads/'): khai báo lại bằng 'napp app update ${app.domain} --upload-dir <thư-mục>' để nó nằm trong registry.`
       );
     }
   }
@@ -130,7 +130,7 @@ export function writeAppLocationsConf(app: AppRecord): void {
   writeFile(path, rendered, 0o644);
 }
 
-// Nằm ở lib chứ không ở commands/app.ts vì cả `napp app set` lẫn `napp nginx sync`
+// Nằm ở lib chứ không ở commands/app.ts vì cả `napp app update` lẫn `napp nginx apply`
 // đều cần nó (sync dùng để vá vhost của app tạo bằng bản napp cũ, chưa hề có dòng
 // include nào), mà commands/app.ts đã import commands/nginx.ts — để hàm ở đó là
 // tạo ra một vòng import giữa hai file lệnh.

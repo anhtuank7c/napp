@@ -36,6 +36,34 @@ function needsQuote(v: string): boolean {
 // Merge idempotent: đọc .env hiện có (nếu có), GHI ĐÈ các key được truyền
 // vào, giữ nguyên các key khác. Dùng khi tạo app (--db/--redis) và khi
 // 'napp app env set' cập nhật biến môi trường.
+/** Xoá các key khỏi .env, giữ nguyên các key khác. Trả về các key thật sự đã có để xoá. */
+export function removeEnvKeys(path: string, keys: string[], mode = 0o600): string[] {
+  const current = parseEnvFile(path);
+  const removed = keys.filter((k) => k in current);
+  for (const k of removed) delete current[k];
+  if (removed.length > 0) writeFile(path, serializeEnv(current), mode);
+  return removed;
+}
+
+// Giá trị có vẻ là bí mật — che khi liệt kê (xem '... env list --reveal').
+const SECRET_KEY = /PASS|SECRET|TOKEN|PRIVATE|CREDENTIAL|API_?KEY|_KEY$|^KEY$|DATABASE_URL|_URI$|_URL$|DSN/i;
+
+/** In .env dạng KEY=VALUE, che giá trị bí mật trừ khi reveal. */
+export function printEnvFile(path: string, reveal: boolean): void {
+  const vars = parseEnvFile(path);
+  const keys = Object.keys(vars).sort();
+  if (keys.length === 0) {
+    console.log(`  (trống — ${path})`);
+    return;
+  }
+  for (const k of keys) {
+    const v = vars[k]!;
+    const masked = !reveal && SECRET_KEY.test(k) && v.length > 0 ? `****** (${v.length} ký tự)` : v;
+    console.log(`  ${k}=${masked}`);
+  }
+  if (!reveal && keys.some((k) => SECRET_KEY.test(k))) console.log("\n  (giá trị bí mật đã che — thêm --reveal để xem)");
+}
+
 export function mergeEnvFile(path: string, updates: Record<string, string>, mode = 0o600): void {
   const current = parseEnvFile(path);
   const merged = { ...current, ...updates };

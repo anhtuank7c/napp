@@ -262,7 +262,7 @@ Description=napp Cloudflare IP sync (nginx real-IP)
 
 [Service]
 Type=oneshot
-ExecStart=${binPath} cloudflare sync --quiet
+ExecStart=${binPath} cloudflare apply --quiet
 `;
 }
 

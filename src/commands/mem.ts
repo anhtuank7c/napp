@@ -2,6 +2,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { execCapture, runCmd, requireRoot, writeFile, ensureDir, commandExists } from "../lib/exec";
 import { info, ok, warn, die, section, colorText } from "../lib/log";
 import { writeManagedUnit } from "../lib/unitfile";
+import { showTimer } from "../lib/timer";
 import { loadState, upsertApp, upsertService, SYSTEMD_DIR } from "../lib/state";
 import { writeAppUnit, writeServiceUnit, currentHeapPlan } from "./app";
 import { renderMemwatchService, renderMemwatchTimer, unitWorkDir } from "../templates/systemd";
@@ -66,7 +67,7 @@ export function cmdMemStatus(): void {
   reportFindings(units, samples);
 }
 
-/** Phần kết luận + gợi ý hành động, dùng chung cho 'mem status' và 'mem trend'. */
+/** Phần kết luận + gợi ý hành động, dùng chung cho 'mem show' và 'mem show --trend'. */
 function reportFindings(units: UnitRef[], samples: ReturnType<typeof readSamples>): void {
   console.log();
   const leaks: Trend[] = [];
@@ -107,14 +108,14 @@ function reportFindings(units: UnitRef[], samples: ReturnType<typeof readSamples
     ok("Không thấy dấu hiệu rò rỉ bộ nhớ.");
   }
   if (samples.length === 0) {
-    info(`Chưa có dữ liệu xu hướng. Bật lấy mẫu định kỳ: sudo napp mem watch`);
+    info(`Chưa có dữ liệu xu hướng. Bật lấy mẫu định kỳ: sudo napp mem watch enable`);
   }
 }
 
 export function cmdMemTrend(): void {
   const samples = readSamples();
   if (samples.length === 0) {
-    info(`Chưa có mẫu nào ở ${MEMWATCH_LOG}. Bật lấy mẫu định kỳ: sudo napp mem watch`);
+    info(`Chưa có mẫu nào ở ${MEMWATCH_LOG}. Bật lấy mẫu định kỳ: sudo napp mem watch enable`);
     return;
   }
   section(`Xu hướng bộ nhớ (${samples.length} mẫu)`);
@@ -162,7 +163,7 @@ export function cmdMemWatch(opts: { interval: number }): void {
   takeSample();
   ok(`Đã bật lấy mẫu bộ nhớ mỗi ${opts.interval} phút (${onCalendar}).`);
   info(`• Dữ liệu: ${MEMWATCH_LOG} (tự giữ 20000 mẫu gần nhất, không cần logrotate)`);
-  info(`• Xem kết quả: napp mem trend — cần ÍT NHẤT 6 giờ dữ liệu mới kết luận được gì`);
+  info(`• Xem kết quả: napp mem show --trend — cần ÍT NHẤT 6 giờ dữ liệu mới kết luận được gì`);
   info(`• Lịch chạy: systemctl list-timers ${MEMWATCH_TIMER_NAME}.timer`);
 }
 
@@ -241,7 +242,7 @@ export async function cmdMemSnapshot(id: string, opts: { yes?: boolean } = {}): 
         `  Gửi SIGUSR2 lúc này sẽ GIẾT tiến trình (hành vi mặc định), nên napp dừng lại ở đây.\n` +
         `  NODE_OPTIONS đang có hiệu lực: ${nodeOpts || "(rỗng)"}\n` +
         `  Bật rồi khởi động lại app:\n` +
-        `    sudo napp app set ${id} --leak-guard      (hoặc: napp service set ${id} --leak-guard)\n` +
+        `    sudo napp app update ${id} --leak-guard      (hoặc: napp service update ${id} --leak-guard)\n` +
         `  Nếu bạn ĐÃ bật mà vẫn thấy dòng này: '.env' của app đang đặt NODE_OPTIONS và ghi đè cấu hình của napp\n` +
         `  (napp cố ý đặt NODE_OPTIONS TRƯỚC EnvironmentFile để bạn ghi đè được).`
     );
@@ -326,8 +327,8 @@ export async function cmdMemSnapshot(id: string, opts: { yes?: boolean } = {}): 
 /**
  * Bật/tắt hai cờ chẩn đoán rò rỉ của Node cho MỘT đơn vị.
  *
- * Tách khỏi 'app set' có chủ đích: đổi NODE_OPTIONS bắt buộc phải RESTART tiến
- * trình (Node chỉ đọc biến này lúc khởi động), mà 'app set' là lệnh sửa cấu hình
+ * Tách khỏi 'app update' có chủ đích: đổi NODE_OPTIONS bắt buộc phải RESTART tiến
+ * trình (Node chỉ đọc biến này lúc khởi động), mà 'app update' là lệnh sửa cấu hình
  * nginx và người dùng không chờ đợi nó làm app gián đoạn.
  */
 export function cmdMemGuard(id: string, on: boolean): void {
@@ -341,7 +342,7 @@ export function cmdMemGuard(id: string, on: boolean): void {
   if (runtime !== "node") {
     die(
       `'${id}' chạy bằng ${runtime}, không phải node. Hai cờ này là của V8 — bun dùng JavaScriptCore nên không hiểu.\n` +
-        `  Với bun, hãy theo dõi bằng 'napp mem trend' (đo ở tầng cgroup nên runtime nào cũng được).`
+        `  Với bun, hãy theo dõi bằng 'napp mem show --trend' (đo ở tầng cgroup nên runtime nào cũng được).`
     );
   }
   if (((app ?? svc)!.leakGuard ?? false) === on) {
@@ -375,10 +376,14 @@ export function cmdMemGuard(id: string, on: boolean): void {
   warn(
     `File snapshot lớn khoảng GẤP ĐÔI heap và Node luôn ghi vào THƯ MỤC LÀM VIỆC của app (không đổi được chỗ).\n` +
       `  App rò rỉ tới trần 2 GB sẽ để lại một file ~4 GB ngay trong cây mã nguồn, và mất VÀI PHÚT để ghi\n` +
-      `  (đo thực tế: heap 96 MB mất 176 giây). Theo dõi chỗ trống — 'napp mem status' sẽ báo khi thấy file sót lại.`
+      `  (đo thực tế: heap 96 MB mất 176 giây). Theo dõi chỗ trống — 'napp mem show' sẽ báo khi thấy file sót lại.`
   );
   info(
     `Lưu ý: '--heapsnapshot-near-heap-limit' chụp khi SẮP chạm trần, và app thường VẪN CHẠY TIẾP sau đó ` +
       `(V8 gom rác rồi đi tiếp) — nên có file snapshot không đồng nghĩa app đã chết.`
   );
+}
+
+export function cmdMemWatchShow(): void {
+  showTimer("Lấy mẫu bộ nhớ định kỳ", MEMWATCH_TIMER_NAME, "sudo napp mem watch enable --interval 15");
 }

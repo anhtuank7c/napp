@@ -167,7 +167,7 @@ ok "Đã cài napp vào $INSTALL_PATH"
 # được — lựa chọn đi bằng biến NAPP_DB. Không đặt -> 'napp check --fix' sẽ hỏi
 # (hoặc dùng MariaDB nếu chạy với --yes).
 if [[ -n "${NAPP_DB:-}" ]]; then
-  "$INSTALL_PATH" db engine select "$NAPP_DB" || warn "NAPP_DB='$NAPP_DB' không hợp lệ — bỏ qua (chọn lại sau: sudo napp check --fix --db <engine>)."
+  "$INSTALL_PATH" db engine set "$NAPP_DB" || warn "NAPP_DB='$NAPP_DB' không hợp lệ — bỏ qua (chọn lại sau: sudo napp check --fix --db <engine>)."
 fi
 
 echo

@@ -16,6 +16,24 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.28.0
+- NGỮ PHÁP LỆNH THỐNG NHẤT, như REST API:
+    napp <resource> [<sub-resource>] <verb> [<id>] [--flags]
+  Động từ cố định: list · show · create · update · delete · set/unset ·
+  enable/disable (MỌI công tắc) · apply. Hành động riêng: deploy start stop
+  restart logs · renew · flush · snapshot sample · unban.
+- Cờ: -y/--yes ở mọi lệnh; --force chỉ để vượt từ chối an toàn; --db chỉ còn
+  nghĩa "tạo database" — xoá kèm database là --database; --keep -> --keep-count.
+- Tài nguyên con: app alias (thay 'domain'), app/service env list|set|unset,
+  redis db list|flush, 'db backup' -> 'backup create --database'.
+- Mới: app show, service show, env list [--reveal], env unset, và 'show' cho
+  mọi công tắc (backup/cloudflare schedule, mem watch, nginx hardening/scan-block).
+- TÊN CŨ VẪN CHẠY (ẩn, nhắc tên mới khi gõ trong terminal), bỏ ở 2.0 — trừ
+  'backup run', 'cloudflare sync', 'mem sample' (unit systemd trên server gọi
+  đúng tên này) là VĨNH VIỄN. Bảng đối chiếu: README, mục "Tên lệnh trước 1.28".
+- Cố ý đổi: 'backup schedule' / 'cloudflare schedule' / 'mem watch' gõ KHÔNG
+  kèm gì nay dừng và in lệnh con thay vì âm thầm bật timer.
+
 ## 1.27.0
 - MỚI: TỰ CHỌN DATABASE ENGINE — MariaDB (mặc định), MySQL, PostgreSQL, MongoDB;
   cài một, vài, hoặc KHÔNG cài gì. Chưa từng chọn = MariaDB như trước, nên nâng

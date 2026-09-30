@@ -60,9 +60,9 @@ export function cmdDbEngineList(): void {
   if (def) info(`* = engine mặc định cho '--db' không kèm tên.`);
   const unmanaged = installedEngines().filter((e) => !selected.has(e));
   if (unmanaged.length > 0) {
-    info(`Đã cài nhưng napp không quản lý (không tune, không backup, không tự cài lại): ${unmanaged.join(", ")}. Nhận quản lý: napp db engine add <engine>`);
+    info(`Đã cài nhưng napp không quản lý (không tune, không backup, không tự cài lại): ${unmanaged.join(", ")}. Nhận quản lý: napp db engine create <engine>`);
   }
-  info("Thêm: napp db engine add <engine> · Gỡ: napp db engine remove <engine> · Hỗ trợ: " + DB_ENGINES.join(", "));
+  info("Thêm: napp db engine create <engine> · Gỡ: napp db engine delete <engine> · Hỗ trợ: " + DB_ENGINES.join(", "));
 }
 
 // Sau khi tập engine đổi, phần RAM của database được chia lại (và heap Node đổi
@@ -138,7 +138,7 @@ export async function cmdDbEngineRemove(raw: string, opts: { purge: boolean; for
     die(
       `Không gỡ ${d.label}: còn ${users.length} đơn vị đang dùng database của nó:\n` +
         users.map((u) => `  - ${u}`).join("\n") +
-        `\n  Gỡ các đơn vị đó trước (napp app remove <domain> --database / napp service remove <name> --database).`
+        `\n  Gỡ các đơn vị đó trước (napp app delete <domain> --database / napp service delete <name> --database).`
     );
   }
 
@@ -199,7 +199,7 @@ export async function cmdDbEngineRemove(raw: string, opts: { purge: boolean; for
 export function cmdDbEngineDefault(raw: string): void {
   requireRoot();
   const engine = parseEngine(raw);
-  if (!selectedEngines().includes(engine)) die(`${engine} chưa nằm trong các engine napp quản lý. Thêm trước: napp db engine add ${engine}`);
+  if (!selectedEngines().includes(engine)) die(`${engine} chưa nằm trong các engine napp quản lý. Thêm trước: napp db engine create ${engine}`);
   const s = loadState();
   s.dbEngines ??= selectedEngines();
   s.defaultDbEngine = engine;

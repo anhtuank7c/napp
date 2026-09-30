@@ -19,7 +19,7 @@ const SYSTEM_DBS = new Set(["information_schema", "performance_schema", "mysql",
 export function mysqlBin(): string {
   if (commandExists("mysql")) return "mysql";
   if (commandExists("mariadb")) return "mariadb";
-  die("Không tìm thấy mysql/mariadb client. Chạy 'napp db engine add mariadb' (hoặc mysql) để cài.");
+  die("Không tìm thấy mysql/mariadb client. Chạy 'napp db engine create mariadb' (hoặc mysql) để cài.");
 }
 
 function hasClient(): boolean {

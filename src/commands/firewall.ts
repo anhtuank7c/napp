@@ -26,7 +26,7 @@ function detectSshPort(): number {
 export interface FirewallSyncOptions {
   sshPort?: number;
   // MẶC ĐỊNH false: mở 80/443 cho mọi IP. Việc lấy IP client thật (khi qua
-  // Cloudflare proxy) do nginx đảm nhiệm qua `napp cloudflare sync` — KHÔNG
+  // Cloudflare proxy) do nginx đảm nhiệm qua `napp cloudflare apply` — KHÔNG
   // liên quan tới tường lửa. Đặt true (opt-in, nâng cao) nếu muốn khoá origin
   // chỉ nhận traffic từ dải IP Cloudflare (chống bypass thẳng vào origin IP).
   restrictToCloudflare: boolean;
@@ -65,7 +65,7 @@ export async function cmdFirewallSync(opts: FirewallSyncOptions): Promise<void> 
   }
 
   // Xoá các rule "Cloudflare"/"napp" cũ trước khi thêm lại (idempotent) —
-  // tránh rule chồng chất qua nhiều lần chạy `napp firewall sync`.
+  // tránh rule chồng chất qua nhiều lần chạy `napp firewall apply`.
   const statusNumbered = execCapture("ufw", ["status", "numbered"]).stdout;
   const oldRuleNumbers = statusNumbered
     .split("\n")
@@ -94,12 +94,12 @@ export async function cmdFirewallSync(opts: FirewallSyncOptions): Promise<void> 
     ok(`(Nâng cao) Đã khoá origin: 80/443 CHỈ nhận từ ${ips.length} dải IP Cloudflare.`);
     warn(
       "Chế độ khoá origin này KHÔNG cần cho việc lấy IP client thật (đó là việc của nginx real-IP qua " +
-        "`napp cloudflare sync`). Chỉ bật nếu muốn chống bypass thẳng vào origin IP, VÀ mọi domain đều bật proxy " +
+        "`napp cloudflare apply`). Chỉ bật nếu muốn chống bypass thẳng vào origin IP, VÀ mọi domain đều bật proxy " +
         "(orange cloud) trên Cloudflare — domain nào không qua proxy sẽ bị chặn."
     );
   } else {
     runCmd("ufw", ["allow", "80,443/tcp", "comment", "napp: HTTP/HTTPS"]);
-    log("80/443 mở cho mọi IP. IP client thật do nginx khôi phục qua `napp cloudflare sync` (real-IP từ header CF-Connecting-IP).");
+    log("80/443 mở cho mọi IP. IP client thật do nginx khôi phục qua `napp cloudflare apply` (real-IP từ header CF-Connecting-IP).");
   }
 
   for (const p of opts.extraPorts) {

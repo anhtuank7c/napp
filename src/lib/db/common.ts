@@ -118,7 +118,7 @@ export function preflightInstall(label: string, port: number, dataDir: string, m
         `  Cài tiếp thì ${label} sẽ không khởi động được.\n` +
         (docker
           ? `  Đây là một container Docker publish cổng ${port} — dừng container đó, hoặc đổi cổng publish của nó (vd -p 127.0.0.1:${port + 1}:${port}).`
-          : `  Kiểm tra: sudo ss -ltnp | grep :${port} — nếu đó là một ${label} cài tay, nhận quản lý thay vì cài mới (napp db engine add <engine>).`)
+          : `  Kiểm tra: sudo ss -ltnp | grep :${port} — nếu đó là một ${label} cài tay, nhận quản lý thay vì cài mới (napp db engine create <engine>).`)
     );
   }
 

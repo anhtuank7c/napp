@@ -60,7 +60,7 @@ export function validateEngineSet(engines: DbEngine[]): void {
   if (engines.includes("mariadb") && engines.includes("mysql")) {
     die(
       "MariaDB và MySQL KHÔNG thể cài cùng lúc (gói apt xung đột, cùng cổng 3306 và cùng thư mục dữ liệu /var/lib/mysql).\n" +
-        "  Chọn một trong hai. Muốn chuyển hẳn: backup, 'napp db engine remove <cũ>', rồi 'napp db engine add <mới>' và import lại."
+        "  Chọn một trong hai. Muốn chuyển hẳn: backup, 'napp db engine delete <cũ>', rồi 'napp db engine create <mới>' và import lại."
     );
   }
 }
@@ -152,7 +152,7 @@ export function resolveEngine(requested?: string | boolean): DbEngine {
   if (typeof requested === "string" && requested.length > 0) {
     const e = parseEngine(requested);
     if (!execState.dryRun && !DRIVERS[e].isInstalled()) {
-      die(`${DRIVERS[e].label} chưa được cài. Cài bằng: sudo napp db engine add ${e}`);
+      die(`${DRIVERS[e].label} chưa được cài. Cài bằng: sudo napp db engine create ${e}`);
     }
     return e;
   }
@@ -162,10 +162,10 @@ export function resolveEngine(requested?: string | boolean): DbEngine {
   if (active.length === 1) return active[0]!;
   if (active.length === 0) {
     if (execState.dryRun) return def ?? selectedEngines()[0] ?? DEFAULT_DB_ENGINE;
-    die("Chưa có database engine nào được cài. Cài bằng: sudo napp db engine add mariadb (hoặc mysql, postgresql, mongodb).");
+    die("Chưa có database engine nào được cài. Cài bằng: sudo napp db engine create mariadb (hoặc mysql, postgresql, mongodb).");
   }
   die(
     `Máy đang có nhiều database engine (${active.join(", ")}) — hãy chỉ định rõ, vd '--db ${active[0]}' / '--engine ${active[0]}',\n` +
-      `  hoặc đặt engine mặc định: sudo napp db engine default ${active[0]}`
+      `  hoặc đặt engine mặc định: sudo napp db engine update ${active[0]} --default`
   );
 }

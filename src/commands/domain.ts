@@ -39,7 +39,7 @@ function regenerateNginxConf(domain: string): void {
   if (hadSsl) {
     warn(
       `Vhost vừa được render lại nên khối SSL do certbot chèn ĐÃ MẤT — site hiện chỉ còn HTTP.\n` +
-        `  Cấp lại ngay để khôi phục HTTPS:  napp cert issue ${domain}` +
+        `  Cấp lại ngay để khôi phục HTTPS:  napp cert create ${domain}` +
         (app.aliasDomains.length ? ` --extra ${app.aliasDomains.join(" --extra ")}` : "")
     );
   }
@@ -59,7 +59,7 @@ export function cmdDomainAdd(appDomain: string, alias: string): void {
   upsertApp(app);
   regenerateNginxConf(appDomain);
   ok(`Đã thêm domain phụ '${alias}' -> app '${appDomain}'.`);
-  info(`Nhớ trỏ DNS A của '${alias}' về server này, rồi chạy: napp cert issue ${appDomain} --extra ${alias}`);
+  info(`Nhớ trỏ DNS A của '${alias}' về server này, rồi chạy: napp cert create ${appDomain} --extra ${alias}`);
 }
 
 export function cmdDomainRemove(appDomain: string, alias: string): void {

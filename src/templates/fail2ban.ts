@@ -15,7 +15,7 @@ export const FAIL2BAN_SCANNER_FILTER_PATH = "/etc/fail2ban/filter.d/napp-scanner
 const FILE_BACKEND = "backend  = auto";
 
 export function renderJailLocal(sshPort: number): string {
-  return `# Managed by napp — TỰ ĐỘNG SINH RA bởi \`napp fail2ban setup\`.
+  return `# Managed by napp — TỰ ĐỘNG SINH RA bởi \`napp fail2ban apply\`.
 [DEFAULT]
 bantime  = 3600
 findtime = 600

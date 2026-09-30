@@ -7,6 +7,7 @@ import { loadState, BACKUP_ROOT, SYSTEMD_DIR } from "../lib/state";
 import { writeManagedUnit } from "../lib/unitfile";
 import { renderBackupService, renderBackupTimer } from "../templates/systemd";
 import { timeToDailyOnCalendar } from "../lib/validate";
+import { showTimer } from "../lib/timer";
 
 const NAPP_BIN_PATH = "/usr/local/bin/napp";
 const BACKUP_TIMER_NAME = "napp-backup";
@@ -177,7 +178,7 @@ export interface BackupScheduleOptions {
 export function cmdBackupSchedule(opts: BackupScheduleOptions): void {
   requireRoot();
   const onCalendar = timeToDailyOnCalendar(opts.time);
-  const scriptCmd = `${NAPP_BIN_PATH} backup run --target ${opts.target} --keep-days ${opts.keepDays} --quiet`;
+  const scriptCmd = `${NAPP_BIN_PATH} backup create --target ${opts.target} --keep-days ${opts.keepDays} --quiet`;
 
   // ExecStart ở đây MANG THEO các tuỳ chọn của chính lệnh này (--target,
   // --keep-days) nên phải do napp làm chủ: giữ bản sửa tay cũ là làm ngược lại
@@ -201,4 +202,8 @@ export function cmdBackupUnschedule(): void {
   runCmd("rm", ["-f", `${SYSTEMD_DIR}/${BACKUP_TIMER_NAME}.service`, `${SYSTEMD_DIR}/${BACKUP_TIMER_NAME}.timer`], { silentFail: true });
   runCmd("systemctl", ["daemon-reload"]);
   ok("Đã gỡ lịch backup tự động.");
+}
+
+export function cmdBackupScheduleShow(): void {
+  showTimer("Lịch backup tự động", BACKUP_TIMER_NAME, "sudo napp backup schedule enable --time 03:00 --keep-days 14");
 }

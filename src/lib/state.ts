@@ -74,7 +74,7 @@ export interface AppRecord {
   // khi chia sẻ link và 403 nhầm người dùng sau proxy công ty — xem nginx.ts.
   hotlinkStrict?: boolean;
   // Chặn quét lỗ hổng CMS/framework PHP (.php, /wp-admin/, /phpmyadmin/... -> 444).
-  // undefined = BẬT (mặc định của cả server, xem `napp nginx scanblock`); chỉ
+  // undefined = BẬT (mặc định của cả server, xem `napp nginx scan-block enable`); chỉ
   // false mới bỏ dòng include khỏi file location của site này. Mặc định-bật là
   // có chủ đích: app tạo bằng bản napp cũ cũng phải được bảo vệ sau khi nâng cấp
   // mà không cần ai nhớ bật thêm cờ nào.
@@ -348,7 +348,7 @@ export function findUnit(identifier: string): UnitRef | undefined {
 /**
  * Các service đang MƯỢN user của đơn vị `identifier` (hoặc mượn đúng user đó).
  *
- * Dùng để chặn `napp app remove --source` xoá mất user mà worker đang chạy
+ * Dùng để chặn `napp app delete --source` xoá mất user mà worker đang chạy
  * bằng: user biến mất thì unit của worker chết ngay ở bước khởi động, và lỗi
  * đó không liên quan gì tới lệnh vừa gõ nên rất khó lần ra.
  */

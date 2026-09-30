@@ -6,6 +6,7 @@ import { renderCloudflareSyncService, renderCloudflareSyncTimer } from "../templ
 import { timeToDailyOnCalendar } from "../lib/validate";
 import { SYSTEMD_DIR } from "../lib/state";
 import { writeManagedUnit } from "../lib/unitfile";
+import { showTimer } from "../lib/timer";
 
 const NAPP_BIN_PATH = "/usr/local/bin/napp";
 const CF_TIMER_NAME = "napp-cloudflare-sync";
@@ -59,4 +60,8 @@ export function cmdCloudflareUnschedule(): void {
   runCmd("rm", ["-f", `${SYSTEMD_DIR}/${CF_TIMER_NAME}.service`, `${SYSTEMD_DIR}/${CF_TIMER_NAME}.timer`], { silentFail: true });
   runCmd("systemctl", ["daemon-reload"]);
   ok("Đã gỡ lịch tự động đồng bộ IP Cloudflare.");
+}
+
+export function cmdCloudflareScheduleShow(): void {
+  showTimer("Lịch đồng bộ IP Cloudflare", CF_TIMER_NAME, "sudo napp cloudflare schedule enable --time 01:00");
 }

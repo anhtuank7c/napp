@@ -125,7 +125,7 @@ export function stripInlineProxyBuffers(content: string): { out: string; changed
  * Gom mọi file cấu hình bị đụng trong MỘT lệnh để `nginx -t` hỏng thì hoàn tác
  * được TẤT CẢ, không phải chỉ phần cuối cùng.
  *
- * Cần đến mức này vì một lần `napp nginx sync` nay chạm tới bốn loại file
+ * Cần đến mức này vì một lần `napp nginx apply` nay chạm tới bốn loại file
  * (00-napp-proxy.conf, _scanner-block.conf, <domain>.conf, vhost) nhân với số
  * app. Hoàn tác nửa vời ở đây không phải "mất cấu hình" mà là nginx KHÔNG NẠP
  * ĐƯỢC — vd vhost đã có dòng `include` còn file được include thì vừa bị xoá —
@@ -142,7 +142,7 @@ export class ConfigTx {
    * Ghi nhớ trạng thái file. PHẢI gọi TRƯỚC khi ghi đè nó.
    *
    * copyFileSync là lệnh ghi THẬT, không đi qua writeFile/runCmd nên KHÔNG tự
-   * biết --dry-run. Thiếu nhánh dryRun ở đây thì `napp nginx sync --dry-run`
+   * biết --dry-run. Thiếu nhánh dryRun ở đây thì `napp nginx apply --dry-run`
    * rải '.napp-bak' khắp /etc/nginx rồi bỏ lại: bước dọn dẹp đi qua runCmd, mà
    * runCmd ở chế độ dry-run chỉ in ra chứ không xoá. Một lệnh mang tiếng "không
    * thay đổi gì" mà để lại rác là kiểu vi phạm hợp đồng khó chịu nhất.
@@ -237,7 +237,7 @@ function backfillAppLocations(app: AppRecord, tx: ConfigTx): BackfillResult {
   return { wroteLocations, patchedVhost: true };
 }
 
-/** App đang TẮT chặn quét lỗ hổng riêng lẻ (`napp app set <domain> --no-scan-block`). */
+/** App đang TẮT chặn quét lỗ hổng riêng lẻ (`napp app update <domain> --no-scan-block`). */
 function appsWithScanBlockOff(): string[] {
   return Object.values(loadState().apps)
     .filter((a) => a.scanBlock === false)
@@ -260,7 +260,7 @@ export function cmdNginxSync(): void {
   );
 
   // Chặn quét lỗ hổng: lần đầu (file chưa có) thì BẬT. Đã có thì GIỮ NGUYÊN
-  // trạng thái hiện tại — người dùng chạy `napp nginx unscanblock` có lý do của
+  // trạng thái hiện tại — người dùng chạy `napp nginx scan-block disable` có lý do của
   // họ, và `sync` là lệnh chạy đi chạy lại sau mỗi lần nâng cấp; bật lại sau
   // lưng họ mỗi lần như vậy là cách chắc chắn nhất để một quyết định có chủ đích
   // bị xoá mà không ai thấy.
@@ -324,17 +324,17 @@ export function cmdNginxSync(): void {
   if (scannerOn) {
     reportScannerBlock(scannerExisted ? "giữ nguyên (đang BẬT)" : "BẬT lần đầu");
   } else {
-    info(`• Chặn quét lỗ hổng: đang TẮT (giữ nguyên lựa chọn cũ). Bật lại: napp nginx scanblock`);
+    info(`• Chặn quét lỗ hổng: đang TẮT (giữ nguyên lựa chọn cũ). Bật lại: napp nginx scan-block enable`);
   }
 }
 
-/** Phần báo cáo dùng chung cho `nginx sync` và `nginx scanblock`. */
+/** Phần báo cáo dùng chung cho `nginx apply` và `nginx scan-block enable`. */
 function reportScannerBlock(stateLabel: string): void {
   info(`• Chặn quét lỗ hổng: ${stateLabel} — '.php/.asp/.jsp', '/wp-admin/', '/phpmyadmin/', '/cgi-bin/' -> 444, KHÔNG qua Node.`);
   info(`  Ghi log riêng ở ${NGINX_SCANNER_LOG} (access log của site sạch trở lại): tail -f ${NGINX_SCANNER_LOG}`);
-  info(`  Chạy 'napp fail2ban setup' để bật jail 'napp-scanner' — ban IP ngay từ tường lửa, thứ THẬT SỰ tiết kiệm tài nguyên (444 vẫn phải trả tiền bắt tay TLS).`);
+  info(`  Chạy 'napp fail2ban apply' để bật jail 'napp-scanner' — ban IP ngay từ tường lửa, thứ THẬT SỰ tiết kiệm tài nguyên (444 vẫn phải trả tiền bắt tay TLS).`);
   const off = appsWithScanBlockOff();
-  if (off.length > 0) info(`  Đang TẮT riêng cho: ${off.join(", ")} (bật lại: napp app set <domain> --scan-block)`);
+  if (off.length > 0) info(`  Đang TẮT riêng cho: ${off.join(", ")} (bật lại: napp app update <domain> --scan-block)`);
 }
 
 export function cmdNginxScanBlock(): void {
@@ -385,7 +385,7 @@ export function cmdNginxScanBlock(): void {
   if (touched.length === 0) info("• Mọi site đã ở đúng cấu hình, không có gì phải đổi.");
   reportScannerBlock("BẬT");
   warn("Danh sách mẫu cố ý HẸP (neo theo đuôi .php/.asp/.jsp và namespace WordPress/phpMyAdmin) để không thể chặn nhầm route thật của app Node.");
-  warn(`Nếu một site của bạn THẬT SỰ phục vụ file .php qua upstream khác: napp app set <domain> --no-scan-block`);
+  warn(`Nếu một site của bạn THẬT SỰ phục vụ file .php qua upstream khác: napp app update <domain> --no-scan-block`);
 }
 
 export function cmdNginxUnscanBlock(): void {
@@ -396,7 +396,7 @@ export function cmdNginxUnscanBlock(): void {
     return;
   }
   if (!scannerBlockEnabled()) {
-    info("Chặn quét lỗ hổng đang TẮT sẵn. Bật lại: napp nginx scanblock");
+    info("Chặn quét lỗ hổng đang TẮT sẵn. Bật lại: napp nginx scan-block enable");
     return;
   }
 
@@ -416,7 +416,7 @@ export function cmdNginxUnscanBlock(): void {
   tx.cleanup();
 
   ok("Đã tắt chặn quét lỗ hổng. Request dò .php/wp-admin lại đi qua Node và quay lại access log của site.");
-  info(`• Dòng 'include ${NGINX_SCANNER_BLOCK_CONF};' vẫn nằm trong vhost (file nay rỗng) — bật lại chỉ cần: napp nginx scanblock`);
+  info(`• Dòng 'include ${NGINX_SCANNER_BLOCK_CONF};' vẫn nằm trong vhost (file nay rỗng) — bật lại chỉ cần: napp nginx scan-block enable`);
 }
 
 export function cmdNginxHarden(): void {
@@ -459,7 +459,7 @@ export function cmdNginxHarden(): void {
   info("• Request tới IP máy chủ hoặc Host KHÔNG khớp domain nào -> bị chặn (HTTP 444: đóng kết nối).");
   info("• Chỉ domain đã tạo app (server_name khớp) mới truy cập được.");
   info("• Đã ẩn phiên bản nginx (server_tokens off).");
-  warn("Nếu bạn có dịch vụ khác cần truy cập qua IP trực tiếp, hãy cân nhắc trước — hoặc 'napp nginx unharden' để gỡ.");
+  warn("Nếu bạn có dịch vụ khác cần truy cập qua IP trực tiếp, hãy cân nhắc trước — hoặc 'napp nginx hardening disable' để gỡ.");
 }
 
 export function cmdNginxUnharden(): void {
@@ -480,4 +480,19 @@ export function cmdNginxUnharden(): void {
   if (test.code !== 0) die(`Cấu hình nginx sau khi gỡ có lỗi:\n${test.stderr}`);
   runCmd("systemctl", ["reload", "nginx"]);
   ok("Đã gỡ hardening nginx (server chặn IP/Host lạ). Truy cập IP trực tiếp sẽ theo hành vi mặc định của nginx trở lại.");
+}
+
+export function cmdNginxHardeningShow(): void {
+  section("Hardening nginx");
+  const on = existsSync(NGINX_HARDENING_CONF) && existsSync(NGINX_DEFAULT_SERVER_CONF);
+  if (on) ok(`Đang bật: default_server trả 444 cho IP/Host lạ, ẩn phiên bản nginx (${NGINX_HARDENING_CONF}, ${NGINX_DEFAULT_SERVER_CONF}).`);
+  else info("Chưa bật. Bật bằng: sudo napp nginx hardening enable");
+}
+
+export function cmdNginxScanBlockShow(): void {
+  section("Chặn quét lỗ hổng PHP/CMS");
+  if (scannerBlockEnabled()) ok(`Đang bật trên toàn máy (${NGINX_SCANNER_BLOCK_CONF}).`);
+  else info("Đang tắt trên toàn máy. Bật bằng: sudo napp nginx scan-block enable");
+  const optedOut = Object.values(loadState().apps).filter((a) => a.scanBlock === false).map((a) => a.domain);
+  if (optedOut.length > 0) info(`Site tự tắt riêng (napp app update <domain> --no-scan-block): ${optedOut.join(", ")}`);
 }

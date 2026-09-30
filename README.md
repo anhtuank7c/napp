@@ -16,8 +16,8 @@ cô lập hoàn toàn giữa các app, nginx chỉ đóng vai trò reverse-proxy
 - 🌐 nginx reverse-proxy tự sinh, hỗ trợ **Cloudflare real-IP** (trích xuất đúng IP client thật)
 - ⚡ **Asset tĩnh do nginx trả thẳng** (`--auto-static`): napp nhận diện framework từ **thư mục build** (SvelteKit · Next.js · Nuxt · SolidStart · Astro · Remix · Vite), chọn đúng `root`/`alias` và tự cấp quyền đọc cho nginx — thay vì để hàng trăm chunk `.js`/`.css` xếp hàng trên event loop đơn luồng của Node
 - 🧱 **UFW**: mặc định deny, mở SSH + 80/443 công khai (tùy chọn khoá origin theo dải IP Cloudflare với `--restrict-cloudflare`)
-- 🛑 **Hardening nginx** (`napp nginx harden`): chặn truy cập thẳng IP / Host lạ (trả 444), chỉ domain đã cấu hình mới vào được; ẩn phiên bản nginx
-- 🚫 **Chặn quét lỗ hổng** (`napp nginx scanblock`): request dò CMS/framework PHP (`/wp-login.php`, `/wp-admin/`, `/phpmyadmin/`, `/cgi-bin/`) bị nginx trả **444** ngay, không vòng qua Node, và ghi sang **log riêng** để access log của site sạch trở lại — kèm jail fail2ban `napp-scanner` ban IP ngay ở tường lửa
+- 🛑 **Hardening nginx** (`napp nginx hardening enable`): chặn truy cập thẳng IP / Host lạ (trả 444), chỉ domain đã cấu hình mới vào được; ẩn phiên bản nginx
+- 🚫 **Chặn quét lỗ hổng** (`napp nginx scan-block enable`): request dò CMS/framework PHP (`/wp-login.php`, `/wp-admin/`, `/phpmyadmin/`, `/cgi-bin/`) bị nginx trả **444** ngay, không vòng qua Node, và ghi sang **log riêng** để access log của site sạch trở lại — kèm jail fail2ban `napp-scanner` ban IP ngay ở tường lửa
 - 🛡️ **fail2ban**: sshd + nginx-botsearch/http-auth/limit-req + jail riêng chống spam 502/504/429
 - 💾 **Backup định kỳ** (database + mã nguồn) qua **systemd timer**, có xoay vòng retention
 - ⚙️ **Tối ưu theo phần cứng thực tế**: `napp tune apply` phát hiện CPU/RAM và điều chỉnh nginx/database/Redis/sysctl **và NODE_OPTIONS heap V8 cho từng app node** — chạy lại bất cứ khi nào nâng cấp server
@@ -94,70 +94,123 @@ Gõ số rồi Enter, `0` để quay lại/thoát.
 
 ### Hoặc dùng lệnh trực tiếp
 
+#### Ngữ pháp lệnh
+
+Mọi lệnh đều theo **một khuôn** — đoán được lệnh chưa từng gõ, giống gọi một
+REST API:
+
+```
+napp <resource> [<sub-resource>] <verb> [<id>...] [--flags]
+```
+
+| Động từ | Giống REST | Ý nghĩa |
+|---|---|---|
+| `list` | `GET /things` | liệt kê |
+| `show <id>` | `GET /things/:id` | xem một mục (tài nguyên đơn lẻ như `firewall`: `show` không cần id) |
+| `create <id>` | `POST` | tạo |
+| `update <id> --cờ` | `PATCH` | chỉ đổi đúng các cờ được truyền |
+| `delete <id>` | `DELETE` | gỡ (cờ `--source`, `--database`, `--all`… nói rõ gỡ kèm những gì) |
+| `set` / `unset` | ghi / xoá một giá trị | biến môi trường, danh sách database engine — không tác dụng phụ nào khác |
+| `enable` / `disable` | bật / tắt | **mọi** công tắc: lịch chạy, hardening, chặn quét, lấy mẫu bộ nhớ, leak guard |
+| `apply` | đồng bộ | đưa hệ thống về đúng cấu hình napp mong muốn |
+
+Hành động riêng (không phải CRUD, như `POST /apps/:id/deploy`): `deploy` `start`
+`stop` `restart` `logs` cho app/service · `renew` cho cert · `flush` cho Redis DB
+· `snapshot` `sample` cho mem · `unban` cho fail2ban. Chỉ có vậy.
+
+Quy ước cờ: `-y/--yes` = bỏ hỏi xác nhận (ở mọi lệnh) · `--force` = vượt qua một
+lần napp **từ chối vì an toàn**, không dùng vào việc khác · cờ bật/tắt đi thành
+cặp `--x` / `--no-x` · cờ lặp lại được viết số ít và lặp lại (`--env A=1 --env B=2`).
+
+#### Tài nguyên và lệnh
+
 | Lệnh | Tác dụng |
 | --- | --- |
-| `sudo napp check [--fix]` | Kiểm tra / tự cài môi trường máy chủ |
+| **Hệ thống** | |
+| `sudo napp check [--fix] [--db <engines>]` | Kiểm tra / tự cài môi trường máy chủ (chọn database engine bằng `--db`) |
 | `sudo napp doctor [--deep]` | **Soi bảo mật**: bản vá đang chờ + rủi ro dependencies của mọi app/service |
-| `sudo napp doctor system` | Chỉ kiểm tra bản vá hệ thống, dịch vụ còn nạp thư viện cũ, CVE nginx, EOL Node.js |
-| `sudo napp doctor deps [<domain\|name>]` | Chỉ quét rủi ro chuỗi cung ứng của dependencies |
-| `sudo napp doctor upgrade [--all] [--only nginx] [-y]` | Cài bản vá (mặc định chỉ bản vá **bảo mật**) + restart dịch vụ liên quan |
-| `sudo napp app create <domain> [--repo <url>] [--branch <b>] [--runtime node\|bun] [--db] [--redis] [--port <n>] [--env K=V...]` | Tạo app mới |
+| `sudo napp doctor system\|deps [<domain\|name>]\|upgrade [--all] [-y]` | Từng phần của `doctor` |
+| `sudo napp update` · `napp version` · `napp changelog` · `sudo napp install\|uninstall` | Cập nhật / phiên bản / lịch sử / cài-gỡ napp |
+| **`app`** — ứng dụng web (có domain) | |
+| `napp app list` · `napp app show <domain>` | Liệt kê / xem cấu hình + trạng thái |
+| `sudo napp app create <domain> [--repo <url>] [--branch <b>] [--runtime node\|bun] [--db [engine]] [--redis] [--port <n>] [--env K=V]` | Tạo app mới |
 | ↳ `[--app-dir apps/backend]` | Monorepo: app nằm trong thư mục con (WorkingDirectory + `.env` trỏ vào đó) |
 | ↳ `[--auto-static]` | **Nhận diện framework từ thư mục build** rồi cho nginx trả thẳng asset (SvelteKit · Next.js · Nuxt · SolidStart · Astro) |
-| ↳ `[--static-root <dir> --static-prefix /_app/]` | Cho **nginx** trả asset build thay vì Node (cấu hình tay) |
-| ↳ `[--static-alias /_next/static/=<dir>]` | Như trên nhưng khi **URL khác tên thư mục trên đĩa** (Next.js) |
+| ↳ `[--static-root <dir> --static-prefix /_app/]` · `[--static-alias /_next/static/=<dir>]` | Cho **nginx** trả asset build thay vì Node (cấu hình tay) |
 | ↳ `[--upload-dir <dir>]` | Thư mục file **tải lên lúc chạy** — không phải asset build, xem cảnh báo dưới |
-| ↳ `[--hotlink-protect]` `[--hotlink-allow <domain>]` | Chỉ cho nhúng ảnh từ domain của site |
-| ↳ `[--max-body 100M]` | `client_max_body_size` (mặc định `20M`) |
-| ↳ `[--share-redis-with <domain>]` \| `[--redis-db <n>]` | Dùng **chung** Redis DB với đơn vị khác |
-| `sudo napp app deploy <domain>` | git pull + cài deps + build + restart |
-| `sudo napp app set <domain> --auto-static` | **Bật asset tĩnh cho app ĐÃ TẠO** — napp tự nhận diện framework và tự cấp quyền đọc cho nginx |
-| `sudo napp app set <domain> [--static-root <dir>] [--static-prefix /_app/] [--static-alias <p>=<dir>] [--upload-dir <dir>] [--hotlink-protect] [--max-body 100M]` | **Đổi cấu hình nginx của app ĐÃ TẠO** — giữ nguyên khối SSL của certbot |
-| `sudo napp app list` | Liệt kê app đang quản lý |
-| `sudo napp app restart\|stop\|start <domain>` | Điều khiển service |
-| `napp app logs <domain> [-f] [-n 200]` | Xem log (journalctl) |
-| `sudo napp app env-set <domain> KEY=VALUE...` | Cập nhật `.env` |
-| `sudo napp app remove <domain> [-y]` | Gỡ app — mặc định xoá nginx + ssl, GIỮ mã nguồn + database |
-| `sudo napp app remove <domain> --all` | Gỡ app + xoá tất cả (nginx, ssl, mã nguồn, database) |
-| `sudo napp app remove <domain> --source --db` | Xoá thêm mã nguồn và/hoặc database (`--keep-nginx`/`--keep-ssl` để giữ) |
-| `sudo napp service create <name> [--repo <url>] [--start-cmd <cmd>] [--runtime node\|bun] [--db] [--redis] [--port <n>] [--env K=V...]` | Tạo **background service** (chạy ngầm, không domain/nginx) |
+| ↳ `[--hotlink-protect]` `[--hotlink-allow <domain>]` · `[--max-body 100M]` | Chặn hotlink · `client_max_body_size` (mặc định `20M`) |
+| ↳ `[--share-redis-with <domain>]` · `[--redis-db <n>]` | Dùng **chung** Redis DB với đơn vị khác |
+| `sudo napp app update <domain> [--auto-static] [--static-root …] [--upload-dir …] [--[no-]hotlink-protect] [--max-body …] [--[no-]scan-block]` | **Đổi cấu hình nginx của app ĐÃ TẠO** — chỉ đổi đúng cờ được truyền |
+| `sudo napp app delete <domain> [-y] [--source] [--database] [--all] [--keep-nginx] [--keep-ssl]` | Gỡ app — mặc định xoá nginx + SSL, **GIỮ** mã nguồn + database |
+| `sudo napp app deploy\|start\|stop\|restart <domain>` · `napp app logs <domain> [-f] [-n 200]` | Triển khai / điều khiển / xem log |
+| `sudo napp app env list <domain> [--reveal]` | Xem `.env` (giá trị bí mật bị che) |
+| `sudo napp app env set <domain> KEY=VALUE...` · `unset <domain> KEY...` | Ghi / xoá biến trong `.env` (restart app để áp dụng) |
+| `sudo napp app alias list\|create\|delete <domain> [<alias>]` | Domain phụ trỏ vào app |
+| **`service`** — chạy ngầm (worker, bot, queue consumer; không domain/nginx) | |
+| `napp service list` · `napp service show <name>` | Liệt kê / xem cấu hình + trạng thái |
+| `sudo napp service create <name> [--repo <url>] [--start-cmd <cmd>] [--runtime node\|bun] [--db [engine]] [--redis] [--port <n>] [--env K=V]` | Tạo background service |
 | ↳ `[--share-redis-with <domain>]` | **Bắt buộc** nếu service tiêu thụ hàng đợi của một web app |
-| ↳ `[--run-as <domain>]` | Chạy bằng **user của app web đã có** — bắt buộc nếu worker đọc/ghi FILE của app đó |
-| ↳ `[--write-dir <path>]` | Cấp thêm quyền GHI vào đường dẫn ngoài mã nguồn service (lặp lại được) |
-| ↳ `[--app-dir apps/worker]` | Monorepo: worker nằm trong thư mục con |
-| `sudo napp service set <name> [--run-as <domain>\|--standalone] [--write-dir <path>]` | Đổi **danh tính/quyền ghi** của service đã tạo |
-| `sudo napp service deploy <name>` | git pull + cài deps + build + restart service |
-| `sudo napp service list` | Liệt kê background service đang quản lý |
-| `sudo napp service restart\|stop\|start <name>` | Điều khiển service |
-| `napp service logs <name> [-f] [-n 200]` | Xem log (journalctl) |
-| `sudo napp service env-set <name> KEY=VALUE...` | Cập nhật `.env` |
-| `sudo napp service remove <name> [-y] [--source] [--db] [--all]` | Gỡ service — mặc định GIỮ mã nguồn + database |
-| `sudo napp domain add\|remove <domain> <alias>` | Domain phụ trỏ vào app |
-| `sudo napp cert issue <domain> --email <email> [--no-www] [--no-redirect] [--extra <d>]` | Phát hành SSL (không tương tác; nhớ email cho lần sau) |
-| `sudo napp cert renew [<domain>] [--force]` | Gia hạn SSL |
-| `sudo napp cert revoke <domain>` / `list` / `status` | Thu hồi / liệt kê / trạng thái SSL |
-| `sudo napp db create\|drop\|backup <name> [--engine <e>]` / `list` | Database độc lập (ngoài `--db` của app) |
-| `sudo napp db engine list\|add <e...>\|remove <e>\|default <e>` | Chọn / cài / gỡ database engine (xem [Chọn database engine](#️-chọn-database-engine)) |
-| `napp redis info\|allocations` / `sudo napp redis flush <n>` | Quản lý Redis |
-| `sudo napp backup run [--target db\|files\|all] [--database <name>] [--engine <e>] [--keep-days n]` | Backup ngay (nén gzip; chọn 1 DB hoặc tất cả) |
-| `sudo napp backup schedule --time 03:00 --keep-days 14` | Lên lịch backup hàng ngày (retention theo ngày) qua systemd timer |
-| `sudo napp backup list` / `unschedule` | Danh sách backup (kèm dung lượng) / gỡ lịch |
-| `sudo napp firewall sync [--ssh-port n] [--restrict-cloudflare]` | Đồng bộ UFW (mặc định mở 80/443; `--restrict-cloudflare` để khoá origin theo IP Cloudflare) |
-| `sudo napp fail2ban setup` | Áp cấu hình fail2ban |
-| `sudo napp nginx harden` / `unharden` | Chặn truy cập IP/Host lạ (default_server 444) + ẩn version / gỡ |
-| `sudo napp nginx scanblock` / `unscanblock` | Chặn/bỏ chặn quét lỗ hổng CMS PHP (444 + log riêng), áp cho **mọi site kể cả app tạo bằng bản napp cũ** |
-| `sudo napp nginx sync` | Đồng bộ cấu hình dùng chung vào các vhost đã có (bộ đệm, header `Connection`, chèn dòng `include` file location còn thiếu) — **giữ nguyên khối SSL của certbot** |
-| `sudo napp cloudflare sync` | Đồng bộ dải IP Cloudflare vào nginx (real IP) ngay |
-| `sudo napp cloudflare schedule [--time 01:00]` | Lên lịch tự động đồng bộ IP Cloudflare (systemd timer, hàng ngày) |
-| `sudo napp cloudflare unschedule` | Gỡ lịch tự động đồng bộ IP Cloudflare |
-| `sudo napp tune show\|apply` | Xem/áp tối ưu theo phần cứng thực tế |
-| `sudo napp mem status` / `trend` | Bộ nhớ + dấu hiệu rò rỉ (số lần âm thầm restart, xu hướng) |
-| `sudo napp mem watch [--interval 15]` / `unwatch` | Bật/tắt lấy mẫu bộ nhớ định kỳ (systemd timer) |
-| `sudo napp mem guard <app>` / `unguard` | Bật/tắt cờ Node tự chụp heap trước khi OOM (có restart) |
-| `sudo napp mem snapshot <app>` | Chụp heap snapshot của tiến trình đang chạy |
-| `sudo napp update` | Tự cập nhật napp lên bản mới nhất |
-| `napp version` / `changelog` | Phiên bản / lịch sử thay đổi |
-| `sudo napp install` / `uninstall` | Cài/gỡ napp khỏi `/usr/local/bin` |
+| ↳ `[--run-as <domain>]` · `[--write-dir <path>]` · `[--app-dir apps/worker]` | Chạy bằng user app web · cấp thêm quyền ghi · monorepo |
+| `sudo napp service update <name> [--run-as <domain>\|--standalone] [--write-dir <path>\|--no-write-dir]` | Đổi **danh tính/quyền ghi** của service đã tạo |
+| `sudo napp service delete <name> [-y] [--source] [--database] [--all]` | Gỡ service — mặc định **GIỮ** mã nguồn + database |
+| `sudo napp service deploy\|start\|stop\|restart <name>` · `napp service logs <name> [-f]` | Triển khai / điều khiển / xem log |
+| `sudo napp service env list\|set\|unset <name> …` | Như `app env` |
+| **`cert`** — SSL Let's Encrypt | |
+| `sudo napp cert list` · `show <domain>` | Liệt kê (kèm hạn dùng) / xem một chứng chỉ |
+| `sudo napp cert create <domain> --email <email> [--no-www] [--no-redirect] [--extra <d>]` | Phát hành SSL (không tương tác; nhớ email cho lần sau) |
+| `sudo napp cert renew [<domain>] [--force]` · `delete <domain> [-y]` | Gia hạn / thu hồi + xoá |
+| **`db`** — database | |
+| `sudo napp db list [--engine <e>]` · `create <name> [--user <u>] [--engine <e>]` · `delete <name> [--user <u>] [--engine <e>] [-y]` | Database độc lập (ngoài `--db` của app) |
+| `sudo napp db engine list` | Engine nào: napp quản lý? đã cài? đang chạy? app nào dùng? |
+| `sudo napp db engine create <e...> [--default]` · `delete <e> [--force] [--purge]` | Cài / gỡ engine (xem [Chọn database engine](#️-chọn-database-engine)) |
+| `sudo napp db engine update <e> --default` · `set <e,e\|none>` | Đặt engine mặc định · ghi đè danh sách engine (không cài/gỡ) |
+| **`redis`** | |
+| `napp redis show` · `napp redis db list` · `sudo napp redis db flush <index> [-y]` | INFO memory · DB index nào cấp cho ai · xoá dữ liệu một DB |
+| **`backup`** | |
+| `sudo napp backup list` | Danh sách backup (kèm dung lượng) |
+| `sudo napp backup create [--target db\|files\|all] [--database <name>] [--engine <e>] [--keep-days n] [--keep-count n]` | Backup ngay |
+| `sudo napp backup schedule show\|enable [--time 03:00 --keep-days 14 --target all]\|disable` | Lịch backup hàng ngày (systemd timer) |
+| **`firewall`** · **`fail2ban`** | |
+| `sudo napp firewall show` · `apply [--ssh-port n] [--restrict-cloudflare] [--extra-port n]` | UFW: xem / áp (mặc định deny, mở SSH + 80/443) |
+| `sudo napp fail2ban show` · `apply [--ssh-port n]` · `unban <jail> <ip>` | fail2ban: xem jail / áp cấu hình / gỡ chặn IP |
+| **`nginx`** · **`cloudflare`** | |
+| `sudo napp nginx apply` | Đồng bộ cấu hình dùng chung vào các vhost đã có (bộ đệm, header `Connection`, chèn dòng `include` còn thiếu) — **giữ nguyên SSL của certbot** |
+| `sudo napp nginx hardening show\|enable\|disable` | Chặn truy cập IP/Host lạ (default_server 444) + ẩn phiên bản |
+| `sudo napp nginx scan-block show\|enable\|disable` | Chặn quét lỗ hổng CMS PHP (444 + log riêng) trên **mọi site** |
+| `sudo napp cloudflare apply` · `schedule show\|enable [--time 01:00]\|disable` | Dải IP Cloudflare vào nginx (real IP): ngay / theo lịch |
+| **`tune`** · **`mem`** | |
+| `sudo napp tune show\|apply` | Xem / áp tối ưu theo phần cứng thực tế |
+| `sudo napp mem show [--trend]` | Bộ nhớ + dấu hiệu rò rỉ (số lần âm thầm restart, xu hướng) |
+| `sudo napp mem watch show\|enable [--interval 15]\|disable` | Lấy mẫu bộ nhớ định kỳ (systemd timer) |
+| `sudo napp mem guard enable\|disable <app>` · `snapshot <app>` | Cờ Node tự chụp heap trước khi OOM (có restart) · chụp heap ngay |
+
+#### Tên lệnh trước 1.28
+
+Tên cũ **vẫn chạy** (không hiện trong `--help`, in một dòng nhắc tên mới khi gõ
+trong terminal) và sẽ bỏ ở bản 2.0 — **trừ** `backup run`, `cloudflare sync`,
+`mem sample`: unit systemd napp đã ghi lên server gọi đúng các tên đó, nên chúng
+chạy mãi mãi.
+
+| Trước 1.28 | Nay |
+|---|---|
+| `app set` · `app env-set` · `app remove --db` | `app update` · `app env set` · `app delete --database` |
+| `domain add\|remove\|list <app> …` | `app alias create\|delete\|list <domain> …` |
+| `service set` · `service env-set` · `service remove --db` | `service update` · `service env set` · `service delete --database` |
+| `cert issue` · `cert revoke` · `cert status` | `cert create` · `cert delete` · `cert show` |
+| `db drop` · `db backup <name>` | `db delete` · `backup create --database <name>` |
+| `db engine add\|remove\|default <e>\|select` | `db engine create\|delete\|update <e> --default\|set` |
+| `redis info` · `redis allocations` · `redis flush` | `redis show` · `redis db list` · `redis db flush` |
+| `backup run [--keep n]` · `backup schedule` · `backup unschedule` | `backup create [--keep-count n]` · `backup schedule enable` · `backup schedule disable` |
+| `firewall sync\|status` · `fail2ban setup\|status` | `firewall apply\|show` · `fail2ban apply\|show` |
+| `cloudflare sync` · `cloudflare schedule` · `cloudflare unschedule` | `cloudflare apply` · `cloudflare schedule enable` · `cloudflare schedule disable` |
+| `nginx sync` · `nginx harden\|unharden` · `nginx scanblock\|unscanblock` | `nginx apply` · `nginx hardening enable\|disable` · `nginx scan-block enable\|disable` |
+| `mem status` · `mem trend` · `mem watch` · `mem unwatch` · `mem guard\|unguard <id>` | `mem show` · `mem show --trend` · `mem watch enable` · `mem watch disable` · `mem guard enable\|disable <id>` |
+
+Một chỗ **cố ý đổi hành vi**: `napp backup schedule`, `napp cloudflare schedule`,
+`napp mem watch` gõ **không kèm gì** trước đây = bật lịch với giá trị mặc định;
+nay dừng với mã lỗi và in các lệnh con. Gõ để xem có gì mà âm thầm tạo timer là
+đúng loại bất ngờ mà ngữ pháp này sinh ra để bỏ. Kèm cờ kiểu cũ (`--time …`) thì
+vẫn chạy như trước.
 
 > 💡 Thêm `--dry-run` vào **bất kỳ lệnh nào** để chạy thử (chỉ in ra các bước,
 > không thay đổi gì thật). Thêm `--verbose` để in chi tiết lệnh hệ thống.
@@ -174,9 +227,9 @@ vài engine, hoặc **không engine nào**.
 sudo napp check --fix --db postgresql        # lần đầu: chọn engine rồi cài
 sudo napp check --fix --db none              # không dùng database
 sudo napp db engine list                     # engine nào: đã chọn / đã cài / đang chạy / app nào dùng
-sudo napp db engine add mongodb              # thêm engine sau này
-sudo napp db engine add postgresql --default # và đặt làm mặc định cho '--db'
-sudo napp db engine remove mariadb           # gỡ (mặc định GIỮ dữ liệu trên đĩa)
+sudo napp db engine create mongodb              # thêm engine sau này
+sudo napp db engine create postgresql --default # và đặt làm mặc định cho '--db'
+sudo napp db engine delete mariadb           # gỡ (mặc định GIỮ dữ liệu trên đĩa)
 
 sudo napp app create api.example.com --repo ... --db postgresql
 ```
@@ -201,7 +254,7 @@ database của nó** (MongoDB: `readWrite` trên đúng DB đó).
 - **Lựa chọn được lưu** (`/etc/napp/state.json`). `check --fix` chỉ cài đúng các
   engine đã chọn, và **không bao giờ cài lại** engine bạn đã gỡ. Engine cài tay
   ngoài napp được báo là "không quản lý" và napp không đụng tới cho tới khi bạn
-  `napp db engine add` nó.
+  `napp db engine create` nó.
 - **RAM cho database là TỔNG, không phải mỗi engine.** Máy 4GB tier medium dành
   40% cho DB: một engine được 40%, hai engine mỗi cái 20%. **Không có engine nào
   thì 0%** — phần đó về tay heap của các app Node. Thêm/gỡ engine xong napp hỏi
@@ -259,7 +312,7 @@ Token/deploy key được lưu vào home của user app (quyền `600`) nên `na
 Trỏ bản ghi DNS A của domain về server (bật proxy Cloudflare nếu dùng), rồi bật HTTPS:
 
 ```bash
-sudo napp cert issue api.example.com --email ban@example.com
+sudo napp cert create api.example.com --email ban@example.com
 ```
 
 Xem log:
@@ -291,7 +344,7 @@ dashboard thấy giựt" rồi đi đo CPU/RAM — nơi mọi thứ trông hoàn
 
 ```bash
 # App đã tạo từ trước
-sudo napp app set demo.example.com --auto-static
+sudo napp app update demo.example.com --auto-static
 
 # Hoặc ngay lúc tạo app
 sudo napp app create demo.example.com --repo ... --build-cmd "npm run build" --auto-static
@@ -309,11 +362,11 @@ sudo napp app create demo.example.com --repo ... --build-cmd "npm run build" --a
 
 ```bash
 # SvelteKit / Nuxt / Astro / SolidStart — URL trùng tên thư mục -> dùng root
-sudo napp app set demo.example.com \
+sudo napp app update demo.example.com \
   --static-root /var/www/demo.example.com/build/client --static-prefix /_app/
 
 # Next.js — URL khác tên thư mục -> phải dùng alias
-sudo napp app set shop.example.com \
+sudo napp app update shop.example.com \
   --static-alias /_next/static/=/var/www/shop.example.com/.next/static
 ```
 
@@ -359,7 +412,7 @@ tự render.
 > route ở đó. `/assets/` thì là một đoạn URL bình thường mà app hoàn toàn có thể
 > dùng làm route thật. Mà `location ^~` **thắng cả route regex lẫn `proxy_pass`**,
 > nên áp nhầm là route đó **chết hẳn bằng 404**: không log, không lỗi, chỉ là
-> trang trắng. Kiểm tra app trước rồi áp tay bằng `napp app set`.
+> trang trắng. Kiểm tra app trước rồi áp tay bằng `napp app update`.
 
 > **napp tự cấp quyền đọc cho nginx — nếu không thì asset trả 403, không phải
 > file.** Thư mục app thuộc **user riêng của app** và để `750`, còn worker nginx
@@ -400,7 +453,7 @@ napp **cố ý không đoán** thư mục nằm ngoài gốc tĩnh (`./uploads`,
 ### Chặn hotlink — hai lớp, sức mạnh rất khác nhau
 
 ```bash
-sudo napp app set pghotel.vn --hotlink-protect
+sudo napp app update pghotel.vn --hotlink-protect
 ```
 
 Từ **1.23.0** cờ này bật **hai** lớp, và cần hiểu rõ lớp nào làm được gì:
@@ -431,7 +484,7 @@ của bạn** nhúng ảnh của mình.
 **Muốn chặt hơn nữa** — bỏ luôn nhóm không có `Referer`:
 
 ```bash
-sudo napp app set pghotel.vn --hotlink-protect --hotlink-strict
+sudo napp app update pghotel.vn --hotlink-protect --hotlink-strict
 ```
 
 > ⚠️ `--hotlink-strict` **đắt hơn nhiều so với thứ nó ngăn được**: bot lấy ảnh
@@ -480,8 +533,8 @@ bạn **không hề cài**: `/wp-login.php`, `/wp-admin/setup-config.php`,
 con bot. Và tất cả rơi vào access log của site, trộn lẫn với traffic thật.
 
 ```bash
-sudo napp nginx scanblock      # bật cho MỌI site (kể cả app tạo bằng bản napp cũ)
-sudo napp fail2ban setup       # bật jail 'napp-scanner' — phần quan trọng, đọc bên dưới
+sudo napp nginx scan-block enable      # bật cho MỌI site (kể cả app tạo bằng bản napp cũ)
+sudo napp fail2ban apply       # bật jail 'napp-scanner' — phần quan trọng, đọc bên dưới
 ```
 
 ### Đừng kỳ vọng sai vào con số
@@ -529,10 +582,10 @@ Cũng **không** có luật cho `.env` hay `/.git/`: vhost napp đã có sẵn
 ### Bật/tắt
 
 ```bash
-sudo napp nginx scanblock                     # bật toàn máy
-sudo napp nginx unscanblock                   # tắt toàn máy
-sudo napp app set <domain> --no-scan-block    # tắt cho RIÊNG một site
-sudo napp app set <domain> --scan-block       # bật lại cho site đó
+sudo napp nginx scan-block enable                     # bật toàn máy
+sudo napp nginx scan-block disable                   # tắt toàn máy
+sudo napp app update <domain> --no-scan-block    # tắt cho RIÊNG một site
+sudo napp app update <domain> --scan-block       # bật lại cho site đó
 ```
 
 Danh sách mẫu nằm ở **một file dùng chung**
@@ -548,14 +601,14 @@ trước đó **không có dòng include nào**, nên mọi thứ napp ghi vào
 Hỏng kiểu im lặng hoàn hảo: `nginx -t` xanh, lệnh báo thành công, mà site cũ —
 đúng những site đã chạy lâu nhất và bị quét nhiều nhất — vẫn để ngỏ.
 
-Cả `napp nginx scanblock` lẫn `napp nginx sync` đều **tự chèn dòng include còn
+Cả `napp nginx scan-block enable` lẫn `napp nginx apply` đều **tự chèn dòng include còn
 thiếu** vào các vhost đó, bằng phép cắt chuỗi theo khối `server` (không render
 lại vhost, nên **khối SSL của certbot giữ nguyên**). `napp check` cũng báo ra khi
 phát hiện vhost thiếu include.
 
 ```bash
 sudo napp check          # báo vhost nào còn thiếu + chặn quét đã bật chưa
-sudo napp nginx sync     # vá tất cả trong một lượt, có nginx -t + hoàn tác
+sudo napp nginx apply     # vá tất cả trong một lượt, có nginx -t + hoàn tác
 ```
 
 ### ⚠️ Nếu site nằm sau Cloudflare proxy
@@ -586,7 +639,7 @@ sudo fail2ban-client status napp-scanner         # đã ban những IP nào
 ## 🧩 Location nginx tự viết — dùng file `.custom.conf`
 
 `/etc/nginx/napp-locations/<domain>.conf` là file **tự sinh**: `napp app create`,
-`napp app set` và `napp domain add/remove` đều **render lại toàn bộ** nó từ
+`napp app update` và `napp app alias create/remove` đều **render lại toàn bộ** nó từ
 registry. Mọi thứ bạn thêm tay vào đó sẽ biến mất vào lần chạy kế tiếp của bất kỳ
 lệnh nào trong ba lệnh trên — và triệu chứng (ảnh vỡ, route 404) chỉ hiện ra rất
 lâu sau, vào lúc **không liên quan gì tới lệnh đã gây ra nó**.
@@ -617,7 +670,7 @@ sudo nginx -t && sudo systemctl reload nginx
 > `location ^~` cũ với mới. Tiền tố nào sắp biến mất thì file cũ được **sao lưu**
 > sang `<domain>.conf.napp-orphaned` và napp nói rõ mất cái gì — kèm hai hướng
 > xử lý: chuyển sang `.custom.conf` (nếu là location bạn viết), hoặc khai báo lại
-> vào registry bằng `napp app set` (nếu đó là cấu hình napp bị rơi mất).
+> vào registry bằng `napp app update` (nếu đó là cấu hình napp bị rơi mất).
 >
 > Cố ý so **tiền tố** chứ không dùng fingerprint như unit systemd: file của app
 > tạo bằng bản napp cũ không có fingerprint nào, dùng cách đó là **cảnh báo sai
@@ -688,17 +741,17 @@ dẫn nào sai.
 > hai nửa của **cùng một sản phẩm**; worker độc lập (bot, cron poller, worker
 > của sản phẩm khác) thì **bỏ `--run-as`** để giữ user riêng — đó vẫn là mặc định.
 >
-> Đổi lại, napp **không bao giờ xoá user đi mượn**: `napp service remove --source`
-> giữ nguyên user, và `napp app remove --source` từ chối xoá user khi còn worker
+> Đổi lại, napp **không bao giờ xoá user đi mượn**: `napp service delete --source`
+> giữ nguyên user, và `napp app delete --source` từ chối xoá user khi còn worker
 > đang mượn (kèm danh sách worker cần gỡ trước).
 
 Nhu cầu này thường lộ ra **sau** khi worker đã chạy được vài tuần, nên không phải
 xoá đi tạo lại:
 
 ```bash
-sudo napp service set shop-images --run-as shop.example.com   # mượn user app web
-sudo napp service set shop-images --standalone                # quay về user riêng
-sudo napp service set shop-images --write-dir /mnt/media      # đặt lại danh sách ghi thêm
+sudo napp service update shop-images --run-as shop.example.com   # mượn user app web
+sudo napp service update shop-images --standalone                # quay về user riêng
+sudo napp service update shop-images --write-dir /mnt/media      # đặt lại danh sách ghi thêm
 ```
 
 Lệnh này `chown` lại mã nguồn sang user mới, ghi lại unit và restart service.
@@ -731,7 +784,7 @@ Lệnh này `chown` lại mã nguồn sang user mới, ghi lại unit và restar
 ```bash
 sudo napp service logs queue-email -f      # xem log
 sudo napp service deploy queue-email       # git pull + rebuild + restart
-sudo napp service remove queue-email       # gỡ (mặc định giữ mã nguồn + database)
+sudo napp service delete queue-email       # gỡ (mặc định giữ mã nguồn + database)
 ```
 
 ---
@@ -767,7 +820,7 @@ Hai ngoại lệ có chủ đích — napp **vẫn** làm chủ:
 
 - **Phần hardening** (`ProtectSystem`, `NoNewPrivileges`, `ReadWritePaths`…)
   không nằm trong danh sách trên, để bản vá bảo mật còn đường lan tới unit cũ.
-- **Directive chính bạn vừa ra lệnh đổi.** Ví dụ `napp service set --run-as`
+- **Directive chính bạn vừa ra lệnh đổi.** Ví dụ `napp service update --run-as`
   đổi `User`/`Group`: giữ bản sửa tay ở đây là làm ngược lại thứ bạn vừa gõ,
   nên napp ghi đè và **báo rõ** directive nào vừa bị đặt lại.
 
@@ -781,11 +834,11 @@ Sau khi sửa tay: `sudo systemctl daemon-reload && sudo systemctl restart <unit
 - Khi bật asset tĩnh, `www-data` được thêm vào **nhóm của app** để nginx đọc được thư mục build — nginx khi đó đọc được cây mã nguồn ở mức nhóm, nhưng **`.env` vẫn ngoài tầm** (`600`, chỉ chủ sở hữu) và nginx chỉ phục vụ đúng các tiền tố `^~` đã khai báo (không có `try_files` chung)
 - systemd service hardening: `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `ReadWritePaths` giới hạn đúng thư mục app
 - Database: mỗi app một database + user CSDL riêng, quyền chỉ trên database đó (không dùng root)
-- UFW: mặc định deny incoming, mở SSH + **80/443 công khai**. Việc lấy đúng IP client thật khi qua Cloudflare do nginx real-IP đảm nhiệm (`napp cloudflare sync`), độc lập với tường lửa. Nếu muốn khoá origin chỉ nhận traffic từ dải IP Cloudflare (chống bypass thẳng origin IP) thì thêm `--restrict-cloudflare` — lưu ý mọi domain phải bật proxy Cloudflare
+- UFW: mặc định deny incoming, mở SSH + **80/443 công khai**. Việc lấy đúng IP client thật khi qua Cloudflare do nginx real-IP đảm nhiệm (`napp cloudflare apply`), độc lập với tường lửa. Nếu muốn khoá origin chỉ nhận traffic từ dải IP Cloudflare (chống bypass thẳng origin IP) thì thêm `--restrict-cloudflare` — lưu ý mọi domain phải bật proxy Cloudflare
 - fail2ban: chặn brute-force SSH + bot dò nginx + IP spam lỗi 502/504/429 + **jail `napp-scanner`** (quét lỗ hổng PHP — xem mục riêng bên dưới)
 - Cloudflare real-IP: nginx trích xuất đúng IP client thật (không phải IP edge Cloudflare) để app phía sau nhận `X-Real-IP`/`X-Forwarded-For` chính xác
 
-⚠️ **An toàn khi chạy `napp firewall sync` lần đầu**: hãy giữ một phiên
+⚠️ **An toàn khi chạy `napp firewall apply` lần đầu**: hãy giữ một phiên
 SSH/console **thứ hai** đang mở song song — nếu cổng SSH bị dò sai hoặc UFW
 cấu hình nhầm, phiên hiện tại có thể bị khoá ngay lập tức.
 
@@ -983,7 +1036,7 @@ lật ngược nó.
 > limit và job đã hoàn tất). `noeviction` khiến Redis **từ chối lệnh ghi** khi
 > đầy, hỏng lộ liễu thay vì mất việc trong im lặng. Chính sách này áp cho **cả
 > instance**, không tách theo DB index, nên hãy đặt TTL cho key cache của app và
-> theo dõi `napp redis info`.
+> theo dõi `napp redis show`.
 >
 > Server đã chạy `napp tune apply` bằng bản napp **cũ hơn 1.18.0** đang để
 > `volatile-lru`. `napp check` nay phát hiện việc này; sửa bằng một trong hai:
@@ -1005,16 +1058,16 @@ lúc nó tệ đến mức nhìn thấy được.
 Điều trớ trêu: **systemd đã đếm sẵn số lần đó từ đầu**, chỉ là chưa ai đọc ra.
 
 ```bash
-sudo napp mem status     # bộ nhớ hiện tại + SỐ LẦN đã âm thầm restart + kết luận xu hướng
-sudo napp mem watch      # lấy mẫu định kỳ -> mới kết luận được xu hướng
-sudo napp mem trend      # xu hướng từ dữ liệu đã lấy mẫu
+sudo napp mem show     # bộ nhớ hiện tại + SỐ LẦN đã âm thầm restart + kết luận xu hướng
+sudo napp mem watch enable      # lấy mẫu định kỳ -> mới kết luận được xu hướng
+sudo napp mem show --trend      # xu hướng từ dữ liệu đã lấy mẫu
 ```
 
 ### Hai việc khác nhau, đừng gộp làm một
 
 | | Công cụ | Trả lời câu hỏi |
 |---|---|---|
-| **Phát hiện** | `mem status` · `mem watch` · `mem trend` | "Có đang rò rỉ không?" |
+| **Phát hiện** | `mem show` · `mem watch enable` · `mem show --trend` | "Có đang rò rỉ không?" |
 | **Chẩn đoán** | `mem guard` · `mem snapshot` | "Cái gì đang rò rỉ?" |
 
 Cái bạn thiếu khi app chết lần trước là **phát hiện**. Nó gần như miễn phí: chỉ
@@ -1040,7 +1093,7 @@ Và phần khó nhất không phải đo, mà là **kết luận mà không kêu
 ### Chẩn đoán: chụp heap
 
 ```bash
-sudo napp mem guard <app>       # bật cờ Node (CÓ restart đơn vị một lần)
+sudo napp mem guard enable <app>       # bật cờ Node (CÓ restart đơn vị một lần)
 sudo napp mem snapshot <app>    # chụp ngay, app VẪN CHẠY
 ```
 
@@ -1118,7 +1171,7 @@ Site **đã tạo bằng bản cũ** vẫn mang `proxy_buffer_size 16k` ngay tro
 `http` — nên phải chạy:
 
 ```bash
-sudo napp nginx sync
+sudo napp nginx apply
 ```
 
 Lệnh này gỡ khối bộ đệm nội tuyến khỏi vhost (cắt theo dòng, **không** render
@@ -1157,7 +1210,7 @@ thêm `www-data` vào **nhóm** của app rồi **restart** nginx.
 
 ```bash
 sudo napp check --fix          # phát hiện + sửa cho mọi app đang chạy
-sudo napp app set demo.example.com --auto-static   # hoặc sửa cho một app
+sudo napp app update demo.example.com --auto-static   # hoặc sửa cho một app
 ```
 
 Tự kiểm tra:

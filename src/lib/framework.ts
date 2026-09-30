@@ -244,7 +244,7 @@ export function staticFlags(s: StaticSuggestion): string[] {
 
 /** Dòng lệnh sẵn sàng dán vào terminal để áp gợi ý cho một app ĐÃ TẠO. */
 export function staticSetCommand(domain: string, s: StaticSuggestion): string {
-  return `sudo napp app set ${domain} ${staticFlags(s).join(" ")}`;
+  return `sudo napp app update ${domain} ${staticFlags(s).join(" ")}`;
 }
 
 /**

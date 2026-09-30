@@ -27,7 +27,7 @@ import {
 } from "../lib/state";
 import { acquireLock } from "../lib/lock";
 import { resolveEngine, driverFor, unitEngine, activeEngines, type DbEngine } from "../lib/db";
-import { mergeEnvFile } from "../lib/envfile";
+import { mergeEnvFile, removeEnvKeys, printEnvFile } from "../lib/envfile";
 import { renderAppNginxConf, appLocationsPath } from "../templates/nginx";
 import { writeAppLocationsConf, hintCustomLocations, injectLocationsInclude } from "../lib/locationsfile";
 import { ensureNappProxyConf } from "./nginx";
@@ -375,7 +375,7 @@ function assertSiteAbsent(domain: string, user: string, port: number | undefined
     die(
       `Website '${domain}' (hoặc tài nguyên cùng tên) ĐÃ TỒN TẠI — không tạo trùng.\n` +
         conflicts.map((c) => `  - ${c}`).join("\n") +
-        `\n  Muốn tạo lại? Hãy xoá trước bằng: napp app remove ${domain}`
+        `\n  Muốn tạo lại? Hãy xoá trước bằng: napp app delete ${domain}`
     );
   }
 }
@@ -603,7 +603,7 @@ EOF`,
     if (opts.addressHeader) {
       envUpdates.ADDRESS_HEADER = "x-forwarded-for";
       // Đếm từ phải qua trong X-Forwarded-For. 1 = chỉ nginx đứng trước.
-      // LƯU Ý: khi nginx đã bật Cloudflare real-IP (napp cloudflare sync),
+      // LƯU Ý: khi nginx đã bật Cloudflare real-IP (napp cloudflare apply),
       // $remote_addr ĐÃ LÀ IP khách thật nên $proxy_add_x_forwarded_for nối
       // thêm chính nó — vẫn là 1, KHÔNG phải 2. Chỉ tăng khi thực sự có thêm
       // một proxy mà nginx không khôi phục real-IP giúp.
@@ -648,7 +648,7 @@ EOF`,
         `# đúng https://${domain} từ header nginx -> thường KHÔNG cần đặt gì thêm.`,
         "#",
         "# Nếu vẫn dính 403 (hoặc muốn ghim cứng origin), BỎ COMMENT dòng dưới SAU",
-        "# khi đã cấp SSL (napp cert issue) — trước đó cert chưa có, đặt https sẽ sai:",
+        "# khi đã cấp SSL (napp cert create) — trước đó cert chưa có, đặt https sẽ sai:",
         `# ORIGIN=https://${domain}`,
         "",
       ].join("\n")
@@ -691,7 +691,7 @@ EOF`,
       warn(
         `--auto-static: không nhận ra bố cục asset nào trong ${appWorkDir}.\n` +
           `  Nếu app chưa build (thiếu --build-cmd) thì chưa có gì trên đĩa để phục vụ. ` +
-          `Bố cục lạ thì cấu hình tay bằng 'napp app set ${domain} --static-root ... --static-prefix ...'.`
+          `Bố cục lạ thì cấu hình tay bằng 'napp app update ${domain} --static-root ... --static-prefix ...'.`
       );
     }
 
@@ -715,7 +715,7 @@ EOF`,
             `  File tải lên SAU lần build gần nhất sẽ trả 404 (build chỉ sao chép '${upload.publicRoot}/' vào output MỘT LẦN), ` +
               `rồi tự hiện ra sau lần deploy kế tiếp — rất giống lỗi chập chờn.`
           );
-          info(`  Bật bằng: sudo napp app set ${domain} --upload-dir ${upload.dir}`);
+          info(`  Bật bằng: sudo napp app update ${domain} --upload-dir ${upload.dir}`);
         }
       }
     }
@@ -824,7 +824,7 @@ EOF`,
     console.log();
     console.log("  Các bước tiếp theo:");
     console.log(`  1. Trỏ bản ghi DNS A của ${domain} (và www.${domain} nếu dùng) về server này.`);
-    console.log(`  2. Kích hoạt SSL:  sudo napp cert issue ${domain}`);
+    console.log(`  2. Kích hoạt SSL:  sudo napp cert create ${domain}`);
     console.log(`  3. Xem log:        sudo napp app logs ${domain} -f`);
     console.log("  App SvelteKit dùng form action: nếu POST bị 403 CSRF, xem ghi chú ORIGIN trong .env.");
     console.log("===============================================================");
@@ -997,7 +997,7 @@ export async function cmdAppRemove(domain: string, opts: AppRemoveOptions): Prom
           `GIỮ LẠI user hệ thống '${app.user}' — ${borrowers.length} background service đang chạy bằng user này (--run-as):\n` +
             borrowers.map((s) => `  - ${s.name}`).join("\n") +
             `\n  Xoá user đi là các service đó chết ngay lần khởi động sau. Gỡ chúng trước nếu thật sự muốn xoá user:\n` +
-            borrowers.map((s) => `    sudo napp service remove ${s.name} --source`).join("\n") +
+            borrowers.map((s) => `    sudo napp service delete ${s.name} --source`).join("\n") +
             `\n  Lưu ý: thư mục ${app.webRoot} vừa xoá cũng nằm trong ReadWritePaths của chúng — systemd TỪ CHỐI khởi động unit khi đường dẫn đó không còn.`
         );
       } else if (execCapture("id", [app.user]).code === 0) {
@@ -1017,14 +1017,14 @@ export async function cmdAppRemove(domain: string, opts: AppRemoveOptions): Prom
         } catch (e) {
           warn(
             `Không xoá được database '${app.dbName}' (${(e as Error).message}). ` +
-              `Các tài nguyên khác đã xử lý xong — hãy tự xoá database này sau bằng 'napp db drop ${app.dbName} --engine ${unitEngine(app)} --yes --user ${app.dbUser ?? app.dbName}'.`
+              `Các tài nguyên khác đã xử lý xong — hãy tự xoá database này sau bằng 'napp db delete ${app.dbName} --engine ${unitEngine(app)} --yes --user ${app.dbUser ?? app.dbName}'.`
           );
         }
       } else {
         info("App không có database riêng — bỏ qua.");
       }
     } else if (app.dbName) {
-      info(`Giữ lại database '${app.dbName}'. Muốn xoá sau: napp db drop ${app.dbName} --engine ${unitEngine(app)} --yes --user ${app.dbUser ?? app.dbName}`);
+      info(`Giữ lại database '${app.dbName}'. Muốn xoá sau: napp db delete ${app.dbName} --engine ${unitEngine(app)} --yes --user ${app.dbUser ?? app.dbName}`);
     }
 
     removeAppFromState(domain);
@@ -1126,7 +1126,59 @@ export function cmdAppEnvSet(domain: string, pairs: string[]): void {
   ok(`Đã cập nhật .env cho '${domain}'. Chạy 'napp app restart ${domain}' để áp dụng.`);
 }
 
-// --- napp app set --------------------------------------------------------
+export function cmdAppEnvList(domain: string, opts: { reveal: boolean }): void {
+  requireRoot(); // .env là 0600 của user app
+  validateDomain(domain);
+  const app = requireApp(domain);
+  const appEnv = `${unitWorkDir(app.webRoot, app.appDir)}/.env`;
+  section(`.env của '${domain}' (${appEnv})`);
+  printEnvFile(appEnv, opts.reveal);
+}
+
+export function cmdAppEnvUnset(domain: string, keys: string[]): void {
+  requireRoot();
+  validateDomain(domain);
+  const app = requireApp(domain);
+  for (const k of keys) validateEnvKey(k);
+  const appEnv = `${unitWorkDir(app.webRoot, app.appDir)}/.env`;
+  const removed = removeEnvKeys(appEnv, keys, 0o600);
+  const missing = keys.filter((k) => !removed.includes(k));
+  if (missing.length > 0) warn(`Không có trong .env: ${missing.join(", ")}`);
+  if (removed.length === 0) return;
+  runCmd("chown", [`${app.user}:${app.user}`, appEnv]);
+  ok(`Đã xoá ${removed.join(", ")} khỏi .env của '${domain}'. Chạy 'napp app restart ${domain}' để áp dụng.`);
+}
+
+export function cmdAppShow(domain: string): void {
+  validateDomain(domain);
+  const app = requireApp(domain);
+  const unit = serviceNameFor(domain);
+  const running = execCapture("systemctl", ["is-active", "--quiet", unit]).code === 0;
+  section(`App ${domain}`);
+  const rows: [string, string | undefined][] = [
+    ["Trạng thái", running ? "đang chạy" : "ĐÃ DỪNG"],
+    ["Domain phụ", app.aliasDomains.length > 0 ? app.aliasDomains.join(", ") : "-"],
+    ["Mã nguồn", app.webRoot + (app.appDir ? ` (app ở ${app.appDir})` : "")],
+    ["Repo", app.repoUrl ? `${app.repoUrl} @ ${app.branch}` : "- (app mẫu)"],
+    ["Chạy bằng", `${app.user} · systemd ${unit}`],
+    ["Cổng nội bộ", `127.0.0.1:${app.port}`],
+    ["Runtime", `${app.nodeRuntime} · ${app.packageManager ?? "npm"}`],
+    ["Lệnh", `install: ${app.installCmd} · build: ${app.buildCmd || "-"} · start: ${app.startCmd}`],
+    ["Database", app.dbName ? `${driverFor(unitEngine(app)).label} '${app.dbName}' (user ${app.dbUser ?? app.dbName})` : "-"],
+    ["Redis DB", app.redisDbIndex !== undefined ? `#${app.redisDbIndex}` : "-"],
+    ["Asset tĩnh", app.staticRoot ? `${app.staticRoot} ${(app.staticPrefixes ?? []).join(" ")}` : app.staticAliases?.length ? app.staticAliases.map((a) => `${a.prefix}=${a.dir}`).join(" ") : "-"],
+    ["File tải lên", app.uploadDir ? `${app.uploadDir} (${app.uploadPrefix ?? "/uploads/"})` : "-"],
+    ["Chặn hotlink", app.hotlinkProtect ? `bật${app.hotlinkStrict ? " (strict)" : ""}${app.hotlinkAllow?.length ? ` · cho phép ${app.hotlinkAllow.join(", ")}` : ""}` : "tắt"],
+    ["Chặn quét PHP", app.scanBlock === false ? "TẮT cho site này" : "bật"],
+    ["Upload tối đa", app.maxBodySize ?? "20M"],
+    ["Framework", app.framework],
+    ["Leak guard", app.leakGuard ? "bật" : undefined],
+    ["Tạo lúc", app.createdAt],
+  ];
+  for (const [k, v] of rows) if (v !== undefined) console.log(`  ${k.padEnd(14)}: ${v}`);
+}
+
+// --- napp app update --------------------------------------------------------
 
 export interface SetAppOptions {
   staticRoot?: string;
@@ -1145,7 +1197,7 @@ export interface SetAppOptions {
 /**
  * Đổi cấu hình nginx của một app ĐÃ TẠO.
  *
- * `napp nginx sync` KHÔNG làm được việc này: nó chỉ vá đúng một chuỗi
+ * `napp nginx apply` KHÔNG làm được việc này: nó chỉ vá đúng một chuỗi
  * (`Connection "upgrade"`) chứ không render lại vhost — và cố ý như vậy, vì
  * certbot chèn khối SSL thẳng vào vhost nên render lại là xoá HTTPS đang chạy.
  * Nên các tuỳ chọn thêm ở 1.15.0 chỉ áp dụng cho app tạo mới; app đang chạy cần
@@ -1254,8 +1306,8 @@ export function cmdAppSet(domain: string, opts: SetAppOptions): void {
     }
     die(
       `Không có gì để đổi. Truyền ít nhất một tuỳ chọn, ví dụ:\n` +
-        `  napp app set ${domain} --auto-static   (napp tự nhận diện framework từ thư mục build)\n` +
-        `  napp app set ${domain} --static-root ${app.webRoot}/build/client --static-prefix /_app/`
+        `  napp app update ${domain} --auto-static   (napp tự nhận diện framework từ thư mục build)\n` +
+        `  napp app update ${domain} --static-root ${app.webRoot}/build/client --static-prefix /_app/`
     );
   }
 
@@ -1319,10 +1371,10 @@ export function cmdAppSet(domain: string, opts: SetAppOptions): void {
   if (opts.scanBlock === false) {
     warn(
       `• Chặn quét lỗ hổng ĐÃ TẮT cho ${domain}: request dò '/wp-login.php', '/phpmyadmin/'... lại đi qua Node ` +
-        `và quay lại access log của site. Bật lại: napp app set ${domain} --scan-block`
+        `và quay lại access log của site. Bật lại: napp app update ${domain} --scan-block`
     );
   } else if (opts.scanBlock === true) {
-    info(`• Chặn quét lỗ hổng đã BẬT lại cho ${domain} (danh sách mẫu dùng chung: napp nginx scanblock để bật/tắt toàn máy).`);
+    info(`• Chặn quét lỗ hổng đã BẬT lại cho ${domain} (danh sách mẫu dùng chung: napp nginx scan-block enable để bật/tắt toàn máy).`);
   }
   if (app.hotlinkProtect) reportHotlink(app);
 }
