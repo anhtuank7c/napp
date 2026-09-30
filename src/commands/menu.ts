@@ -1,31 +1,72 @@
+import { existsSync } from "node:fs";
 import { ask as promptAsk, askBlock, PromptCancelled } from "../lib/prompt";
+import { execCapture } from "../lib/exec";
 import { cmdCheck } from "./check";
 import { cmdDoctor, cmdDoctorSystem, cmdDoctorDeps, cmdDoctorUpgrade } from "./doctor";
-import { cmdAppCreate, cmdAppDeploy, cmdAppRemove, cmdAppList, cmdAppRestart, cmdAppLogs, cmdAppSet, listAppSummaries } from "./app";
+import {
+  cmdAppCreate,
+  cmdAppDeploy,
+  cmdAppRemove,
+  cmdAppRestart,
+  cmdAppStop,
+  cmdAppStart,
+  cmdAppLogs,
+  cmdAppSet,
+  cmdAppShow,
+  cmdAppEnvList,
+  cmdAppEnvSet,
+  cmdAppEnvUnset,
+  listAppSummaries,
+} from "./app";
 import {
   cmdServiceCreate,
   cmdServiceDeploy,
   cmdServiceRemove,
-  cmdServiceList,
   cmdServiceRestart,
+  cmdServiceStop,
+  cmdServiceStart,
   cmdServiceLogs,
+  cmdServiceShow,
+  cmdServiceSet,
+  cmdServiceEnvList,
+  cmdServiceEnvSet,
+  cmdServiceEnvUnset,
   listServiceSummaries,
 } from "./service";
 import type { Runtime, PackageManager } from "../lib/state";
-import { cmdCertIssue, cmdCertRenew, cmdCertList, cmdCertRevoke } from "./cert";
-import { getAcmeEmail, findUnit } from "../lib/state";
-import { cmdDbCreate, cmdDbList, cmdDbBackup } from "./db";
-import { cmdRedisAllocations, cmdRedisInfo } from "./redis";
-import { cmdBackupRun, cmdBackupSchedule, cmdBackupList, cmdBackupUnschedule, DEFAULT_RETENTION_DAYS } from "./backup";
-import { activeEngines, driverFor, DB_ENGINES, type DbEngine } from "../lib/db";
-import { cmdDbEngineList, cmdDbEngineAdd, cmdDbEngineRemove } from "./dbengine";
+import { getAcmeEmail, findUnit, getApp, getService, serviceNameFor, svcSystemdName, loadState } from "../lib/state";
+import { cmdDomainAdd, cmdDomainRemove, cmdDomainList } from "./domain";
+import { cmdCertIssue, cmdCertRenew, cmdCertList, cmdCertRevoke, cmdCertStatus } from "./cert";
+import { cmdDbCreate, cmdDbList, cmdDbBackup, cmdDbDrop } from "./db";
+import { cmdRedisAllocations, cmdRedisInfo, cmdRedisFlush } from "./redis";
+import {
+  cmdBackupRun,
+  cmdBackupSchedule,
+  cmdBackupList,
+  cmdBackupUnschedule,
+  cmdBackupScheduleShow,
+  DEFAULT_RETENTION_DAYS,
+  BACKUP_TIMER_NAME,
+} from "./backup";
+import { activeEngines, driverFor, DB_ENGINES, unitEngine, type DbEngine } from "../lib/db";
+import { cmdDbEngineList, cmdDbEngineAdd, cmdDbEngineRemove, cmdDbEngineDefault } from "./dbengine";
 import { cmdFirewallSync, cmdFirewallStatus } from "./firewall";
-import { cmdFail2banSetup, cmdFail2banStatus } from "./fail2ban";
+import { cmdFail2banSetup, cmdFail2banStatus, cmdFail2banUnban } from "./fail2ban";
 import { cmdTuneApply, cmdTuneShow } from "./tune";
-import { cmdCloudflareSync, cmdCloudflareSchedule, cmdCloudflareUnschedule } from "./cloudflare";
-import { cmdNginxHarden, cmdNginxUnharden, cmdNginxSync, cmdNginxScanBlock, cmdNginxUnscanBlock } from "./nginx";
-import { cmdMemStatus, cmdMemWatch, cmdMemUnwatch } from "./mem";
-import { cmdUpdate, cmdVersion } from "./update";
+import { cmdCloudflareSync, cmdCloudflareSchedule, cmdCloudflareUnschedule, cmdCloudflareScheduleShow, CF_TIMER_NAME } from "./cloudflare";
+import {
+  cmdNginxHarden,
+  cmdNginxUnharden,
+  cmdNginxSync,
+  cmdNginxScanBlock,
+  cmdNginxUnscanBlock,
+  nginxHardeningEnabled,
+  scannerBlockEnabled,
+} from "./nginx";
+import { cmdMemStatus, cmdMemTrend, cmdMemWatch, cmdMemUnwatch, cmdMemWatchShow, cmdMemSnapshot, cmdMemGuard } from "./mem";
+import { MEMWATCH_TIMER_NAME } from "../lib/memwatch";
+import { timerState } from "../lib/timer";
+import { cmdUpdate, cmdVersion, cmdChangelog } from "./update";
 import { NAPP_VERSION } from "../version";
 import { section, info, warn, printDie, colorText, NappError } from "../lib/log";
 
@@ -198,9 +239,13 @@ async function askRetentionDays(): Promise<number> {
 // in thẳng ra lúc đó thì người dùng không kịp đọc.
 let notice: string | undefined;
 
-function printMenu(title: string, items: string[], exitLabel = "Quay lại"): void {
+function printMenu(title: string, items: string[], exitLabel = "Quay lại", header?: string[]): void {
   console.clear();
   section(title);
+  if (header?.length) {
+    for (const line of header) console.log(`  ${line}`);
+    console.log();
+  }
   items.forEach((label, i) => console.log(`  ${i + 1}. ${label}`));
   console.log(`  0. ${exitLabel}`);
   console.log();
@@ -280,415 +325,947 @@ async function submenu(fn: () => Promise<void>): Promise<void> {
   }
 }
 
-async function menuApp(): Promise<void> {
+// ==========================================================================
+// Khung menu: mỗi màn hình là MỘT ngữ cảnh (một nhóm, hoặc một app/service cụ
+// thể đã chọn). Danh sách mục được dựng lại MỖI LẦN vẽ, nên nhãn luôn phản ánh
+// trạng thái thật: [BẬT]/[TẮT], ● đang chạy / ○ đã dừng, số lượng app...
+// ==========================================================================
+
+interface Item {
+  label: string;
+  run: () => unknown;
+  /** true = mở một menu con (không dừng "Nhấn Enter" sau khi quay lại). */
+  open?: boolean;
+}
+
+interface Screen {
+  title: string;
+  header?: string[];
+  items: Item[];
+}
+
+/**
+ * Vòng lặp chung cho mọi menu con: đánh số, '0'/Enter = quay lại, lựa chọn sai
+ * được báo ngay dưới menu. Mục hành động chạy qua guard (lỗi báo rõ, quay lại
+ * menu), mục mở menu con chạy qua submenu. `screen` trả undefined = ngữ cảnh
+ * không còn (vd app vừa bị xoá) -> tự quay lại menu cha.
+ */
+async function menuLoop(screen: () => Screen | undefined): Promise<void> {
   while (true) {
-    printMenu("Quản lý App Node.js/Bun", [
-      "Danh sách app",
-      "Tạo app mới",
-      "Deploy (git pull + rebuild + restart)",
-      "Restart app",
-      "Xem log (tail 100 dòng)",
-      "Bật nginx trả asset tĩnh (tự nhận diện framework)",
-      "Xoá app",
-    ]);
+    const s = screen();
+    if (!s) return;
+    printMenu(
+      s.title,
+      s.items.map((i) => (i.open ? `${i.label} ›` : i.label)),
+      "Quay lại",
+      s.header
+    );
     const choice = await ask("Chọn: ");
     if (choice === "0" || choice === "") return;
-    if (choice === "1") {
-      await guard(() => cmdAppList());
-    } else if (choice === "2") {
-      await guard(async () => {
-        const domain = await ask("Domain (vd: api.example.com): ");
-        const repo = await ask("Git repo URL (bỏ trống nếu chưa có): ");
-        // Repo PRIVATE cần xác thực trước — nếu không sẽ treo ở prompt nhập
-        // username/password (HTTPS) hoặc yes/no host-key (SSH). Hỏi ngay tại đây.
-        let token: string | undefined;
-        let sshKey: string | undefined;
-        if (repo && (await askYesNo("Repo này có PRIVATE (cần xác thực) không?"))) {
-          if (/^https?:\/\//i.test(repo)) {
-            token = (await ask("Personal Access Token (HTTPS): ")).trim() || undefined;
-          } else {
-            sshKey = await askSshKey();
-          }
-        }
-        const runtime = await askChoice<Runtime>("Runtime engine", ["node", "bun"], "node");
-        // Mặc định package manager theo runtime: bun -> bun, node -> npm.
-        const pmDefault: PackageManager = runtime === "bun" ? "bun" : "npm";
-        const packageManager = await askChoice<PackageManager>("Trình quản lý gói phụ thuộc", ["npm", "pnpm", "yarn", "bun"], pmDefault);
-        const dbEngine = (await askYesNo("Tạo database riêng cho app này?")) ? await askEngine("tạo database") : undefined;
-        const redis = await askYesNo("Cấp Redis DB riêng cho app này?");
-        // Hỏi thay vì bật ngầm: napp chiếm tiền tố URL bằng 'location ^~', thứ
-        // thắng cả proxy_pass. Người dùng phải BIẾT điều đó đang xảy ra.
-        const autoStatic = await askYesNo("Cho nginx trả thẳng asset tĩnh nếu nhận diện được framework (nhanh hơn nhiều)?");
-        await cmdAppCreate(domain, {
-          repo: repo || undefined,
-          branch: "main",
-          token,
-          sshKey,
-          runtime,
-          packageManager,
-          db: dbEngine !== undefined,
-          dbEngine,
-          redis,
-          autoStatic,
-          env: [],
-        });
-      });
-    } else if (choice === "3") {
-      await guard(async () => {
-        const domain = await askAppDomain("deploy");
-        if (domain) await cmdAppDeploy(domain);
-      });
-    } else if (choice === "4") {
-      await guard(async () => {
-        const domain = await askAppDomain("restart");
-        if (domain) cmdAppRestart(domain);
-      });
-    } else if (choice === "5") {
-      await guard(async () => {
-        const domain = await askAppDomain("xem log");
-        if (domain) cmdAppLogs(domain, { follow: false, lines: 100 });
-      });
-    } else if (choice === "6") {
-      await guard(async () => {
-        const domain = await askAppDomain("bật asset tĩnh");
-        if (domain) cmdAppSet(domain, { autoStatic: true });
-      });
-    } else if (choice === "7") {
-      await guard(async () => {
-        const domain = await askAppDomain("XOÁ");
-        if (!domain) return;
-        // Mặc định tick sẵn nginx + ssl; mã nguồn + database là tuỳ chọn (giữ dữ liệu).
-        const sel = await askMultiSelect(`Chọn những gì cần xoá khi gỡ app '${domain}' ([x] = sẽ xoá; service systemd luôn bị gỡ):`, [
-          { key: "nginx", label: "Cấu hình domain nginx", default: true },
-          { key: "ssl", label: "Chứng chỉ SSL", default: true },
-          { key: "source", label: "Mã nguồn (và user hệ thống)", default: false },
-          { key: "database", label: "Database", default: false },
-        ]);
-        const yes = await askYesNo(`Xác nhận gỡ app '${domain}' (không thể hoàn tác)?`);
-        if (yes)
-          await cmdAppRemove(domain, {
-            yes: true,
-            nginx: sel.has("nginx"),
-            ssl: sel.has("ssl"),
-            source: sel.has("source"),
-            database: sel.has("database"),
-          });
-      });
+    const n = Number(choice);
+    const item = Number.isInteger(n) ? s.items[n - 1] : undefined;
+    if (!item) {
+      notice = colorText("yellow", `Lựa chọn không hợp lệ: '${choice}'. Gõ số từ 0 đến ${s.items.length}.`);
+      continue;
     }
+    if (item.open) await submenu(async () => void (await item.run()));
+    else await guard(async () => void (await item.run()));
   }
 }
 
-async function menuService(): Promise<void> {
+const state = (on: boolean) => (on ? colorText("green", "[BẬT]") : colorText("dim", "[TẮT]"));
+const running = (on: boolean) => (on ? colorText("green", "● đang chạy") : colorText("yellow", "○ đã dừng"));
+
+/** In lệnh CLI tương đương — người dùng menu học dần được lệnh để viết script. */
+function cli(cmd: string): void {
+  console.log(colorText("dim", `Lệnh tương đương: sudo napp ${cmd}`));
+}
+
+/** Một công tắc: hỏi xác nhận theo chiều sẽ đổi, rồi gọi hàm bật/tắt tương ứng. */
+async function flip(what: string, on: boolean, enable: () => unknown, disable: () => unknown, cmdOn: string, cmdOff: string): Promise<void> {
+  if (!(await askYesNo(`${on ? "TẮT" : "BẬT"} ${what}?`))) {
+    info("Không thay đổi gì.");
+    return;
+  }
+  cli(on ? cmdOff : cmdOn);
+  await (on ? disable() : enable());
+}
+
+function unitRunning(systemdName: string): boolean {
+  return execCapture("systemctl", ["is-active", "--quiet", systemdName]).code === 0;
+}
+
+/** Hỏi nhiều cặp KEY=VALUE, mỗi dòng một cặp (giá trị được phép có dấu cách). */
+async function askEnvPairs(): Promise<string[]> {
+  const pairs: string[] = [];
+  console.log("Nhập từng biến dạng KEY=VALUE, mỗi dòng một biến. Enter trống = xong.");
   while (true) {
-    printMenu("Quản lý Background Service (chạy ngầm, không domain)", [
-      "Danh sách service",
-      "Tạo service mới",
-      "Deploy (git pull + rebuild + restart)",
-      "Restart service",
-      "Xem log (tail 100 dòng)",
-      "Xoá service",
-    ]);
-    const choice = await ask("Chọn: ");
-    if (choice === "0" || choice === "") return;
-    if (choice === "1") {
-      await guard(() => cmdServiceList());
-    } else if (choice === "2") {
-      await guard(async () => {
-        const name = await ask("Tên service (vd: worker-telegram, queue-email): ");
-        const repo = await ask("Git repo URL (bỏ trống nếu chưa có): ");
-        let token: string | undefined;
-        let sshKey: string | undefined;
-        if (repo && (await askYesNo("Repo này có PRIVATE (cần xác thực) không?"))) {
-          if (/^https?:\/\//i.test(repo)) {
-            token = (await ask("Personal Access Token (HTTPS): ")).trim() || undefined;
-          } else {
-            sshKey = await askSshKey();
-          }
-        }
-        const startCmd = (await ask("Lệnh khởi động (Enter = 'npm start' theo package.json; vd: node worker.js): ")).trim() || undefined;
-        const runtime = await askChoice<Runtime>("Runtime engine", ["node", "bun"], "node");
-        const pmDefault: PackageManager = runtime === "bun" ? "bun" : "npm";
-        const packageManager = await askChoice<PackageManager>("Trình quản lý gói phụ thuộc", ["npm", "pnpm", "yarn", "bun"], pmDefault);
-        const wantPort = await askYesNo("Service có tự listen một cổng nội bộ không (health-check/socket)?");
-        let port: number | undefined;
-        if (wantPort) {
-          const p = parseInt((await ask("Cổng nội bộ (Enter = tự cấp 3000-3999): ")).trim(), 10);
-          if (Number.isInteger(p)) port = p;
-        }
-        // Worker "nửa kia của một app web" (nén ảnh, sinh thumbnail, dọn cache)
-        // phải chạy BẰNG user của app đó mới đọc/ghi được file của nó — thư mục
-        // app là 750 của user riêng, user khác không vào nổi.
-        let runAs: string | undefined;
-        if (await askYesNo("Worker này có đọc/ghi FILE của một app web đã có không (nén ảnh, thumbnail, dọn cache)?")) {
-          runAs = await askAppDomain("chạy chung user hệ thống (worker sẽ ghi được vào thư mục của app này)");
-        }
-        const dbEngine = (await askYesNo("Tạo database riêng cho service này?")) ? await askEngine("tạo database") : undefined;
-        const redis = await askYesNo("Cấp Redis DB riêng cho service này?");
-        // Dùng chung user gần như luôn đi kèm dùng chung hàng đợi. Chỉ hỏi khi
-        // app kia thật sự có Redis DB, tránh dẫn người dùng vào lựa chọn chết.
-        const sharedRedis = runAs ? findUnit(runAs)?.redisDbIndex : undefined;
-        let shareRedisWith: string | undefined;
-        if (redis && runAs && sharedRedis !== undefined) {
-          if (await askYesNo(`Dùng CHUNG Redis DB #${sharedRedis} với '${runAs}' (BẮT BUỘC nếu worker tiêu thụ hàng đợi của app đó)?`, true)) {
-            shareRedisWith = runAs;
-          }
-        }
-        await cmdServiceCreate(name, {
-          repo: repo || undefined,
-          branch: "main",
-          token,
-          sshKey,
-          startCmd,
-          runtime,
-          packageManager,
-          port,
-          db: dbEngine !== undefined,
-          dbEngine,
-          redis,
-          shareRedisWith,
-          runAs,
-          writeDirs: [],
-          env: [],
-        });
-      });
-    } else if (choice === "3") {
-      await guard(async () => {
-        const name = await askServiceName("deploy");
-        if (name) await cmdServiceDeploy(name);
-      });
-    } else if (choice === "4") {
-      await guard(async () => {
-        const name = await askServiceName("restart");
-        if (name) cmdServiceRestart(name);
-      });
-    } else if (choice === "5") {
-      await guard(async () => {
-        const name = await askServiceName("xem log");
-        if (name) cmdServiceLogs(name, { follow: false, lines: 100 });
-      });
-    } else if (choice === "6") {
-      await guard(async () => {
-        const name = await askServiceName("XOÁ");
-        if (!name) return;
-        const sel = await askMultiSelect(`Chọn những gì cần xoá khi gỡ service '${name}' ([x] = sẽ xoá; service systemd luôn bị gỡ):`, [
-          { key: "source", label: "Mã nguồn (và user hệ thống)", default: false },
-          { key: "database", label: "Database", default: false },
-        ]);
-        const yes = await askYesNo(`Xác nhận gỡ service '${name}' (không thể hoàn tác)?`);
-        if (yes)
-          await cmdServiceRemove(name, {
-            yes: true,
-            source: sel.has("source"),
-            database: sel.has("database"),
-          });
-      });
+    const line = await ask(`  biến #${pairs.length + 1}: `);
+    if (!line) return pairs;
+    if (!line.includes("=")) {
+      warn("Thiếu dấu '=' — bỏ qua dòng này.");
+      continue;
     }
+    pairs.push(line);
   }
 }
 
+/** Hỏi chọn một app HOẶC service (cho các thao tác áp dụng cho cả hai). */
+async function askUnit(actionLabel: string): Promise<string | undefined> {
+  const ids = [...listAppSummaries().map((a) => a.domain), ...listServiceSummaries().map((s) => s.name)];
+  if (ids.length === 0) {
+    warn("Chưa có app hay service nào.");
+    return undefined;
+  }
+  console.log(`Chọn app/service để ${actionLabel}:`);
+  ids.forEach((id, i) => console.log(`  ${i + 1}. ${id}`));
+  const ans = await ask(`Chọn [1-${ids.length}] (0 = huỷ): `);
+  const n = parseInt(ans, 10);
+  if (!ans || ans === "0") return undefined;
+  return Number.isInteger(n) && n >= 1 && n <= ids.length ? ids[n - 1] : ids.find((id) => id === ans);
+}
+
+// ------------------------------------------------------------ 1. Môi trường
+async function menuCheck(): Promise<void> {
+  await menuLoop(() => ({
+    title: "Kiểm tra & sửa môi trường",
+    items: [
+      { label: "Kiểm tra (chỉ xem, không thay đổi gì)", run: () => (cli("check"), cmdCheck({ fix: false, yes: false })) },
+      { label: "Kiểm tra và TỰ CÀI / SỬA phần còn thiếu", run: () => (cli("check --fix"), cmdCheck({ fix: true, yes: false })) },
+    ],
+  }));
+}
+
+// ------------------------------------------------------------------ 2. App
+async function createAppFlow(): Promise<void> {
+  const domain = await ask("Domain (vd: api.example.com): ");
+  if (!domain) return;
+  const repo = await ask("Git repo URL (bỏ trống nếu chưa có): ");
+  // Repo PRIVATE cần xác thực trước — nếu không sẽ treo ở prompt nhập
+  // username/password (HTTPS) hoặc yes/no host-key (SSH). Hỏi ngay tại đây.
+  let token: string | undefined;
+  let sshKey: string | undefined;
+  if (repo && (await askYesNo("Repo này có PRIVATE (cần xác thực) không?"))) {
+    if (/^https?:\/\//i.test(repo)) token = (await ask("Personal Access Token (HTTPS): ")) || undefined;
+    else sshKey = await askSshKey();
+  }
+  const runtime = await askChoice<Runtime>("Runtime engine", ["node", "bun"], "node");
+  const pmDefault: PackageManager = runtime === "bun" ? "bun" : "npm";
+  const packageManager = await askChoice<PackageManager>("Trình quản lý gói phụ thuộc", ["npm", "pnpm", "yarn", "bun"], pmDefault);
+  const dbEngine = (await askYesNo("Tạo database riêng cho app này?")) ? await askEngine("tạo database") : undefined;
+  const redis = await askYesNo("Cấp Redis DB riêng cho app này?");
+  // Hỏi thay vì bật ngầm: napp chiếm tiền tố URL bằng 'location ^~', thứ thắng
+  // cả proxy_pass. Người dùng phải BIẾT điều đó đang xảy ra.
+  const autoStatic = await askYesNo("Cho nginx trả thẳng asset tĩnh nếu nhận diện được framework (nhanh hơn nhiều)?");
+  await cmdAppCreate(domain, {
+    repo: repo || undefined,
+    branch: "main",
+    token,
+    sshKey,
+    runtime,
+    packageManager,
+    db: dbEngine !== undefined,
+    dbEngine,
+    redis,
+    autoStatic,
+    env: [],
+  });
+}
+
+async function menuApps(): Promise<void> {
+  await menuLoop(() => {
+    const apps = listAppSummaries();
+    return {
+      title: `App web (${apps.length})`,
+      header: apps.length === 0 ? ["Chưa có app nào — chọn 1 để tạo app đầu tiên."] : undefined,
+      items: [
+        { label: "Tạo app mới", run: createAppFlow },
+        ...apps.map((a) => ({
+          label: `${a.domain.padEnd(32)} ${running(a.running)}`,
+          run: () => appContext(a.domain),
+          open: true,
+        })),
+      ],
+    };
+  });
+}
+
+async function appContext(domain: string): Promise<void> {
+  await menuLoop(() => {
+    const app = getApp(domain);
+    if (!app) return undefined; // vừa bị xoá
+    const up = unitRunning(serviceNameFor(domain));
+    const ssl = existsSync(`/etc/letsencrypt/live/${domain}`);
+    return {
+      title: `App ${domain}`,
+      header: [
+        `${running(up)} · 127.0.0.1:${app.port} · ${app.nodeRuntime}/${app.packageManager ?? "npm"} · ` +
+          `SSL: ${ssl ? "có" : "chưa"} · DB: ${app.dbName ? `${unitEngine(app)} '${app.dbName}'` : "-"} · Redis: ${app.redisDbIndex !== undefined ? `#${app.redisDbIndex}` : "-"}`,
+      ],
+      items: [
+        { label: "Xem chi tiết", run: () => (cli(`app show ${domain}`), cmdAppShow(domain)) },
+        { label: "Deploy (git pull + build + restart)", run: () => (cli(`app deploy ${domain}`), cmdAppDeploy(domain)) },
+        { label: "Khởi động lại", run: () => (cli(`app restart ${domain}`), cmdAppRestart(domain)) },
+        up
+          ? { label: "Dừng app", run: () => (cli(`app stop ${domain}`), cmdAppStop(domain)) }
+          : { label: "Khởi động app", run: () => (cli(`app start ${domain}`), cmdAppStart(domain)) },
+        { label: "Xem log (100 dòng)", run: () => (cli(`app logs ${domain} -n 100`), cmdAppLogs(domain, { follow: false, lines: 100 })) },
+        { label: "Biến môi trường (.env)", run: () => envMenu("app", domain), open: true },
+        { label: `Domain phụ (${app.aliasDomains.length})`, run: () => aliasMenu(domain), open: true },
+        { label: `SSL`, run: () => appSslMenu(domain), open: true },
+        { label: "Nginx: asset tĩnh · file tải lên · hotlink · giới hạn upload", run: () => appNginxMenu(domain), open: true },
+        {
+          label: `${state(Boolean(app.leakGuard))} Leak guard — tự chụp heap trước khi chết vì hết bộ nhớ`,
+          run: () =>
+            flip(
+              `leak guard cho '${domain}' (app sẽ RESTART một lần)`,
+              Boolean(app.leakGuard),
+              () => cmdMemGuard(domain, true),
+              () => cmdMemGuard(domain, false),
+              `mem guard enable ${domain}`,
+              `mem guard disable ${domain}`
+            ),
+        },
+        { label: "Chụp heap snapshot ngay (app vẫn chạy)", run: () => (cli(`mem snapshot ${domain}`), cmdMemSnapshot(domain)) },
+        { label: colorText("red", "Xoá app"), run: () => deleteAppFlow(domain) },
+      ],
+    };
+  });
+}
+
+async function deleteAppFlow(domain: string): Promise<void> {
+  // Mặc định tick sẵn nginx + ssl; mã nguồn + database là tuỳ chọn (giữ dữ liệu).
+  const sel = await askMultiSelect(`Chọn những gì cần xoá khi gỡ app '${domain}' ([x] = sẽ xoá; service systemd luôn bị gỡ):`, [
+    { key: "nginx", label: "Cấu hình domain nginx", default: true },
+    { key: "ssl", label: "Chứng chỉ SSL", default: true },
+    { key: "source", label: "Mã nguồn (và user hệ thống)", default: false },
+    { key: "database", label: "Database", default: false },
+  ]);
+  if (!(await askYesNo(`Xác nhận gỡ app '${domain}' (không thể hoàn tác)?`))) return info("Không thay đổi gì.");
+  cli(`app delete ${domain} -y${sel.has("source") ? " --source" : ""}${sel.has("database") ? " --database" : ""}${sel.has("nginx") ? "" : " --keep-nginx"}${sel.has("ssl") ? "" : " --keep-ssl"}`);
+  await cmdAppRemove(domain, { yes: true, nginx: sel.has("nginx"), ssl: sel.has("ssl"), source: sel.has("source"), database: sel.has("database") });
+}
+
+async function envMenu(kind: "app" | "service", id: string): Promise<void> {
+  await menuLoop(() => ({
+    title: `Biến môi trường — ${kind} ${id}`,
+    header: [colorText("dim", `Sửa xong cần khởi động lại ${kind} để có hiệu lực.`)],
+    items: [
+      {
+        label: "Xem (giá trị bí mật bị che)",
+        run: () => (cli(`${kind} env list ${id}`), kind === "app" ? cmdAppEnvList(id, { reveal: false }) : cmdServiceEnvList(id, { reveal: false })),
+      },
+      {
+        label: "Xem cả giá trị bí mật",
+        run: () => (cli(`${kind} env list ${id} --reveal`), kind === "app" ? cmdAppEnvList(id, { reveal: true }) : cmdServiceEnvList(id, { reveal: true })),
+      },
+      {
+        label: "Đặt / sửa biến",
+        run: async () => {
+          const pairs = await askEnvPairs();
+          if (pairs.length === 0) return info("Không có biến nào — không thay đổi gì.");
+          cli(`${kind} env set ${id} ${pairs.map((p) => `'${p}'`).join(" ")}`);
+          if (kind === "app") cmdAppEnvSet(id, pairs);
+          else cmdServiceEnvSet(id, pairs);
+        },
+      },
+      {
+        label: "Xoá biến",
+        run: async () => {
+          const keys = (await ask("Tên biến cần xoá (cách nhau dấu cách): ")).split(/\s+/).filter(Boolean);
+          if (keys.length === 0) return info("Không thay đổi gì.");
+          cli(`${kind} env unset ${id} ${keys.join(" ")}`);
+          if (kind === "app") cmdAppEnvUnset(id, keys);
+          else cmdServiceEnvUnset(id, keys);
+        },
+      },
+    ],
+  }));
+}
+
+async function aliasMenu(domain: string): Promise<void> {
+  await menuLoop(() => {
+    const app = getApp(domain);
+    if (!app) return undefined;
+    return {
+      title: `Domain phụ — ${domain}`,
+      header: [app.aliasDomains.length ? `Hiện có: ${app.aliasDomains.join(", ")}` : "Chưa có domain phụ nào."],
+      items: [
+        { label: "Xem", run: () => (cli(`app alias list ${domain}`), cmdDomainList(domain)) },
+        {
+          label: "Thêm domain phụ",
+          run: async () => {
+            const alias = await ask("Domain phụ (vd: www.example.com): ");
+            if (!alias) return;
+            cli(`app alias create ${domain} ${alias}`);
+            await cmdDomainAdd(domain, alias);
+          },
+        },
+        {
+          label: "Gỡ domain phụ",
+          run: async () => {
+            if (app.aliasDomains.length === 0) return info("Không có domain phụ nào để gỡ.");
+            const alias = await askChoice("Domain phụ cần gỡ", app.aliasDomains, app.aliasDomains[0]!);
+            cli(`app alias delete ${domain} ${alias}`);
+            await cmdDomainRemove(domain, alias);
+          },
+        },
+      ],
+    };
+  });
+}
+
+async function appSslMenu(domain: string): Promise<void> {
+  await menuLoop(() => ({
+    title: `SSL — ${domain}`,
+    header: [existsSync(`/etc/letsencrypt/live/${domain}`) ? "Đã có chứng chỉ." : "Chưa có chứng chỉ."],
+    items: [
+      { label: "Xem chứng chỉ", run: () => (cli(`cert show ${domain}`), cmdCertStatus(domain)) },
+      {
+        label: "Cấp chứng chỉ",
+        run: async () => {
+          const saved = getAcmeEmail();
+          const email = (await ask(`Email Let's Encrypt${saved ? ` (Enter = ${saved})` : " (Enter = đăng ký KHÔNG email)"}: `)) || saved || "";
+          cli(`cert create ${domain}${email ? ` --email ${email}` : " --register-without-email"}`);
+          await cmdCertIssue(domain, { noWww: false, extra: [], email: email || undefined, registerWithoutEmail: !email, redirect: true });
+        },
+      },
+      { label: "Gia hạn", run: () => (cli(`cert renew ${domain}`), cmdCertRenew(domain, { force: false })) },
+      {
+        label: colorText("red", "Thu hồi & xoá chứng chỉ"),
+        run: async () => {
+          if (!(await askYesNo(`Thu hồi & xoá chứng chỉ của '${domain}'? Website sẽ mất HTTPS tới khi cấp lại.`))) return info("Không thay đổi gì.");
+          cli(`cert delete ${domain} -y`);
+          await cmdCertRevoke(domain, { yes: true });
+        },
+      },
+    ],
+  }));
+}
+
+async function appNginxMenu(domain: string): Promise<void> {
+  await menuLoop(() => {
+    const app = getApp(domain);
+    if (!app) return undefined;
+    const set = (flags: string, opts: Parameters<typeof cmdAppSet>[1]) => {
+      cli(`app update ${domain} ${flags}`);
+      cmdAppSet(domain, opts);
+    };
+    return {
+      title: `Nginx — ${domain}`,
+      header: [
+        `Asset tĩnh: ${app.staticRoot ?? (app.staticAliases?.length ? "alias" : "-")} · File tải lên: ${app.uploadDir ?? "-"} · Upload tối đa: ${app.maxBodySize ?? "20M"}`,
+      ],
+      items: [
+        { label: "Tự nhận diện framework và cho nginx trả thẳng asset tĩnh", run: () => set("--auto-static", { autoStatic: true }) },
+        {
+          label: "Đặt thư mục asset tĩnh thủ công",
+          run: async () => {
+            const root = await ask(`Thư mục asset build (vd ${app.webRoot}/build/client): `);
+            if (!root) return info("Không thay đổi gì.");
+            const prefixes = (await ask("Tiền tố URL (cách nhau dấu cách, vd /_app/ /assets/): ")).split(/\s+/).filter(Boolean);
+            set(`--static-root ${root} ${prefixes.map((p) => `--static-prefix ${p}`).join(" ")}`, { staticRoot: root, staticPrefix: prefixes.length ? prefixes : undefined });
+          },
+        },
+        {
+          label: "Thư mục file người dùng tải lên",
+          run: async () => {
+            const dir = await ask(`Thư mục tải lên (vd ${app.webRoot}/static/uploads): `);
+            if (!dir) return info("Không thay đổi gì.");
+            const prefix = (await ask("Tiền tố URL (Enter = /uploads/): ")) || undefined;
+            set(`--upload-dir ${dir}${prefix ? ` --upload-prefix ${prefix}` : ""}`, { uploadDir: dir, uploadPrefix: prefix });
+          },
+        },
+        {
+          label: `${state(Boolean(app.hotlinkProtect))} Chặn hotlink ảnh/asset từ site khác`,
+          run: () =>
+            flip(
+              "chặn hotlink",
+              Boolean(app.hotlinkProtect),
+              () => set("--hotlink-protect", { hotlinkProtect: true }),
+              () => set("--no-hotlink-protect", { hotlinkProtect: false }),
+              "",
+              ""
+            ),
+        },
+        {
+          label: `Giới hạn kích thước upload (hiện: ${app.maxBodySize ?? "20M"})`,
+          run: async () => {
+            const size = await ask("Kích thước tối đa (vd 100M): ");
+            if (!size) return info("Không thay đổi gì.");
+            set(`--max-body ${size}`, { maxBody: size });
+          },
+        },
+        {
+          label: `${state(app.scanBlock !== false)} Chặn quét lỗ hổng PHP cho site này`,
+          run: () =>
+            flip(
+              "chặn quét lỗ hổng cho site này",
+              app.scanBlock !== false,
+              () => set("--scan-block", { scanBlock: true }),
+              () => set("--no-scan-block", { scanBlock: false }),
+              "",
+              ""
+            ),
+        },
+      ],
+    };
+  });
+}
+
+// -------------------------------------------------------------- 3. Service
+async function createServiceFlow(): Promise<void> {
+  const name = await ask("Tên service (vd: worker-telegram, queue-email): ");
+  if (!name) return;
+  const repo = await ask("Git repo URL (bỏ trống nếu chưa có): ");
+  let token: string | undefined;
+  let sshKey: string | undefined;
+  if (repo && (await askYesNo("Repo này có PRIVATE (cần xác thực) không?"))) {
+    if (/^https?:\/\//i.test(repo)) token = (await ask("Personal Access Token (HTTPS): ")) || undefined;
+    else sshKey = await askSshKey();
+  }
+  const startCmd = (await ask("Lệnh khởi động (Enter = 'npm start' theo package.json; vd: node worker.js): ")) || undefined;
+  const runtime = await askChoice<Runtime>("Runtime engine", ["node", "bun"], "node");
+  const pmDefault: PackageManager = runtime === "bun" ? "bun" : "npm";
+  const packageManager = await askChoice<PackageManager>("Trình quản lý gói phụ thuộc", ["npm", "pnpm", "yarn", "bun"], pmDefault);
+  let port: number | undefined;
+  if (await askYesNo("Service có tự listen một cổng nội bộ không (health-check/socket)?")) {
+    const p = parseInt(await ask("Cổng nội bộ (Enter = tự cấp 3000-3999): "), 10);
+    if (Number.isInteger(p)) port = p;
+  }
+  // Worker "nửa kia của một app web" (nén ảnh, sinh thumbnail, dọn cache) phải
+  // chạy BẰNG user của app đó mới đọc/ghi được file của nó — thư mục app là 750
+  // của user riêng, user khác không vào nổi.
+  let runAs: string | undefined;
+  if (await askYesNo("Worker này có đọc/ghi FILE của một app web đã có không (nén ảnh, thumbnail, dọn cache)?")) {
+    runAs = await askAppDomain("chạy chung user hệ thống (worker sẽ ghi được vào thư mục của app này)");
+  }
+  const dbEngine = (await askYesNo("Tạo database riêng cho service này?")) ? await askEngine("tạo database") : undefined;
+  const redis = await askYesNo("Cấp Redis DB riêng cho service này?");
+  // Dùng chung user gần như luôn đi kèm dùng chung hàng đợi. Chỉ hỏi khi app kia
+  // thật sự có Redis DB, tránh dẫn người dùng vào lựa chọn chết.
+  const sharedRedis = runAs ? findUnit(runAs)?.redisDbIndex : undefined;
+  let shareRedisWith: string | undefined;
+  if (redis && runAs && sharedRedis !== undefined) {
+    if (await askYesNo(`Dùng CHUNG Redis DB #${sharedRedis} với '${runAs}' (BẮT BUỘC nếu worker tiêu thụ hàng đợi của app đó)?`, true)) {
+      shareRedisWith = runAs;
+    }
+  }
+  await cmdServiceCreate(name, {
+    repo: repo || undefined,
+    branch: "main",
+    token,
+    sshKey,
+    startCmd,
+    runtime,
+    packageManager,
+    port,
+    db: dbEngine !== undefined,
+    dbEngine,
+    redis,
+    shareRedisWith,
+    runAs,
+    writeDirs: [],
+    env: [],
+  });
+}
+
+async function menuServices(): Promise<void> {
+  await menuLoop(() => {
+    const services = listServiceSummaries();
+    return {
+      title: `Background service (${services.length})`,
+      header: services.length === 0 ? ["Chưa có service nào — chọn 1 để tạo service đầu tiên."] : undefined,
+      items: [
+        { label: "Tạo service mới", run: createServiceFlow },
+        ...services.map((s) => ({
+          label: `${s.name.padEnd(32)} ${running(s.running)}`,
+          run: () => serviceContext(s.name),
+          open: true,
+        })),
+      ],
+    };
+  });
+}
+
+async function serviceContext(name: string): Promise<void> {
+  await menuLoop(() => {
+    const svc = getService(name);
+    if (!svc) return undefined;
+    const up = unitRunning(svcSystemdName(name));
+    return {
+      title: `Service ${name}`,
+      header: [
+        `${running(up)} · ${svc.nodeRuntime}/${svc.packageManager ?? "npm"} · user ${svc.user}${svc.runAsUnit ? ` (mượn của '${svc.runAsUnit}')` : ""} · ` +
+          `DB: ${svc.dbName ? `${unitEngine(svc)} '${svc.dbName}'` : "-"} · Redis: ${svc.redisDbIndex !== undefined ? `#${svc.redisDbIndex}` : "-"}`,
+      ],
+      items: [
+        { label: "Xem chi tiết", run: () => (cli(`service show ${name}`), cmdServiceShow(name)) },
+        { label: "Deploy (git pull + build + restart)", run: () => (cli(`service deploy ${name}`), cmdServiceDeploy(name)) },
+        { label: "Khởi động lại", run: () => (cli(`service restart ${name}`), cmdServiceRestart(name)) },
+        up
+          ? { label: "Dừng service", run: () => (cli(`service stop ${name}`), cmdServiceStop(name)) }
+          : { label: "Khởi động service", run: () => (cli(`service start ${name}`), cmdServiceStart(name)) },
+        { label: "Xem log (100 dòng)", run: () => (cli(`service logs ${name} -n 100`), cmdServiceLogs(name, { follow: false, lines: 100 })) },
+        { label: "Biến môi trường (.env)", run: () => envMenu("service", name), open: true },
+        { label: "Danh tính & quyền ghi (chạy bằng user nào, được ghi vào đâu)", run: () => serviceIdentityMenu(name), open: true },
+        {
+          label: `${state(Boolean(svc.leakGuard))} Leak guard — tự chụp heap trước khi chết vì hết bộ nhớ`,
+          run: () =>
+            flip(
+              `leak guard cho '${name}' (service sẽ RESTART một lần)`,
+              Boolean(svc.leakGuard),
+              () => cmdMemGuard(name, true),
+              () => cmdMemGuard(name, false),
+              `mem guard enable ${name}`,
+              `mem guard disable ${name}`
+            ),
+        },
+        { label: "Chụp heap snapshot ngay (service vẫn chạy)", run: () => (cli(`mem snapshot ${name}`), cmdMemSnapshot(name)) },
+        {
+          label: colorText("red", "Xoá service"),
+          run: async () => {
+            const sel = await askMultiSelect(`Chọn những gì cần xoá khi gỡ service '${name}' ([x] = sẽ xoá; service systemd luôn bị gỡ):`, [
+              { key: "source", label: "Mã nguồn (và user hệ thống)", default: false },
+              { key: "database", label: "Database", default: false },
+            ]);
+            if (!(await askYesNo(`Xác nhận gỡ service '${name}' (không thể hoàn tác)?`))) return info("Không thay đổi gì.");
+            cli(`service delete ${name} -y${sel.has("source") ? " --source" : ""}${sel.has("database") ? " --database" : ""}`);
+            await cmdServiceRemove(name, { yes: true, source: sel.has("source"), database: sel.has("database") });
+          },
+        },
+      ],
+    };
+  });
+}
+
+async function serviceIdentityMenu(name: string): Promise<void> {
+  await menuLoop(() => {
+    const svc = getService(name);
+    if (!svc) return undefined;
+    return {
+      title: `Danh tính & quyền ghi — ${name}`,
+      header: [
+        `Chạy bằng: ${svc.user}${svc.runAsUnit ? ` (user của '${svc.runAsUnit}')` : " (user riêng)"}`,
+        `Được ghi thêm vào: ${svc.writePaths?.length ? svc.writePaths.join(", ") : "-"}`,
+      ],
+      items: [
+        {
+          label: "Chạy bằng user của một app web (để đọc/ghi file của app đó)",
+          run: async () => {
+            const runAs = await askAppDomain("cho service mượn user");
+            if (!runAs) return;
+            cli(`service update ${name} --run-as ${runAs}`);
+            await cmdServiceSet(name, { runAs, writeDirs: [] });
+          },
+        },
+        { label: "Quay về user riêng (cô lập hoàn toàn)", run: () => (cli(`service update ${name} --standalone`), cmdServiceSet(name, { standalone: true, writeDirs: [] })) },
+        {
+          label: "Đặt lại các đường dẫn được ghi thêm",
+          run: async () => {
+            const dirs = (await ask("Đường dẫn tuyệt đối (cách nhau dấu cách): ")).split(/\s+/).filter(Boolean);
+            if (dirs.length === 0) return info("Không thay đổi gì.");
+            cli(`service update ${name} ${dirs.map((d) => `--write-dir ${d}`).join(" ")}`);
+            await cmdServiceSet(name, { writeDirs: dirs });
+          },
+        },
+        { label: "Bỏ hết đường dẫn ghi thêm", run: () => (cli(`service update ${name} --no-write-dir`), cmdServiceSet(name, { writeDirs: [], clearWriteDirs: true })) },
+      ],
+    };
+  });
+}
+
+// ------------------------------------------------------------------ 4. SSL
 async function menuCert(): Promise<void> {
-  while (true) {
-    printMenu("Quản lý SSL (Let's Encrypt / certbot)", [
-      "Danh sách chứng chỉ",
-      "Phát hành SSL (chọn app)",
-      "Gia hạn một domain (chọn app)",
-      "Gia hạn TẤT CẢ",
-      "Thu hồi / gỡ chứng chỉ (chọn app)",
-    ]);
-    const choice = await ask("Chọn: ");
-    if (choice === "0" || choice === "") return;
-    if (choice === "1") await guard(() => cmdCertList());
-    else if (choice === "2")
-      await guard(async () => {
-        const domain = await askAppDomain("phát hành SSL");
-        if (!domain) return;
-        const saved = getAcmeEmail();
-        const email = (await ask(`Email Let's Encrypt${saved ? ` (Enter = ${saved})` : " (Enter = đăng ký KHÔNG email)"}: `)).trim() || saved || "";
-        await cmdCertIssue(domain, { noWww: false, extra: [], email: email || undefined, registerWithoutEmail: !email, redirect: true });
-      });
-    else if (choice === "3")
-      await guard(async () => {
-        const domain = await askAppDomain("gia hạn");
-        if (domain) cmdCertRenew(domain, { force: false });
-      });
-    else if (choice === "4") await guard(() => cmdCertRenew(undefined, { force: false }));
-    else if (choice === "5")
-      await guard(async () => {
-        const domain = await askAppDomain("thu hồi/gỡ chứng chỉ");
-        if (!domain) return;
-        const yes = await askYesNo(`Thu hồi & xoá chứng chỉ của '${domain}'? Website sẽ mất HTTPS tới khi phát hành lại.`);
-        if (yes) await cmdCertRevoke(domain, { yes: true });
-      });
-  }
+  await menuLoop(() => ({
+    title: "SSL (Let's Encrypt)",
+    header: [colorText("dim", "Cấp / gia hạn / thu hồi chứng chỉ của MỘT app: vào App web › <domain> › SSL.")],
+    items: [
+      { label: "Danh sách chứng chỉ + hạn dùng", run: () => (cli("cert list"), cmdCertList()) },
+      { label: "Gia hạn TẤT CẢ chứng chỉ sắp hết hạn", run: () => (cli("cert renew"), cmdCertRenew(undefined, { force: false })) },
+    ],
+  }));
 }
 
+// -------------------------------------------------------------- 5. Database
 async function menuDb(): Promise<void> {
-  while (true) {
-    printMenu("Quản lý Database", [
-      "Danh sách database",
-      "Tạo database mới",
-      "Backup một database",
-      "Database engine: xem (đã cài / đang chạy / app nào dùng)",
-      "Thêm database engine (mariadb / mysql / postgresql / mongodb)",
-      "Gỡ database engine",
-    ]);
-    const choice = await ask("Chọn: ");
-    if (choice === "0" || choice === "") return;
-    if (choice === "1") await guard(() => cmdDbList());
-    else if (choice === "2")
-      await guard(async () => {
-        const engine = await askEngine("tạo database");
-        if (engine) cmdDbCreate(await ask("Tên database: "), { engine });
-      });
-    else if (choice === "3")
-      await guard(async () => {
-        const db = await askDatabase("backup");
-        if (db && db !== "__ALL__") cmdDbBackup(db.name, { engine: db.engine });
-      });
-    else if (choice === "4") await guard(() => cmdDbEngineList());
-    else if (choice === "5")
-      await guard(async () => {
-        const engine = await askChoice<DbEngine>("Engine muốn thêm", DB_ENGINES, "postgresql");
-        await cmdDbEngineAdd([engine], { yes: false });
-      });
-    else if (choice === "6")
-      await guard(async () => {
-        const engines = activeEngines();
-        if (engines.length === 0) return warn("Không có engine nào để gỡ.");
-        const engine = await askChoice<DbEngine>("Engine muốn gỡ", engines, engines[0]!);
-        const purge = await askYesNo("XOÁ VĨNH VIỄN cả dữ liệu (--purge)? Chọn 'không' để giữ dữ liệu trên đĩa", false);
-        const force = await askYesNo("Vẫn gỡ nếu còn database không gắn với app nào (napp dump toàn bộ trước)?", false);
-        await cmdDbEngineRemove(engine, { purge, force, yes: false });
-      });
-  }
+  await menuLoop(() => {
+    const engines = activeEngines();
+    return {
+      title: "Database",
+      header: [`Engine đang dùng: ${engines.length ? engines.join(", ") : "không có (vào Engine để thêm)"}`],
+      items: [
+        { label: "Danh sách database", run: () => (cli("db list"), cmdDbList()) },
+        {
+          label: "Tạo database",
+          run: async () => {
+            const engine = await askEngine("tạo database");
+            if (!engine) return;
+            const name = await ask("Tên database: ");
+            if (!name) return;
+            cli(`db create ${name} --engine ${engine}`);
+            cmdDbCreate(name, { engine });
+          },
+        },
+        {
+          label: "Backup một database",
+          run: async () => {
+            const db = await askDatabase("backup");
+            if (!db || db === "__ALL__") return;
+            cli(`backup create --database ${db.name} --engine ${db.engine}`);
+            cmdDbBackup(db.name, { engine: db.engine });
+          },
+        },
+        {
+          label: colorText("red", "Xoá database"),
+          run: async () => {
+            const db = await askDatabase("XOÁ");
+            if (!db || db === "__ALL__") return;
+            cli(`db delete ${db.name} --engine ${db.engine}`);
+            await cmdDbDrop(db.name, { yes: false, engine: db.engine });
+          },
+        },
+        { label: "Engine (MariaDB / MySQL / PostgreSQL / MongoDB)", run: menuDbEngine, open: true },
+      ],
+    };
+  });
 }
 
+async function menuDbEngine(): Promise<void> {
+  await menuLoop(() => ({
+    title: "Database engine",
+    items: [
+      { label: "Xem: đã cài / đang chạy / app nào dùng", run: () => (cli("db engine list"), cmdDbEngineList()) },
+      {
+        label: "Thêm engine",
+        run: async () => {
+          const engine = await askChoice<DbEngine>("Engine muốn thêm", DB_ENGINES, "postgresql");
+          cli(`db engine create ${engine}`);
+          await cmdDbEngineAdd([engine], { yes: false });
+        },
+      },
+      {
+        label: "Đặt engine mặc định cho '--db'",
+        run: async () => {
+          const engines = activeEngines();
+          if (engines.length === 0) return warn("Chưa có engine nào.");
+          const engine = await askChoice<DbEngine>("Engine mặc định", engines, engines[0]!);
+          cli(`db engine update ${engine} --default`);
+          cmdDbEngineDefault(engine);
+        },
+      },
+      {
+        label: colorText("red", "Gỡ engine"),
+        run: async () => {
+          const engines = activeEngines();
+          if (engines.length === 0) return warn("Không có engine nào để gỡ.");
+          const engine = await askChoice<DbEngine>("Engine muốn gỡ", engines, engines[0]!);
+          const purge = await askYesNo("XOÁ VĨNH VIỄN cả dữ liệu (--purge)? Chọn 'không' để giữ dữ liệu trên đĩa", false);
+          const force = await askYesNo("Vẫn gỡ nếu còn database không gắn với app nào (napp dump toàn bộ trước)?", false);
+          cli(`db engine delete ${engine}${purge ? " --purge" : ""}${force ? " --force" : ""}`);
+          await cmdDbEngineRemove(engine, { purge, force, yes: false });
+        },
+      },
+    ],
+  }));
+}
+
+// ----------------------------------------------------------------- 6. Redis
+async function menuRedis(): Promise<void> {
+  await menuLoop(() => ({
+    title: "Redis",
+    items: [
+      { label: "Xem bộ nhớ Redis", run: () => (cli("redis show"), cmdRedisInfo()) },
+      { label: "DB index nào đang cấp cho app/service nào", run: () => (cli("redis db list"), cmdRedisAllocations()) },
+      {
+        label: colorText("red", "Xoá TOÀN BỘ dữ liệu của một DB index"),
+        run: async () => {
+          const n = parseInt(await ask("DB index (0-15): "), 10);
+          if (!Number.isInteger(n)) return info("Không thay đổi gì.");
+          cli(`redis db flush ${n}`);
+          await cmdRedisFlush(n, { yes: false });
+        },
+      },
+    ],
+  }));
+}
+
+// ---------------------------------------------------------------- 7. Sao lưu
 async function menuBackup(): Promise<void> {
-  while (true) {
-    printMenu("Sao lưu (nén gzip)", [
-      "Backup DATABASE ngay (chọn database)",
-      "Backup mã nguồn (files) ngay",
-      "Backup TẤT CẢ ngay (database + files)",
-      "Lên lịch tự động backup hàng ngày",
-      "Gỡ lịch backup tự động",
-      "Danh sách các bản backup",
-    ]);
-    const choice = await ask("Chọn: ");
-    if (choice === "0" || choice === "") return;
-    if (choice === "1")
-      await guard(async () => {
-        const db = await askDatabase("backup");
-        if (!db) return;
-        const keepDays = await askRetentionDays();
-        cmdBackupRun(db === "__ALL__" ? { target: "db", keepDays } : { target: "db", database: db.name, engine: db.engine, keepDays });
-      });
-    else if (choice === "2")
-      await guard(async () => {
-        const keepDays = await askRetentionDays();
-        cmdBackupRun({ target: "files", keepDays });
-      });
-    else if (choice === "3")
-      await guard(async () => {
-        const keepDays = await askRetentionDays();
-        cmdBackupRun({ target: "all", keepDays });
-      });
-    else if (choice === "4")
-      await guard(async () => {
-        const time = (await ask("Giờ chạy hàng ngày (HH:MM, mặc định 03:00): ")).trim() || "03:00";
-        const keepDays = await askRetentionDays();
-        cmdBackupSchedule({ time, keepDays, target: "all" });
-      });
-    else if (choice === "5") await guard(() => cmdBackupUnschedule());
-    else if (choice === "6") await guard(() => cmdBackupList());
-  }
+  await menuLoop(() => ({
+    title: "Sao lưu",
+    header: [colorText("dim", "Backup tự động hàng ngày: xem ở 'Tác vụ định kỳ'.")],
+    items: [
+      {
+        label: "Backup database ngay",
+        run: async () => {
+          const db = await askDatabase("backup");
+          if (!db) return;
+          const keepDays = await askRetentionDays();
+          if (db === "__ALL__") {
+            cli(`backup create --target db --keep-days ${keepDays}`);
+            cmdBackupRun({ target: "db", keepDays });
+          } else {
+            cli(`backup create --target db --database ${db.name} --engine ${db.engine} --keep-days ${keepDays}`);
+            cmdBackupRun({ target: "db", database: db.name, engine: db.engine, keepDays });
+          }
+        },
+      },
+      {
+        label: "Backup mã nguồn ngay",
+        run: async () => {
+          const keepDays = await askRetentionDays();
+          cli(`backup create --target files --keep-days ${keepDays}`);
+          cmdBackupRun({ target: "files", keepDays });
+        },
+      },
+      {
+        label: "Backup TẤT CẢ ngay (database + mã nguồn)",
+        run: async () => {
+          const keepDays = await askRetentionDays();
+          cli(`backup create --keep-days ${keepDays}`);
+          cmdBackupRun({ target: "all", keepDays });
+        },
+      },
+      { label: "Danh sách bản backup", run: () => (cli("backup list"), cmdBackupList()) },
+    ],
+  }));
 }
 
-async function menuInfra(): Promise<void> {
-  while (true) {
-    printMenu("Hạ tầng (Firewall / fail2ban / Cloudflare / Tối ưu)", [
-      "Đồng bộ UFW (SSH + mở 80/443 công khai)",
-      "Trạng thái UFW",
-      "Áp cấu hình fail2ban",
-      "Trạng thái fail2ban",
-      "Đồng bộ Cloudflare real-IP vào nginx (chạy ngay)",
-      "Lên lịch tự động đồng bộ Cloudflare (systemd timer, hàng ngày)",
-      "Gỡ lịch tự động đồng bộ Cloudflare",
-      "Bảo vệ nginx: chặn truy cập IP/Host lạ (harden)",
-      "Gỡ bảo vệ nginx (unharden)",
-      "Đồng bộ cấu hình proxy nginx vào vhost đã có (bộ đệm — sửa 502 route sâu)",
-      "Xem đề xuất tối ưu phần cứng",
-      "Áp tối ưu phần cứng (nginx/database/Redis/sysctl)",
-      // Thêm vào CUỐI chứ không chèn cạnh các mục nginx ở trên: chèn giữa là
-      // đánh số lại "Xem/Áp tối ưu phần cứng" — hai mục người dùng đã quen gõ.
-      "Chặn quét lỗ hổng PHP/WordPress (.php, /wp-admin/ -> 444, log riêng)",
-      "Gỡ chặn quét lỗ hổng",
-      "Bộ nhớ: xem trạng thái + dấu hiệu rò rỉ",
-      "Bộ nhớ: bật lấy mẫu định kỳ (phát hiện rò rỉ sớm)",
-      "Bộ nhớ: tắt lấy mẫu định kỳ",
-    ]);
-    const choice = await ask("Chọn: ");
-    if (choice === "0" || choice === "") return;
-    if (choice === "1") await guard(() => cmdFirewallSync({ restrictToCloudflare: false, extraPorts: [], yes: false }));
-    else if (choice === "2") await guard(() => cmdFirewallStatus());
-    else if (choice === "3") await guard(() => cmdFail2banSetup({}));
-    else if (choice === "4") await guard(() => cmdFail2banStatus());
-    else if (choice === "5") await guard(() => cmdCloudflareSync());
-    else if (choice === "6")
-      await guard(async () => {
-        const time = (await ask("Giờ chạy hàng ngày (HH:MM, mặc định 01:00): ")) || "01:00";
-        cmdCloudflareSchedule({ time });
-      });
-    else if (choice === "7") await guard(() => cmdCloudflareUnschedule());
-    else if (choice === "8") await guard(() => cmdNginxHarden());
-    else if (choice === "9") await guard(() => cmdNginxUnharden());
-    else if (choice === "10") await guard(() => cmdNginxSync());
-    else if (choice === "11") await guard(() => cmdTuneShow());
-    else if (choice === "12") await guard(() => cmdTuneApply({ yes: false, skipRestart: false, syncUnits: false }));
-    else if (choice === "13") await guard(() => cmdNginxScanBlock());
-    else if (choice === "14") await guard(() => cmdNginxUnscanBlock());
-    else if (choice === "15") await guard(() => cmdMemStatus());
-    else if (choice === "16")
-      await guard(async () => {
-        const raw = (await ask("Lấy mẫu mỗi bao nhiêu phút (mặc định 15): ")) || "15";
-        cmdMemWatch({ interval: parseInt(raw, 10) || 15 });
-      });
-    else if (choice === "17") await guard(() => cmdMemUnwatch());
-  }
+// -------------------------------------------------------- 8. Tác vụ định kỳ
+interface Schedule {
+  label: string;
+  timer: string;
+  show: () => void;
+  enable: () => Promise<void>;
+  disable: () => void;
+  cmd: string; // tiền tố lệnh CLI, vd "backup schedule"
+}
+
+const SCHEDULES: Schedule[] = [
+  {
+    label: "Backup hàng ngày",
+    timer: BACKUP_TIMER_NAME,
+    show: cmdBackupScheduleShow,
+    cmd: "backup schedule",
+    enable: async () => {
+      const time = (await ask("Giờ chạy hàng ngày (HH:MM, Enter = 03:00): ")) || "03:00";
+      const keepDays = await askRetentionDays();
+      const target = await askChoice("Backup những gì", ["all", "db", "files"] as const, "all");
+      cli(`backup schedule enable --time ${time} --keep-days ${keepDays} --target ${target}`);
+      cmdBackupSchedule({ time, keepDays, target });
+    },
+    disable: cmdBackupUnschedule,
+  },
+  {
+    label: "Cập nhật dải IP Cloudflare",
+    timer: CF_TIMER_NAME,
+    show: cmdCloudflareScheduleShow,
+    cmd: "cloudflare schedule",
+    enable: async () => {
+      const time = (await ask("Giờ chạy hàng ngày (HH:MM, Enter = 01:00): ")) || "01:00";
+      cli(`cloudflare schedule enable --time ${time}`);
+      cmdCloudflareSchedule({ time });
+    },
+    disable: cmdCloudflareUnschedule,
+  },
+  {
+    label: "Lấy mẫu bộ nhớ (phát hiện rò rỉ sớm)",
+    timer: MEMWATCH_TIMER_NAME,
+    show: cmdMemWatchShow,
+    cmd: "mem watch",
+    enable: async () => {
+      const interval = parseInt((await ask("Lấy mẫu mỗi bao nhiêu phút (Enter = 15): ")) || "15", 10) || 15;
+      cli(`mem watch enable --interval ${interval}`);
+      cmdMemWatch({ interval });
+    },
+    disable: cmdMemUnwatch,
+  },
+];
+
+function scheduleLabel(s: Schedule): string {
+  const st = timerState(s.timer);
+  const detail = st.exists ? [st.schedule, st.next ? `lần tới ${st.next}` : undefined].filter(Boolean).join(" · ") : "";
+  return `${state(st.exists && st.enabled)} ${s.label}${detail ? colorText("dim", ` — ${detail}`) : ""}`;
+}
+
+async function menuSchedules(): Promise<void> {
+  await menuLoop(() => ({
+    title: "Tác vụ định kỳ (systemd timer)",
+    header: [colorText("dim", "Mọi việc napp tự chạy theo lịch nằm ở đây.")],
+    items: SCHEDULES.map((s) => ({ label: scheduleLabel(s), run: () => scheduleContext(s), open: true })),
+  }));
+}
+
+async function scheduleContext(s: Schedule): Promise<void> {
+  await menuLoop(() => {
+    const st = timerState(s.timer);
+    const on = st.exists && st.enabled;
+    return {
+      title: s.label,
+      header: [scheduleLabel(s)],
+      items: [
+        { label: "Xem chi tiết (lịch, lần chạy tới/trước, lệnh được chạy)", run: () => (cli(`${s.cmd} show`), s.show()) },
+        { label: on ? "Đổi lịch" : "Bật", run: s.enable },
+        ...(st.exists ? [{ label: "Tắt", run: () => (cli(`${s.cmd} disable`), s.disable()) }] : []),
+      ],
+    };
+  });
+}
+
+// --------------------------------------------------------------- 9. Bảo mật
+async function menuSecurity(): Promise<void> {
+  await menuLoop(() => {
+    const hardening = nginxHardeningEnabled();
+    const scanBlock = scannerBlockEnabled();
+    return {
+      title: "Bảo mật",
+      items: [
+        { label: "Tường lửa UFW", run: menuFirewall, open: true },
+        { label: "fail2ban (tự ban IP brute-force / quét lỗ hổng)", run: menuFail2ban, open: true },
+        {
+          label: `${state(hardening)} Chặn truy cập bằng IP / Host lạ (nginx hardening)`,
+          run: () => flip("chặn truy cập bằng IP/Host lạ", hardening, cmdNginxHarden, cmdNginxUnharden, "nginx hardening enable", "nginx hardening disable"),
+        },
+        {
+          label: `${state(scanBlock)} Chặn quét lỗ hổng PHP/WordPress trên mọi site`,
+          run: () => flip("chặn quét lỗ hổng trên mọi site", scanBlock, cmdNginxScanBlock, cmdNginxUnscanBlock, "nginx scan-block enable", "nginx scan-block disable"),
+        },
+        { label: "Quét bản vá & rủi ro dependencies (doctor)", run: menuDoctor, open: true },
+      ],
+    };
+  });
+}
+
+async function menuFirewall(): Promise<void> {
+  await menuLoop(() => ({
+    title: "Tường lửa UFW",
+    items: [
+      { label: "Xem trạng thái", run: () => (cli("firewall show"), cmdFirewallStatus()) },
+      {
+        label: "Áp cấu hình (deny mặc định, mở SSH + 80/443)",
+        run: () => (cli("firewall apply"), cmdFirewallSync({ restrictToCloudflare: false, extraPorts: [], yes: false })),
+      },
+    ],
+  }));
+}
+
+async function menuFail2ban(): Promise<void> {
+  await menuLoop(() => ({
+    title: "fail2ban",
+    items: [
+      { label: "Xem các jail + IP đang bị chặn", run: () => (cli("fail2ban show"), cmdFail2banStatus()) },
+      { label: "Áp cấu hình jail", run: () => (cli("fail2ban apply"), cmdFail2banSetup({})) },
+      {
+        label: "Gỡ chặn một IP",
+        run: async () => {
+          const jail = await ask("Tên jail (xem ở mục 1, vd sshd): ");
+          const ip = await ask("IP: ");
+          if (!jail || !ip) return info("Không thay đổi gì.");
+          cli(`fail2ban unban ${jail} ${ip}`);
+          cmdFail2banUnban(jail, ip);
+        },
+      },
+    ],
+  }));
 }
 
 async function menuDoctor(): Promise<void> {
-  while (true) {
-    printMenu("Bảo mật (doctor)", [
-      "Quét TẤT CẢ (bản vá hệ thống + dependencies)",
-      "Kiểm tra bản vá bảo mật của hệ thống",
-      "Quét dependencies của MỌI app/service",
-      "Quét dependencies của MỘT app (chọn)",
-      "Quét dependencies của MỘT service (chọn)",
-      "Cài bản vá BẢO MẬT ngay (apt + restart dịch vụ)",
-      "Cài TẤT CẢ bản cập nhật đang chờ",
-    ]);
-    const choice = await ask("Chọn: ");
-    if (choice === "0" || choice === "") return;
-    if (choice === "1")
-      await guard(async () => {
-        const deep = await askYesNo("Tra thêm tuổi bản phát hành trên registry npm (cần mạng, chậm hơn)?", false);
-        await cmdDoctor({ refresh: true, audit: true, deep });
-      });
-    else if (choice === "2") await guard(async () => void cmdDoctorSystem({ refresh: true }));
-    else if (choice === "3") await guard(async () => void (await cmdDoctorDeps({ audit: true, deep: false })));
-    else if (choice === "4")
-      await guard(async () => {
-        const domain = await askAppDomain("quét dependencies");
-        if (domain) await cmdDoctorDeps({ target: domain, audit: true, deep: false });
-      });
-    else if (choice === "5")
-      await guard(async () => {
-        const name = await askServiceName("quét dependencies");
-        if (name) await cmdDoctorDeps({ target: name, audit: true, deep: false });
-      });
-    else if (choice === "6") await guard(() => cmdDoctorUpgrade({ all: false, only: [], yes: false, restart: true }));
-    else if (choice === "7") await guard(() => cmdDoctorUpgrade({ all: true, only: [], yes: false, restart: true }));
-  }
+  await menuLoop(() => ({
+    title: "Quét bảo mật (doctor)",
+    items: [
+      {
+        label: "Quét TẤT CẢ (bản vá hệ thống + dependencies)",
+        run: async () => {
+          const deep = await askYesNo("Tra thêm tuổi bản phát hành trên registry npm (cần mạng, chậm hơn)?", false);
+          cli(`doctor${deep ? " --deep" : ""}`);
+          await cmdDoctor({ refresh: true, audit: true, deep });
+        },
+      },
+      { label: "Chỉ bản vá bảo mật của hệ thống", run: () => (cli("doctor system"), void cmdDoctorSystem({ refresh: true })) },
+      { label: "Dependencies của MỌI app/service", run: async () => (cli("doctor deps"), void (await cmdDoctorDeps({ audit: true, deep: false }))) },
+      {
+        label: "Dependencies của MỘT app/service",
+        run: async () => {
+          const id = await askUnit("quét dependencies");
+          if (!id) return;
+          cli(`doctor deps ${id}`);
+          await cmdDoctorDeps({ target: id, audit: true, deep: false });
+        },
+      },
+      { label: "Cài bản vá BẢO MẬT ngay (apt + restart dịch vụ)", run: () => (cli("doctor upgrade"), cmdDoctorUpgrade({ all: false, only: [], yes: false, restart: true })) },
+      { label: "Cài TẤT CẢ bản cập nhật đang chờ", run: () => (cli("doctor upgrade --all"), cmdDoctorUpgrade({ all: true, only: [], yes: false, restart: true })) },
+    ],
+  }));
+}
+
+// ------------------------------------------------------ 10. Hiệu năng & nginx
+async function menuPerformance(): Promise<void> {
+  await menuLoop(() => ({
+    title: "Hiệu năng & nginx",
+    items: [
+      { label: "Xem đề xuất tối ưu theo phần cứng", run: () => (cli("tune show"), cmdTuneShow()) },
+      { label: "Áp tối ưu (nginx / database / Redis / sysctl / heap Node)", run: () => (cli("tune apply"), cmdTuneApply({ yes: false, skipRestart: false, syncUnits: false })) },
+      { label: "Đồng bộ cấu hình nginx vào vhost đã có (sửa 502 route sâu)", run: () => (cli("nginx apply"), cmdNginxSync()) },
+      { label: "Cập nhật dải IP Cloudflare vào nginx ngay", run: () => (cli("cloudflare apply"), cmdCloudflareSync()) },
+      { label: "Bộ nhớ & rò rỉ", run: menuMem, open: true },
+    ],
+  }));
+}
+
+async function menuMem(): Promise<void> {
+  await menuLoop(() => ({
+    title: "Bộ nhớ & rò rỉ",
+    header: [colorText("dim", "Leak guard của từng app/service: vào menu của app/service đó. Lấy mẫu định kỳ: 'Tác vụ định kỳ'.")],
+    items: [
+      { label: "Bộ nhớ hiện tại + số lần âm thầm khởi động lại", run: () => (cli("mem show"), cmdMemStatus()) },
+      { label: "Xu hướng (từ dữ liệu đã lấy mẫu)", run: () => (cli("mem show --trend"), cmdMemTrend()) },
+      {
+        label: "Chụp heap snapshot của một app/service",
+        run: async () => {
+          const id = await askUnit("chụp heap snapshot");
+          if (!id) return;
+          cli(`mem snapshot ${id}`);
+          await cmdMemSnapshot(id);
+        },
+      },
+    ],
+  }));
+}
+
+// ------------------------------------------------------------------ 11. napp
+async function menuNapp(): Promise<void> {
+  await menuLoop(() => ({
+    title: `napp v${NAPP_VERSION}`,
+    items: [
+      { label: "Cập nhật napp lên bản mới nhất", run: () => (cli("update"), cmdUpdate()) },
+      { label: "Lịch sử thay đổi", run: () => cmdChangelog() },
+      { label: "Phiên bản", run: () => cmdVersion() },
+    ],
+  }));
+}
+
+// ============================================================== Menu chính
+function topItems(): Item[] {
+  const apps = Object.keys(loadState().apps).length;
+  const services = Object.keys(loadState().services).length;
+  const scheduled = SCHEDULES.filter((s) => {
+    const st = timerState(s.timer);
+    return st.exists && st.enabled;
+  }).length;
+  return [
+    { label: "Kiểm tra & sửa môi trường", run: menuCheck, open: true },
+    { label: `App web (${apps})`, run: menuApps, open: true },
+    { label: `Background service (${services})`, run: menuServices, open: true },
+    { label: "SSL", run: menuCert, open: true },
+    { label: "Database", run: menuDb, open: true },
+    { label: "Redis", run: menuRedis, open: true },
+    { label: "Sao lưu", run: menuBackup, open: true },
+    { label: `Tác vụ định kỳ (${scheduled}/${SCHEDULES.length} đang bật)`, run: menuSchedules, open: true },
+    { label: "Bảo mật", run: menuSecurity, open: true },
+    { label: "Hiệu năng & nginx", run: menuPerformance, open: true },
+    { label: "napp (cập nhật, phiên bản)", run: menuNapp, open: true },
+  ];
 }
 
 export async function runMenu(): Promise<void> {
@@ -713,20 +1290,10 @@ export async function runMenu(): Promise<void> {
   let lastSigint = 0;
   try {
     while (true) {
+      const items = topItems();
       printMenu(
         `napp v${NAPP_VERSION} — Quản lý server Node.js`,
-        [
-          "Kiểm tra môi trường máy chủ",
-          "Quản lý App (web, có domain)",
-          "Quản lý Background Service (chạy ngầm)",
-          "Quản lý SSL",
-          "Quản lý Database",
-          "Redis",
-          "Sao lưu định kỳ",
-          "Hạ tầng (Firewall / fail2ban / Cloudflare / Tối ưu)",
-          "Bảo mật: bản vá hệ thống & rủi ro dependencies (doctor)",
-          "Cập nhật napp",
-        ],
+        items.map((i) => `${i.label} ›`),
         "Thoát napp"
       );
       let choice: string;
@@ -745,17 +1312,10 @@ export async function runMenu(): Promise<void> {
       // nhầm một phím là văng khỏi napp.
       if (choice === "0" || choice.toLowerCase() === "q") break;
       if (choice === "") continue;
-      if (choice === "1") await guard(() => cmdCheck({ fix: false, yes: false }));
-      else if (choice === "2") await submenu(menuApp);
-      else if (choice === "3") await submenu(menuService);
-      else if (choice === "4") await submenu(menuCert);
-      else if (choice === "5") await submenu(menuDb);
-      else if (choice === "6") await guard(() => cmdRedisAllocations());
-      else if (choice === "7") await submenu(menuBackup);
-      else if (choice === "8") await submenu(menuInfra);
-      else if (choice === "9") await submenu(menuDoctor);
-      else if (choice === "10") await guard(() => cmdUpdate());
-      else notice = colorText("yellow", `Lựa chọn không hợp lệ: '${choice}'. Gõ số từ 0 đến 10.`);
+      const n = Number(choice);
+      const item = Number.isInteger(n) ? items[n - 1] : undefined;
+      if (item) await submenu(async () => void (await item.run()));
+      else notice = colorText("yellow", `Lựa chọn không hợp lệ: '${choice}'. Gõ số từ 0 đến ${items.length}.`);
     }
     info("Đã thoát napp.");
   } catch (e) {

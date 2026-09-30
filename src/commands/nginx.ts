@@ -484,7 +484,7 @@ export function cmdNginxUnharden(): void {
 
 export function cmdNginxHardeningShow(): void {
   section("Hardening nginx");
-  const on = existsSync(NGINX_HARDENING_CONF) && existsSync(NGINX_DEFAULT_SERVER_CONF);
+  const on = nginxHardeningEnabled();
   if (on) ok(`Đang bật: default_server trả 444 cho IP/Host lạ, ẩn phiên bản nginx (${NGINX_HARDENING_CONF}, ${NGINX_DEFAULT_SERVER_CONF}).`);
   else info("Chưa bật. Bật bằng: sudo napp nginx hardening enable");
 }
@@ -495,4 +495,9 @@ export function cmdNginxScanBlockShow(): void {
   else info("Đang tắt trên toàn máy. Bật bằng: sudo napp nginx scan-block enable");
   const optedOut = Object.values(loadState().apps).filter((a) => a.scanBlock === false).map((a) => a.domain);
   if (optedOut.length > 0) info(`Site tự tắt riêng (napp app update <domain> --no-scan-block): ${optedOut.join(", ")}`);
+}
+
+/** Hardening đang bật hay tắt — cho nhãn [BẬT]/[TẮT] trong menu. */
+export function nginxHardeningEnabled(): boolean {
+  return existsSync(NGINX_HARDENING_CONF) && existsSync(NGINX_DEFAULT_SERVER_CONF);
 }

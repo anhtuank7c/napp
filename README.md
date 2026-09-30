@@ -90,7 +90,37 @@ bật** trên các app ĐANG CHẠY — những thứ không có lệnh nào t�
 sudo napp
 ```
 
-Gõ số rồi Enter, `0` để quay lại/thoát.
+Gõ số rồi Enter; `0` để quay lại, ở menu chính `0` là thoát. Menu chia theo
+**ngữ cảnh**: chọn **thứ** muốn làm việc trước (một app, một service, một tác vụ
+định kỳ), rồi mọi thao tác trên nó nằm cùng một chỗ — không phải chọn lại app ở
+mỗi bước.
+
+```
+ 1. Kiểm tra & sửa môi trường        xem · tự cài/sửa phần còn thiếu
+ 2. App web (N)                       Tạo app mới · <domain> ›
+      <domain> ›                      xem · deploy · restart · dừng/khởi động · log
+                                      biến môi trường › · domain phụ › · SSL › · nginx ›
+                                      [BẬT/TẮT] leak guard · chụp heap · xoá
+ 3. Background service (N)            Tạo service mới · <tên> ›
+      <tên> ›                         như app, cộng "Danh tính & quyền ghi ›" (run-as, write-dir)
+ 4. SSL                               danh sách + hạn dùng · gia hạn tất cả
+ 5. Database                          danh sách · tạo · backup · xoá · Engine ›
+ 6. Redis                             bộ nhớ · DB nào cấp cho ai · xoá dữ liệu một DB
+ 7. Sao lưu                           backup DB / mã nguồn / tất cả ngay · danh sách bản backup
+ 8. Tác vụ định kỳ (k/3 đang bật)     [BẬT/TẮT] backup hàng ngày · cập nhật IP Cloudflare · lấy mẫu bộ nhớ
+ 9. Bảo mật                           tường lửa › · fail2ban › · [BẬT/TẮT] hardening · [BẬT/TẮT] chặn quét · doctor ›
+10. Hiệu năng & nginx                 đề xuất / áp tối ưu · đồng bộ nginx · cập nhật IP Cloudflare · bộ nhớ ›
+11. napp                              cập nhật · lịch sử thay đổi · phiên bản
+```
+
+- **Công tắc hiện trạng thái thật** — `[BẬT]` / `[TẮT]` được đọc lại mỗi lần
+  vẽ menu; chọn là đảo trạng thái (có hỏi xác nhận).
+- **Mọi thứ chạy theo lịch nằm ở "Tác vụ định kỳ"**, kèm lịch và lần chạy tới.
+- **Mỗi thao tác in lệnh CLI tương đương** (`Lệnh tương đương: sudo napp …`) —
+  dùng menu một thời gian là thuộc lệnh để viết script.
+- Lệnh nào lỗi (kể cả lệnh bên thứ ba như `apt`, `git`, `certbot`) cũng chỉ in
+  `[LỖI]` kèm cách sửa rồi quay lại menu; `Ctrl+C` tại một câu hỏi là huỷ thao
+  tác đó. napp chỉ thoát khi bạn chọn `0` ở menu chính.
 
 ### Hoặc dùng lệnh trực tiếp
 

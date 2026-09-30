@@ -16,6 +16,16 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.29.0
+- MENU CHIA THEO NGỮ CẢNH: chọn một app/service là vào menu của riêng nó (deploy,
+  restart, dừng/khởi động, log, env, domain phụ, SSL, nginx, leak guard, chụp
+  heap, xoá) — không phải chọn lại app ở mỗi bước.
+- Bỏ nhóm "Hạ tầng" 17 mục -> "Bảo mật" và "Hiệu năng & nginx".
+- Công tắc là MỘT mục hiện trạng thái thật [BẬT]/[TẮT]; chọn là đảo (có xác nhận).
+- "Tác vụ định kỳ": mọi timer (backup, Cloudflare, lấy mẫu bộ nhớ) một chỗ, kèm
+  lịch + lần chạy tới.
+- Menu làm được gần hết những gì CLI làm được; mỗi thao tác in lệnh CLI tương đương.
+
 ## 1.28.1
 - SỬA LỖI NẶNG: menu tự tắt không một lời (thoát mã 0) sau khi một lệnh hỏi xác
   nhận — hai bộ đọc stdin giành nhau, bộ kia đóng là dừng stdin. Nay mọi câu hỏi

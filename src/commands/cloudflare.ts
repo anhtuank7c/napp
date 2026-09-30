@@ -9,7 +9,7 @@ import { writeManagedUnit } from "../lib/unitfile";
 import { showTimer } from "../lib/timer";
 
 const NAPP_BIN_PATH = "/usr/local/bin/napp";
-const CF_TIMER_NAME = "napp-cloudflare-sync";
+export const CF_TIMER_NAME = "napp-cloudflare-sync";
 
 export async function cmdCloudflareSync(opts: { quiet?: boolean } = {}): Promise<void> {
   requireRoot();

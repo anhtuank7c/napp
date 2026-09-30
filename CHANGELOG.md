@@ -2,6 +2,20 @@
 
 Tất cả thay đổi đáng chú ý của `napp` được ghi lại ở đây.
 
+## 1.29.0
+
+- **Menu chia theo ngữ cảnh:** chọn **thứ** muốn làm việc trước, rồi mọi thao tác trên nó nằm cùng một chỗ. Chọn một app là vào **menu của riêng app đó** (xem · deploy · restart · dừng/khởi động · log · biến môi trường · domain phụ · SSL · nginx · leak guard · chụp heap · xoá) — không còn cảnh chọn "Restart" rồi chọn app, chọn "Log" rồi chọn lại đúng app đó. Service cũng vậy, kèm "Danh tính & quyền ghi" (run-as, write-dir).
+
+- **Bỏ nhóm "Hạ tầng" 17 mục.** Tách thành **Bảo mật** (tường lửa, fail2ban, hardening, chặn quét, doctor) và **Hiệu năng & nginx** (tối ưu, đồng bộ nginx, IP Cloudflare, bộ nhớ). Mỗi màn hình tối đa khoảng 8 mục.
+
+- **Công tắc là MỘT mục, hiện trạng thái thật** — `[BẬT]` / `[TẮT]` đọc lại mỗi lần vẽ menu; chọn là đảo (có hỏi xác nhận). Thay cho các cặp "Bật X" / "Gỡ X" rời rạc không cho biết X đang bật hay tắt.
+
+- **"Tác vụ định kỳ"**: backup hàng ngày, cập nhật IP Cloudflare, lấy mẫu bộ nhớ nằm chung một chỗ, mỗi dòng kèm trạng thái, lịch và lần chạy tới. Menu chính hiện luôn có bao nhiêu tác vụ đang bật.
+
+- **Menu làm được gần hết những gì CLI làm được** — trước đây thiếu: dừng/khởi động, biến môi trường, domain phụ, xem chi tiết app/service, đổi danh tính service, xoá database, đặt engine mặc định, xoá dữ liệu Redis DB, leak guard, chụp heap, gỡ chặn IP fail2ban, `check --fix`.
+
+- **Mỗi thao tác in lệnh CLI tương đương** (`Lệnh tương đương: sudo napp …`) để người dùng menu học dần được lệnh.
+
 ## 1.28.1
 
 - **Sửa lỗi nặng: menu napp tự tắt không một lời** ngay sau khi một lệnh hỏi xác nhận (Áp tối ưu phần cứng, Xoá app, Gỡ SSL, Xoá database...). Nguyên nhân: mỗi lệnh tự mở một bộ đọc stdin riêng trong khi menu vẫn giữ bộ đọc của nó — bộ đọc kia nuốt mất câu trả lời, rồi khi đóng nó **dừng stdin**, không còn gì giữ tiến trình sống và Node thoát với **mã 0**, không lỗi, không thông báo. Đã tái hiện được, và đã kiểm chứng bản cũ chết đúng như vậy còn bản mới trả lời xong quay lại menu. Nay mọi câu hỏi (menu lẫn trong lệnh) đi qua một chỗ duy nhất (`lib/prompt.ts`).

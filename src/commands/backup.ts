@@ -10,7 +10,7 @@ import { timeToDailyOnCalendar } from "../lib/validate";
 import { showTimer } from "../lib/timer";
 
 const NAPP_BIN_PATH = "/usr/local/bin/napp";
-const BACKUP_TIMER_NAME = "napp-backup";
+export const BACKUP_TIMER_NAME = "napp-backup";
 export const DEFAULT_RETENTION_DAYS = 14;
 
 export type BackupTarget = "db" | "files" | "all";
