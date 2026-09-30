@@ -158,18 +158,90 @@ interface KeyLoopOptions {
 }
 
 /**
+ * Giải mã phím từ dữ liệu THÔ của terminal (raw mode). Tự làm thay cho
+ * readline.emitKeypressEvents vì bộ giải mã đó chờ ~500ms sau mỗi Esc để xem
+ * có phải đầu một chuỗi escape không — bấm Esc là thấy "khựng" nửa giây.
+ * Terminal gửi cả chuỗi escape (vd "\x1b[B") trong MỘT lần ghi, nên một Esc
+ * đứng một mình ở cuối gói dữ liệu gần như chắc chắn là phím Esc thật; chỉ chờ
+ * thêm ESC_WAIT_MS (như ttimeoutlen của vim) phòng khi SSH chậm cắt đôi chuỗi.
+ */
+const ESC_WAIT_MS = 30;
+
+const CSI_KEYS: Record<string, string> = {
+  A: "up",
+  B: "down",
+  H: "home",
+  F: "end",
+  "1~": "home",
+  "7~": "home",
+  "4~": "end",
+  "8~": "end",
+  "5~": "pageup",
+  "6~": "pagedown",
+};
+
+/** Tách một gói dữ liệu thành tên phím. Trả về phần dư (một Esc đứng cuối) để chờ gói sau. */
+function decodeKeys(data: string, emit: (name: string) => void): string {
+  let i = 0;
+  while (i < data.length) {
+    const ch = data[i]!;
+    if (ch === "\x1b") {
+      if (i === data.length - 1) return "\x1b"; // Esc ở cuối gói: có thể là đầu chuỗi bị cắt đôi -> chờ
+      const next = data[i + 1]!;
+      if (next === "[" || next === "O") {
+        // CSI / SS3: đọc tới byte kết thúc (0x40-0x7e).
+        let j = i + 2;
+        while (j < data.length && !(data.charCodeAt(j) >= 0x40 && data.charCodeAt(j) <= 0x7e)) j++;
+        if (j >= data.length) return data.slice(i); // chuỗi chưa đủ -> chờ gói sau
+        const body = data.slice(i + 2, j + 1);
+        const key = CSI_KEYS[body.replace(/^1;\d+/, "")] ?? CSI_KEYS[body.slice(-1)];
+        if (key) emit(key);
+        i = j + 1;
+        continue;
+      }
+      emit("escape"); // Esc theo sau là ký tự thường (Alt+phím) -> coi như Esc
+      i++;
+      continue;
+    }
+    if (ch === "\x03") emit("ctrl-c");
+    else if (ch === "\x04") emit("ctrl-d");
+    else if (ch === "\r" || ch === "\n") emit("return");
+    else if (ch === " ") emit("space");
+    else if (/^[0-9]$/.test(ch)) emit(`char:${ch}`);
+    else if (ch === "k") emit("up");
+    else if (ch === "j") emit("down");
+    else if (ch >= " ") emit(ch);
+    i++;
+  }
+  return "";
+}
+
+// Ghi nguyên một khung hình trong khối "đồng bộ" (DEC mode 2026): terminal hỗ
+// trợ (Windows Terminal, kitty, WezTerm, iTerm2...) vẽ cả khung một lần, không
+// xé hình; terminal không hỗ trợ bỏ qua hai mã này.
+const SYNC_START = "\x1b[?2026h";
+const SYNC_END = "\x1b[?2026l";
+const FRAME_MS = 16; // tối đa ~60 khung/giây, như Bubble Tea
+
+/**
  * Vòng đọc phím chung cho select/checkbox: vẽ tại chỗ (không cuộn màn hình),
  * nhảy bằng số, chỉ vẽ một cửa sổ khi danh sách dài hơn màn hình. LUÔN trả
  * terminal về chế độ thường khi xong — kể cả khi huỷ.
  *
+ * Ba thứ làm di chuyển mượt (cách các TUI phổ biến làm):
+ *  1. Tự giải mã phím -> Esc phản hồi ngay, không trễ 500ms.
+ *  2. Chỉ vẽ lại DÒNG ĐỔI (thường là 2 dòng: con trỏ cũ và mới), không xoá và vẽ
+ *     lại cả danh sách mỗi lần bấm.
+ *  3. Gộp nhiều phím đến dồn (giữ phím, SSH chậm) thành MỘT lần vẽ, tối đa ~60
+ *     lần/giây — không vẽ lại 30 lần cho 30 lần bấm dồn.
+ *
  * Mọi lối ra (chọn, huỷ, Ctrl+C, Ctrl+D) đều đi qua finish(): ném lỗi thẳng từ
- * trong handler 'keypress' là lỗi KHÔNG ai bắt, và terminal kẹt ở raw mode.
+ * trong handler dữ liệu là lỗi KHÔNG ai bắt, và terminal kẹt ở raw mode.
  */
 function keyLoop(opts: KeyLoopOptions): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const input = process.stdin;
     const out = process.stdout;
-    readline.emitKeypressEvents(input);
     input.setRawMode(true);
     input.resume();
     out.write("\x1b[?25l"); // ẩn con trỏ trong lúc chọn
@@ -177,11 +249,16 @@ function keyLoop(opts: KeyLoopOptions): Promise<unknown> {
     process.once("exit", showCursor);
 
     let cursor = Math.min(Math.max(0, opts.initial), opts.count - 1);
-    let drawn = 0;
+    let shown: string[] = []; // các dòng đang hiện trên màn hình (để so, chỉ vẽ dòng đổi)
     let digits = "";
     let digitTimer: NodeJS.Timeout | undefined;
+    let escTimer: NodeJS.Timeout | undefined;
+    let pending = ""; // phần dữ liệu còn dở (Esc / chuỗi escape bị cắt đôi)
+    let frameTimer: NodeJS.Timeout | undefined;
+    let lastFrame = 0;
+    let done = false;
 
-    const draw = () => {
+    const frame = (): string[] => {
       const width = Math.max(20, (out.columns || 80) - 1);
       const height = Math.max(5, (out.rows || 24) - 6);
       let lines = opts.render(cursor);
@@ -193,17 +270,44 @@ function keyLoop(opts: KeyLoopOptions): Promise<unknown> {
         if (start) lines[0] = `  ↑ còn ${start} mục`;
         if (below) lines[lines.length - 1] = `  ↓ còn ${below} mục`;
       }
-      lines = [...lines.map((l) => fit(l, width)), footerLine(opts.footer, width)];
-      out.write((drawn ? `\x1b[${drawn}A\r\x1b[J` : "") + lines.join("\n") + "\n");
-      drawn = lines.length;
+      return [...lines.map((l) => fit(l, width)), footerLine(opts.footer, width)];
+    };
+
+    // Con trỏ terminal luôn đứng ở đầu dòng NGAY SAU khung đang hiện.
+    const draw = () => {
+      frameTimer = undefined;
+      lastFrame = Date.now();
+      const next = frame();
+      let s = "";
+      if (shown.length === next.length) {
+        // Cùng số dòng: chỉ ghi đè dòng khác đi.
+        for (let i = 0; i < next.length; i++) {
+          if (next[i] === shown[i]) continue;
+          const up = shown.length - i;
+          s += `\x1b[${up}A\r\x1b[2K${next[i]}\x1b[${up}B\r`;
+        }
+        if (!s) return;
+      } else {
+        s = (shown.length ? `\x1b[${shown.length}A\r\x1b[J` : "") + next.join("\n") + "\n";
+      }
+      out.write(SYNC_START + s + SYNC_END);
+      shown = next;
+    };
+
+    // Xin vẽ: gộp mọi phím đến trong cùng một khung (~16ms) thành một lần vẽ.
+    const scheduleDraw = () => {
+      if (frameTimer || done) return;
+      frameTimer = setTimeout(draw, Math.max(0, lastFrame + FRAME_MS - Date.now()));
     };
 
     const finish = (err: Error | undefined, value?: unknown) => {
-      input.removeListener("keypress", onKeypress);
-      if (digitTimer) clearTimeout(digitTimer);
+      if (done) return;
+      done = true;
+      input.removeListener("data", onData);
+      for (const t of [digitTimer, escTimer, frameTimer]) if (t) clearTimeout(t);
       input.setRawMode(false);
       input.pause();
-      if (drawn) out.write(`\x1b[${drawn}A\r\x1b[J`); // xoá danh sách; người gọi in dòng tóm tắt
+      if (shown.length) out.write(`\x1b[${shown.length}A\r\x1b[J`); // xoá danh sách; người gọi in dòng tóm tắt
       showCursor();
       process.removeListener("exit", showCursor);
       if (err) reject(err);
@@ -224,32 +328,48 @@ function keyLoop(opts: KeyLoopOptions): Promise<unknown> {
       return false;
     };
 
-    const onKeypress = (str: string | undefined, key: { name?: string; ctrl?: boolean } = {}) => {
-      if (key.ctrl && key.name === "c") return finish(new PromptCancelled("sigint"));
-      if (key.ctrl && key.name === "d") return finish(new PromptCancelled("eof"));
+    const onKey = (name: string) => {
+      if (done) return;
+      if (name === "ctrl-c") return finish(new PromptCancelled("sigint"));
+      if (name === "ctrl-d") return finish(new PromptCancelled("eof"));
       // Gõ số = nhảy tới mục đó (gõ 2 chữ số liền nhau cho mục >= 10).
-      if (str && /^[0-9]$/.test(str)) {
-        digits = digitTimer ? digits + str : str;
+      if (name.startsWith("char:")) {
+        const d = name.slice(5);
+        digits = digitTimer ? digits + d : d;
         if (digitTimer) clearTimeout(digitTimer);
         digitTimer = setTimeout(() => {
           digitTimer = undefined;
           digits = "";
         }, 800);
         if (apply(opts.onKey(`digit:${digits}`, cursor))) return;
-        return draw();
+        return scheduleDraw();
       }
-      let name = key.name ?? "";
-      if (name === "k") name = "up";
-      if (name === "j") name = "down";
       if (name === "up") cursor = (cursor - 1 + opts.count) % opts.count;
       else if (name === "down") cursor = (cursor + 1) % opts.count;
       else if (name === "home" || name === "pageup") cursor = 0;
       else if (name === "end" || name === "pagedown") cursor = opts.count - 1;
       else if (apply(opts.onKey(name, cursor))) return;
-      draw();
+      scheduleDraw();
     };
 
-    input.on("keypress", onKeypress);
+    const onData = (chunk: Buffer | string) => {
+      if (escTimer) {
+        clearTimeout(escTimer);
+        escTimer = undefined;
+      }
+      pending = decodeKeys(pending + chunk.toString(), onKey);
+      if (done || !pending) return;
+      // Còn dở một Esc / chuỗi escape: chờ gói kế tiếp một chút, không có thì
+      // chốt là phím Esc (chuỗi dở dang không phải Esc thì bỏ).
+      escTimer = setTimeout(() => {
+        escTimer = undefined;
+        const lone = pending === "\x1b";
+        pending = "";
+        if (lone) onKey("escape");
+      }, ESC_WAIT_MS);
+    };
+
+    input.on("data", onData);
     draw();
   });
 }

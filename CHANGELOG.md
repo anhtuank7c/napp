@@ -2,6 +2,21 @@
 
 Tất cả thay đổi đáng chú ý của `napp` được ghi lại ở đây.
 
+## 1.30.4
+
+- **Di chuyển trong menu mượt hơn — học theo cách các TUI phổ biến (Bubble Tea, Ink, ncurses) làm.** Đo trước/sau bằng cùng một bài đo:
+
+  | | 1.30.3 | 1.30.4 |
+  |---|---|---|
+  | Bấm Esc -> menu phản hồi | 500 ms | 31 ms |
+  | Byte ghi ra mỗi lần bấm ↓ | 1 062 | 214 |
+  | 30 lần ↓ đến dồn một gói (giữ phím, SSH chậm) | 30 lần vẽ, 31,9 KB | 1 lần vẽ, 213 byte |
+
+- **Esc hết "khựng" nửa giây:** napp tự giải mã phím thay vì dùng bộ giải mã của Node (vốn chờ ~500ms sau mỗi Esc để xem có phải đầu một chuỗi escape). Chỉ chờ 30ms phòng khi SSH chậm cắt đôi một phím mũi tên — trường hợp đó đã được kiểm thử, vẫn nhận đúng là ↓.
+- **Chỉ vẽ lại dòng thay đổi** (thường là dòng con trỏ cũ và mới) thay vì xoá và vẽ lại cả danh sách mỗi lần bấm — ít dữ liệu qua SSH, không nháy. Mỗi khung được bọc trong chế độ "vẽ đồng bộ" (DEC 2026) để terminal hỗ trợ (Windows Terminal, kitty, WezTerm, iTerm2) không bị xé hình; terminal khác bỏ qua.
+- **Gộp phím đến dồn thành một lần vẽ**, tối đa ~60 lần/giây — giữ phím ↓ không còn làm hình vẽ chạy theo sau.
+- Nhận thêm Home/End, PageUp/PageDown và `j`/`k` kiểu vim ở mọi dạng terminal gửi (`\x1b[B` lẫn `\x1bOB`).
+
 ## 1.30.3
 
 - **napp hết "lag": nguyên nhân không phải JavaScript mà là cách hỏi "chương trình X có cài chưa".** Mỗi lần hỏi, napp mở một **login shell** (`bash -lc "command -v X"`) — nạp lại `/etc/profile`, `.bashrc`, cả nvm nếu có — mất 100-500ms mỗi lần, ở 46 chỗ trong code, và bị gọi nhiều nhất cho engine **chưa cài** (3/4 engine trên một máy bình thường). Đo được: vẽ menu "Kiểm tra & sửa môi trường" tốn ~665ms, gần như toàn bộ là mấy login shell đó.

@@ -16,6 +16,12 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.30.4
+- Menu mượt hơn: Esc phản hồi sau 31ms thay vì 500ms (tự giải mã phím); chỉ vẽ
+  lại dòng thay đổi (214 thay vì 1 062 byte mỗi lần ↓); gộp phím đến dồn thành
+  một lần vẽ (30 lần ↓ dồn: 1 lần vẽ thay vì 30); vẽ đồng bộ (DEC 2026) để
+  không xé hình.
+
 ## 1.30.3
 - NAPP HẾT LAG: mỗi lần hỏi "chương trình X có cài chưa" từng mở một login shell
   (100-500ms/lần, 46 chỗ gọi). Nay tra thẳng PATH + thư mục hệ thống trong tiến
