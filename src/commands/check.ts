@@ -1,5 +1,5 @@
 import { readFileSync, existsSync } from "node:fs";
-import { ask } from "../lib/prompt";
+import { ask, checkbox } from "../lib/prompt";
 import { execCapture, runCmd, commandExists, requireRoot, isServiceActive, writeFile, ensureDir } from "../lib/exec";
 import { info, ok, warn, section, die } from "../lib/log";
 import { REDIS_TUNING_PATH } from "../templates/tuning";
@@ -24,6 +24,7 @@ import {
   selectedEngines,
   setSelectedEngines,
   unmanagedEngines,
+  validateEngineSet,
   exposedEngines,
   exposureMessage,
   type DbEngine,
@@ -90,18 +91,16 @@ function installCertbot(): void {
 // giữ mặc định MariaDB, đúng hành vi các bản trước.
 async function promptEngineSelection(): Promise<DbEngine[] | undefined> {
   console.log();
-  console.log("Chọn database engine muốn cài (chọn nhiều thì cách nhau dấu phẩy, vd '1,3'):");
-  DB_ENGINES.forEach((e, i) => console.log(`  ${i + 1}. ${e}${e === DEFAULT_DB_ENGINE ? " (mặc định)" : ""}`));
-  console.log("  0. không dùng database");
-  const ans = (await ask(`Lựa chọn [1]: `)).trim();
-  if (ans === "") return [DEFAULT_DB_ENGINE];
-  if (ans === "0") return [];
-  const mapped = ans
-    .split(/[,\s]+/)
-    .filter(Boolean)
-    .map((t) => (/^\d+$/.test(t) ? DB_ENGINES[parseInt(t, 10) - 1] ?? t : t))
-    .join(",");
-  return parseEngineList(mapped);
+  const picked = await checkbox({
+    message: "Chọn database engine muốn cài (bỏ hết = không dùng database):",
+    choices: DB_ENGINES.map((e) => ({
+      label: `${driverFor(e).label}${e === DEFAULT_DB_ENGINE ? " (mặc định)" : ""}${e === "mariadb" || e === "mysql" ? " — MariaDB và MySQL chỉ chọn một" : ""}`,
+      value: e,
+      checked: e === DEFAULT_DB_ENGINE,
+    })),
+  });
+  validateEngineSet(picked);
+  return picked;
 }
 
 function installRedis(): void {

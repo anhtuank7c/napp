@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { ask as promptAsk, askBlock, PromptCancelled } from "../lib/prompt";
+import { ask as promptAsk, askBlock, select, checkbox, interactive, PromptCancelled } from "../lib/prompt";
 import { execCapture } from "../lib/exec";
 import { cmdCheck } from "./check";
 import { cmdDoctor, cmdDoctorSystem, cmdDoctorDeps, cmdDoctorUpgrade } from "./doctor";
@@ -110,133 +110,81 @@ async function askSshKey(): Promise<string | undefined> {
   return lines.join("\n");
 }
 
-// Cho người dùng chọn 1 giá trị từ danh sách bằng số thứ tự (hoặc gõ thẳng tên).
-// Enter trống -> lấy mặc định.
+// Chọn 1 giá trị trong danh sách: ↑/↓ + Enter (terminal) hoặc gõ số (pipe).
+// Enter ngay = mặc định.
 async function askChoice<T extends string>(label: string, options: readonly T[], defaultValue: T): Promise<T> {
-  console.log(`${label}:`);
-  options.forEach((o, i) => console.log(`  ${i + 1}. ${o}${o === defaultValue ? "  (mặc định)" : ""}`));
-  const ans = await ask(`Chọn [1-${options.length}] (Enter = ${defaultValue}): `);
-  if (!ans) return defaultValue;
-  const n = parseInt(ans, 10);
-  if (Number.isInteger(n) && n >= 1 && n <= options.length) {
-    const picked = options[n - 1];
-    if (picked !== undefined) return picked;
-  }
-  const byName = options.find((o) => o.toLowerCase() === ans.toLowerCase());
-  if (byName) return byName;
-  warn(`Lựa chọn không hợp lệ '${ans}' — dùng mặc định '${defaultValue}'.`);
-  return defaultValue;
+  return select<T>({
+    message: `${label}:`,
+    choices: options.map((o) => ({ label: o === defaultValue ? `${o}  ${colorText("dim", "(mặc định)")}` : o, value: o })),
+    initial: Math.max(0, options.indexOf(defaultValue)),
+  });
 }
 
-// Xổ danh sách app hiện có để người dùng CHỌN thay vì gõ tay domain. Trả về
-// undefined nếu không có app nào, hoặc người dùng huỷ (0/Enter).
+// Chọn từ một danh sách có mục "Huỷ" ở cuối. Esc / chọn "Huỷ" / gõ 0 = undefined.
+async function pickOrCancel<T>(message: string, choices: { label: string; value: T }[]): Promise<T | undefined> {
+  const all: { label: string; value: T | undefined }[] = [...choices, { label: colorText("dim", "Huỷ"), value: undefined }];
+  try {
+    return await select<T | undefined>({ message, choices: all, zeroIndex: all.length - 1 });
+  } catch (e) {
+    if (e instanceof PromptCancelled && e.reason === "sigint") return undefined;
+    throw e;
+  }
+}
+
+// Chọn một app đã có (thay vì gõ tay domain). undefined = không có app nào / huỷ.
 async function askAppDomain(actionLabel: string): Promise<string | undefined> {
   const apps = listAppSummaries();
   if (apps.length === 0) {
-    warn("Chưa có app nào được napp quản lý — hãy tạo app trước (mục 'Tạo app mới').");
+    warn("Chưa có app nào được napp quản lý — hãy tạo app trước (App web › Tạo app mới).");
     return undefined;
   }
-  console.log(`Chọn app để ${actionLabel}:`);
-  apps.forEach((a, i) =>
-    console.log(`  ${i + 1}. ${a.domain.padEnd(30)} port=${a.port}  ${a.running ? "● đang chạy" : "○ đã dừng"}`)
+  return pickOrCancel(
+    `Chọn app để ${actionLabel}:`,
+    apps.map((a) => ({ label: `${a.domain.padEnd(30)} ${a.running ? colorText("green", "● đang chạy") : colorText("yellow", "○ đã dừng")}`, value: a.domain }))
   );
-  const ans = await ask(`Chọn [1-${apps.length}] (0 = huỷ): `);
-  if (!ans || ans === "0") return undefined;
-  const n = parseInt(ans, 10);
-  if (Number.isInteger(n) && n >= 1 && n <= apps.length) {
-    const picked = apps[n - 1];
-    if (picked) return picked.domain;
-  }
-  const byName = apps.find((a) => a.domain === ans.trim());
-  if (byName) return byName.domain;
-  warn(`Lựa chọn không hợp lệ: '${ans}'.`);
-  return undefined;
 }
 
-// Xổ danh sách background service hiện có để CHỌN thay vì gõ tay tên. Trả về
-// undefined nếu không có service nào, hoặc người dùng huỷ (0/Enter).
+// Chọn một background service đã có. undefined = không có service nào / huỷ.
 async function askServiceName(actionLabel: string): Promise<string | undefined> {
   const services = listServiceSummaries();
   if (services.length === 0) {
-    warn("Chưa có background service nào — hãy tạo service trước (mục 'Tạo service mới').");
+    warn("Chưa có background service nào — hãy tạo service trước (Background service › Tạo service mới).");
     return undefined;
   }
-  console.log(`Chọn service để ${actionLabel}:`);
-  services.forEach((s, i) =>
-    console.log(`  ${i + 1}. ${s.name.padEnd(30)} ${s.port !== undefined ? `port=${s.port}` : "no-port"}  ${s.running ? "● đang chạy" : "○ đã dừng"}`)
+  return pickOrCancel(
+    `Chọn service để ${actionLabel}:`,
+    services.map((s) => ({ label: `${s.name.padEnd(30)} ${s.running ? colorText("green", "● đang chạy") : colorText("yellow", "○ đã dừng")}`, value: s.name }))
   );
-  const ans = await ask(`Chọn [1-${services.length}] (0 = huỷ): `);
-  if (!ans || ans === "0") return undefined;
-  const n = parseInt(ans, 10);
-  if (Number.isInteger(n) && n >= 1 && n <= services.length) {
-    const picked = services[n - 1];
-    if (picked) return picked.name;
-  }
-  const byName = services.find((s) => s.name === ans.trim());
-  if (byName) return byName.name;
-  warn(`Lựa chọn không hợp lệ: '${ans}'.`);
-  return undefined;
 }
 
-// Chọn một engine trong số engine napp đang quản lý. Chỉ có một -> trả luôn,
-// không hỏi. undefined = không có engine nào.
+// Chọn một engine napp đang quản lý. Chỉ có một -> trả luôn, không hỏi.
 async function askEngine(actionLabel: string): Promise<DbEngine | undefined> {
   const engines = activeEngines();
   if (engines.length === 0) {
-    warn("Chưa có database engine nào được cài — thêm ở menu Quản lý Database > Thêm database engine.");
+    warn("Chưa có database engine nào được cài — thêm ở Database › Engine.");
     return undefined;
   }
   if (engines.length === 1) return engines[0];
-  return askChoice<DbEngine>(`Database engine để ${actionLabel}`, engines, engines[0]!);
+  return pickOrCancel(`Database engine để ${actionLabel}:`, engines.map((e) => ({ label: driverFor(e).label, value: e })));
 }
 
-// Xổ danh sách database (mọi engine) để chọn. Trả về {engine, name}, "__ALL__"
-// nếu chọn tất cả, hoặc undefined nếu huỷ / không có DB nào.
+// Chọn một database (mọi engine) hoặc TẤT CẢ. undefined = huỷ / không có DB nào.
 async function askDatabase(actionLabel: string): Promise<{ engine: DbEngine; name: string } | "__ALL__" | undefined> {
   const dbs = activeEngines().flatMap((engine) => driverFor(engine).list().map((name) => ({ engine, name })));
   if (dbs.length === 0) {
     warn("Không tìm thấy database nào (hoặc database engine chưa chạy / chưa kết nối được).");
     return undefined;
   }
-  console.log(`Chọn database để ${actionLabel}:`);
-  dbs.forEach((d, i) => console.log(`  ${i + 1}. ${d.name}  (${driverFor(d.engine).label})`));
-  console.log(`  a. TẤT CẢ database`);
-  const ans = (await ask(`Chọn [1-${dbs.length} / a = tất cả] (0 = huỷ): `)).trim();
-  if (!ans || ans === "0") return undefined;
-  if (ans.toLowerCase() === "a") return "__ALL__";
-  const n = parseInt(ans, 10);
-  if (Number.isInteger(n) && n >= 1 && n <= dbs.length) return dbs[n - 1];
-  const byName = dbs.find((d) => d.name === ans);
-  if (byName) return byName;
-  warn(`Lựa chọn không hợp lệ: '${ans}'.`);
-  return undefined;
+  return pickOrCancel<{ engine: DbEngine; name: string } | "__ALL__">(`Chọn database để ${actionLabel}:`, [
+    ...dbs.map((d) => ({ label: `${d.name}  ${colorText("dim", `(${driverFor(d.engine).label})`)}`, value: d })),
+    { label: "TẤT CẢ database", value: "__ALL__" as const },
+  ]);
 }
 
-// Chọn NHIỀU tuỳ chọn bằng cách bật/tắt (tick) theo số thứ tự. Mỗi tuỳ chọn có
-// trạng thái mặc định (đã tick hay chưa); người dùng gõ các số để đảo trạng thái,
-// Enter trống = xác nhận danh sách đang hiển thị. Trả về Set các key đang bật.
-async function askMultiSelect(
-  label: string,
-  options: readonly { key: string; label: string; default: boolean }[]
-): Promise<Set<string>> {
-  const selected = new Set(options.filter((o) => o.default).map((o) => o.key));
-  while (true) {
-    console.log(`${label}`);
-    options.forEach((o, i) => console.log(`  ${i + 1}. [${selected.has(o.key) ? "x" : " "}] ${o.label}`));
-    const ans = await ask(`Gõ số để bật/tắt (cách nhau bởi dấu cách/phẩy), Enter = xác nhận: `);
-    if (!ans) return selected;
-    for (const tok of ans.split(/[\s,]+/).filter(Boolean)) {
-      const n = parseInt(tok, 10);
-      if (Number.isInteger(n) && n >= 1 && n <= options.length) {
-        const key = options[n - 1]!.key;
-        if (selected.has(key)) selected.delete(key);
-        else selected.add(key);
-      } else {
-        warn(`Bỏ qua lựa chọn không hợp lệ: '${tok}'`);
-      }
-    }
-    console.log();
-  }
+// Chọn NHIỀU: ↑/↓ + Space + Enter (terminal) hoặc gõ số để đảo (pipe). Trả Set các key được tick.
+async function askMultiSelect(label: string, options: readonly { key: string; label: string; default: boolean }[]): Promise<Set<string>> {
+  const picked = await checkbox({ message: label, choices: options.map((o) => ({ label: o.label, value: o.key, checked: o.default })) });
+  return new Set(picked);
 }
 
 // Hỏi số ngày retention, mặc định DEFAULT_RETENTION_DAYS.
@@ -250,21 +198,50 @@ async function askRetentionDays(): Promise<number> {
 // in thẳng ra lúc đó thì người dùng không kịp đọc.
 let notice: string | undefined;
 
-function printMenu(title: string, items: string[], exitLabel = "Quay lại", header?: string[]): void {
+/** Tiêu đề + dòng trạng thái + thông báo chờ — phần trên của mọi màn hình menu. */
+function printScreenTop(title: string, header?: string[]): void {
   console.clear();
   section(title);
   if (header?.length) {
     for (const line of header) console.log(`  ${line}`);
     console.log();
   }
-  items.forEach((label, i) => console.log(`  ${i + 1}. ${label}`));
-  console.log(`  0. ${exitLabel}`);
-  console.log();
   if (notice) {
     console.log(notice);
     console.log();
     notice = undefined;
   }
+}
+
+function printMenu(title: string, items: string[], exitLabel = "Quay lại", header?: string[]): void {
+  printScreenTop(title, header);
+  items.forEach((label, i) => console.log(`  ${i + 1}. ${label}`));
+  console.log(`  0. ${exitLabel}`);
+  console.log();
+}
+
+// Vị trí con trỏ lần trước của từng màn hình: quay lại menu là đứng đúng mục vừa dùng.
+const menuCursor = new Map<string, number>();
+
+/**
+ * Vẽ một màn hình menu và lấy lựa chọn, trả về chuỗi như người dùng gõ: "1".."N",
+ * "0" (quay lại / thoát), "" (Enter trống, chỉ ở chế độ gõ số) hoặc `escValue`.
+ * Terminal thật: ↑/↓ + Enter, gõ số để nhảy, Esc = `escValue`. Pipe: gõ số như cũ.
+ */
+async function pickFromMenu(title: string, labels: string[], exitLabel: string, header?: string[], escValue = "0"): Promise<string> {
+  if (!interactive()) {
+    printMenu(title, labels, exitLabel, header);
+    return ask("Chọn: ");
+  }
+  printScreenTop(title, header);
+  const choices = [
+    ...labels.map((l, i) => ({ label: `${String(i + 1).padStart(2)}. ${l}`, value: String(i + 1) })),
+    { label: ` 0. ${exitLabel}`, value: "0" },
+  ];
+  const v = await select({ choices, initial: menuCursor.get(title) ?? 0, escValue, zeroIndex: labels.length, summary: false });
+  const idx = Number(v);
+  if (Number.isInteger(idx) && idx >= 1) menuCursor.set(title, idx - 1);
+  return v;
 }
 
 /** Chờ Enter trước khi vẽ lại menu (menu xoá màn hình). Ctrl+C ở đây = bỏ qua. */
@@ -365,13 +342,12 @@ async function menuLoop(screen: () => Screen | undefined): Promise<void> {
   while (true) {
     const s = screen();
     if (!s) return;
-    printMenu(
+    const choice = await pickFromMenu(
       s.title,
       s.items.map((i) => (i.open ? `${i.label} ›` : i.label)),
       "Quay lại",
       s.header
     );
-    const choice = await ask("Chọn: ");
     if (choice === "0" || choice === "") return;
     const n = Number(choice);
     const item = Number.isInteger(n) ? s.items[n - 1] : undefined;
@@ -423,17 +399,15 @@ async function askEnvPairs(): Promise<string[]> {
 
 /** Hỏi chọn một app HOẶC service (cho các thao tác áp dụng cho cả hai). */
 async function askUnit(actionLabel: string): Promise<string | undefined> {
-  const ids = [...listAppSummaries().map((a) => a.domain), ...listServiceSummaries().map((s) => s.name)];
-  if (ids.length === 0) {
+  const units = [
+    ...listAppSummaries().map((a) => ({ label: `${a.domain}  ${colorText("dim", "(app)")}`, value: a.domain })),
+    ...listServiceSummaries().map((x) => ({ label: `${x.name}  ${colorText("dim", "(service)")}`, value: x.name })),
+  ];
+  if (units.length === 0) {
     warn("Chưa có app hay service nào.");
     return undefined;
   }
-  console.log(`Chọn app/service để ${actionLabel}:`);
-  ids.forEach((id, i) => console.log(`  ${i + 1}. ${id}`));
-  const ans = await ask(`Chọn [1-${ids.length}] (0 = huỷ): `);
-  const n = parseInt(ans, 10);
-  if (!ans || ans === "0") return undefined;
-  return Number.isInteger(n) && n >= 1 && n <= ids.length ? ids[n - 1] : ids.find((id) => id === ans);
+  return pickOrCancel(`Chọn app/service để ${actionLabel}:`, units);
 }
 
 // ------------------------------------------------------------ 1. Môi trường
@@ -1372,14 +1346,10 @@ export async function runMenu(): Promise<void> {
   try {
     while (true) {
       const items = topItems();
-      printMenu(
-        `napp v${NAPP_VERSION} — Quản lý server Node.js`,
-        items.map((i) => `${i.label} ›`),
-        "Thoát napp"
-      );
       let choice: string;
       try {
-        choice = await ask("Chọn: ");
+        // Esc ở menu chính KHÔNG thoát (bấm nhầm quá dễ) — chỉ nhắc.
+        choice = await pickFromMenu(`napp v${NAPP_VERSION} — Quản lý server Node.js`, items.map((i) => `${i.label} ›`), "Thoát napp", undefined, "esc");
       } catch (e) {
         if (!(e instanceof PromptCancelled) || e.reason === "eof") throw e;
         // Ctrl+C ở menu chính: lần đầu chỉ nhắc (bấm nhầm là chuyện thường), lần
@@ -1393,6 +1363,10 @@ export async function runMenu(): Promise<void> {
       // nhầm một phím là văng khỏi napp.
       if (choice === "0" || choice.toLowerCase() === "q") break;
       if (choice === "") continue;
+      if (choice === "esc") {
+        notice = colorText("yellow", "Chọn '0. Thoát napp' để thoát.");
+        continue;
+      }
       const n = Number(choice);
       const item = Number.isInteger(n) ? items[n - 1] : undefined;
       if (item) await submenu(async () => void (await item.run()));

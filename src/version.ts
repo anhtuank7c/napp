@@ -16,6 +16,13 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.30.0
+- Menu chọn bằng phím mũi tên: ↑/↓ di chuyển, Enter chọn, Esc quay lại. Danh
+  sách chọn nhiều: Space tick/bỏ tick, 'a' tick/bỏ tất cả, Enter xác nhận.
+- Gõ số vẫn nhảy tới mục (0 = Quay lại/Thoát); quay lại menu thì con trỏ đứng
+  đúng mục vừa dùng. Esc ở menu chính KHÔNG thoát.
+- Chạy qua pipe/script vẫn là kiểu gõ số như trước. Không thêm thư viện nào.
+
 ## 1.29.1
 - SỬA LỖI NGUY HIỂM: 'check --fix' (mặc định MariaDB) có thể khiến apt GỠ MySQL
   cài tay. Nay driver từ chối cài MariaDB khi đã có MySQL (và ngược lại); check

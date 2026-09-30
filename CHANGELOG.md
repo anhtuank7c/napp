@@ -2,6 +2,18 @@
 
 Tất cả thay đổi đáng chú ý của `napp` được ghi lại ở đây.
 
+## 1.30.0
+
+- **Chọn bằng phím mũi tên ở mọi nơi trong menu:** `↑`/`↓` di chuyển, `Enter` chọn, `Esc` quay lại. Danh sách nhiều lựa chọn (database engine cần có, những gì xoá kèm khi gỡ app/service, lần đầu chọn engine trong `check --fix`) dùng `Space` để tick/bỏ tick, `a` để tick/bỏ tất cả, `Enter` xác nhận. Áp dụng cho mọi menu, mọi danh sách chọn một (app, service, database, engine, runtime, package manager...) và mọi danh sách chọn nhiều.
+
+- **Thói quen cũ vẫn dùng được:** gõ số để nhảy tới mục đó (gõ liền hai chữ số cho mục từ 10 trở lên), `0` nhảy tới "Quay lại"/"Thoát". Quay lại một menu thì con trỏ đứng đúng mục vừa dùng. Danh sách dài hơn màn hình được cuộn theo con trỏ.
+
+- **Esc ở menu chính KHÔNG thoát** (chỉ nhắc chọn "0. Thoát napp"); Esc trong một danh sách chọn = huỷ thao tác đó.
+
+- Không phải terminal thật (chạy qua pipe/script) thì vẫn là kiểu gõ số như trước — tự động hoá không bị ảnh hưởng. Terminal luôn được trả về chế độ thường sau mỗi lần chọn, kể cả khi huỷ, nên lệnh chạy sau đó (git, apt...) vẫn nhận Ctrl+C bình thường.
+
+- Viết tay, **không thêm thư viện nào**: napp vẫn là một file duy nhất chạy bằng root — không thêm mắt xích chuỗi cung ứng.
+
 ## 1.29.1
 
 - **Sửa lỗi nguy hiểm: `check --fix` có thể GỠ MySQL đang chạy.** Máy chưa từng chọn engine thì napp mặc định MariaDB; nếu máy đang có MySQL cài tay, `--fix` "sửa" MariaDB còn thiếu bằng `apt-get install -y mariadb-server` — apt gỡ MySQL để nhường chỗ và MariaDB tiếp quản `/var/lib/mysql`. Kiểm tra cổng chỉ chặn được khi MySQL đang chạy. Nay driver MariaDB/MySQL **từ chối cài** khi máy đang có bên kia (chặn ở mọi đường cài, không chỉ `check`), còn `check` báo rõ tình huống và chỉ lệnh dùng engine đang có (`napp db engine set mysql`) — không đưa ra fix tự động.
