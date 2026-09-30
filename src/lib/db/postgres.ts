@@ -1,5 +1,5 @@
 import { existsSync, readdirSync } from "node:fs";
-import { execCapture, runCmd, commandExists, ensureDir, writeFile, state as execState } from "../exec";
+import { execCapture, runCmd, commandExists, ensureDir, writeFile, shQuote, state as execState } from "../exec";
 import { die, dryRunNotice, ok, info } from "../log";
 import type { HardwareProfile } from "../hardware";
 import type { CreatedDb, DbDriver } from "./types";
@@ -193,11 +193,11 @@ export const postgresDriver: DbDriver = {
   },
 
   dump(name, outPath) {
-    runCmd("bash", ["-lc", `set -o pipefail; cd / && sudo -u postgres pg_dump ${JSON.stringify(name)} | gzip > ${JSON.stringify(outPath)}`]);
+    runCmd("bash", ["-lc", `set -o pipefail; cd / && sudo -u postgres pg_dump ${shQuote(name)} | gzip > ${shQuote(outPath)}`]);
   },
 
   dumpAll(outPath) {
-    runCmd("bash", ["-lc", `set -o pipefail; cd / && sudo -u postgres pg_dumpall | gzip > ${JSON.stringify(outPath)}`]);
+    runCmd("bash", ["-lc", `set -o pipefail; cd / && sudo -u postgres pg_dumpall | gzip > ${shQuote(outPath)}`]);
   },
 
   envFor(db) {

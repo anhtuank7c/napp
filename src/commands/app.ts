@@ -1,8 +1,10 @@
 import { existsSync, rmSync, readFileSync } from "node:fs";
+import { provisionRedis, redisEnvForUnit, rollbackRedis, describeUnitRedis, leaveRedisInstance, type RedisProvision } from "../lib/redis";
+import { ensureLogrotate } from "../lib/logrotate";
 import { ask } from "../lib/prompt";
-import { execCapture, runCmd, runAs, ensureDir, requireRoot, commandExists, writeFile, appendFile } from "../lib/exec";
+import { execCapture, runCmd, runAs, ensureDir, requireRoot, commandExists, writeFile, appendFile, chmodNoFollow } from "../lib/exec";
 import { info, ok, warn, die, section } from "../lib/log";
-import { validateDomain, validatePort, validateRepoUrl, validateBranch, validateEnvKey } from "../lib/validate";
+import { validateDomain, validatePort, validateRepoUrl, validateBranch, validateEnvKey, validateMaxBody, assertSafeNginxInputs, validateUnitCommand } from "../lib/validate";
 import {
   AppRecord,
   ServiceRecord,
@@ -13,8 +15,6 @@ import {
   upsertApp,
   removeApp as removeAppFromState,
   allocatePort,
-  resolveRedisDb,
-  redisDbOf,
   userFor,
   serviceNameFor,
   svcSystemdName,
@@ -57,6 +57,7 @@ export interface CreateAppOptions {
   redisDb?: number; // index cụ thể (dùng chung keyspace với đơn vị khác)
   shareRedisWith?: string; // domain/name của đơn vị muốn dùng chung Redis DB
   env: string[]; // "KEY=VALUE"
+  allowInsecureRepo?: boolean; // cho phép repo http:// / git:// (không mã hoá)
   token?: string; // Personal Access Token để clone repo PRIVATE qua HTTPS
   sshKey?: string; // đường dẫn deploy key (SSH private key) để clone repo PRIVATE qua SSH
   appDir?: string; // monorepo: thư mục con chứa app, tương đối so với webRoot
@@ -385,7 +386,7 @@ export async function cmdAppCreate(domain: string, opts: CreateAppOptions): Prom
   requireRoot();
   validateDomain(domain);
   validateBranch(opts.branch);
-  if (opts.repo) validateRepoUrl(opts.repo);
+  if (opts.repo) validateRepoUrl(opts.repo, { allowInsecure: opts.allowInsecureRepo });
 
   // --- xác thực repo private (không tương tác) ---
   // Fail sớm (trước khi tạo tài nguyên, khỏi rollback). Nếu có --ssh-key thì sau
@@ -394,6 +395,18 @@ export async function cmdAppCreate(domain: string, opts: CreateAppOptions): Prom
 
   const user = userFor(domain);
   const webRoot = `${WWW_ROOT}/${domain}`;
+  // Kiểm tra giá trị đi vào nginx NGAY TỪ ĐẦU — không đợi clone + build xong mới
+  // phát hiện rồi phải hoàn tác (template nginx vẫn kiểm tra lại lần nữa khi render).
+  assertSafeNginxInputs({
+    webRoot,
+    staticRoot: opts.staticRoot,
+    staticPrefixes: opts.staticPrefix,
+    staticAliases: resolveStaticAliases(opts.staticAlias),
+    uploadDir: opts.uploadDir,
+    uploadPrefix: opts.uploadPrefix,
+    maxBodySize: opts.maxBody,
+    hotlinkAllow: opts.hotlinkAllow,
+  });
   const port = allocatePort(opts.port);
   validatePort(port);
   const serviceName = serviceNameFor(domain);
@@ -416,6 +429,7 @@ export async function cmdAppCreate(domain: string, opts: CreateAppOptions): Prom
   const release = acquireLock(domain);
   let rollbackActive = true;
   let dbCreatedName: string | undefined; // set ngay sau khi createDatabase() thành công, để rollback biết cần xoá
+  let redisProv: RedisProvision = {}; // Redis riêng vừa tạo/tham gia -> rollback phải gỡ
   const rollback = () => {
     if (!rollbackActive) return;
     warn("Tạo app thất bại — đang hoàn tác các thay đổi đã thực hiện...");
@@ -430,6 +444,7 @@ export async function cmdAppCreate(domain: string, opts: CreateAppOptions): Prom
       if (execCapture("id", [user]).code === 0) {
         runCmd("userdel", ["-r", user], { silentFail: true });
       }
+      rollbackRedis(redisProv, domain, user);
       if (dbCreatedName) {
         try {
           driverFor(dbEngine!).drop(dbCreatedName, dbCreatedName);
@@ -522,6 +537,9 @@ EOF`,
     const installCmd = opts.installCmd ?? defaultInstallCmd(pm);
     const buildCmd = opts.buildCmd ?? "";
     const startCmd = opts.startCmd ?? defaultStartCmd(opts.runtime, pm);
+    validateUnitCommand(installCmd, "--install-cmd");
+    validateUnitCommand(buildCmd, "--build-cmd");
+    validateUnitCommand(startCmd, "--start-cmd");
 
     if (existsSync(`${webRoot}/package.json`) || opts.repo) {
       info("Đang cài dependencies...");
@@ -541,18 +559,10 @@ EOF`,
     }
 
     // --- redis (tuỳ chọn) ---
-    let redisDbIndex: number | undefined;
-    if (opts.redis || opts.redisDb !== undefined || opts.shareRedisWith) {
-      const preferred = opts.shareRedisWith ? redisDbOf(opts.shareRedisWith) : opts.redisDb;
-      redisDbIndex = resolveRedisDb(preferred);
-      if (redisDbIndex === undefined) {
-        warn("Đã hết database Redis riêng (0-15). Bỏ qua cấp DB riêng — hãy dùng key-prefix trong app thay vì DB riêng.");
-      } else if (preferred !== undefined) {
-        ok(`Dùng CHUNG Redis DB #${redisDbIndex}${opts.shareRedisWith ? ` với '${opts.shareRedisWith}'` : ""}`);
-      } else {
-        ok(`Đã cấp Redis DB #${redisDbIndex} cho app này`);
-      }
-    }
+    // Mặc định: Redis RIÊNG có mật khẩu (lib/redis.ts). --share-redis-with: dùng
+    // chung instance của app/service kia. --redis-db: kiểu cũ, dùng chung, không cô lập.
+    redisProv = provisionRedis(domain, user, { redis: opts.redis, redisDb: opts.redisDb, shareRedisWith: opts.shareRedisWith });
+    const { redisInstance, redisDbIndex } = redisProv;
 
     // --- .env ---
     const envUpdates: Record<string, string> = {
@@ -611,12 +621,7 @@ EOF`,
       envUpdates.XFF_DEPTH = "1";
     }
     if (dbInfo && dbEngine) Object.assign(envUpdates, driverFor(dbEngine).envFor(dbInfo));
-    if (redisDbIndex !== undefined) {
-      envUpdates.REDIS_HOST = "127.0.0.1";
-      envUpdates.REDIS_PORT = "6379";
-      envUpdates.REDIS_DB = String(redisDbIndex);
-      envUpdates.REDIS_URL = `redis://127.0.0.1:6379/${redisDbIndex}`;
-    }
+    Object.assign(envUpdates, redisEnvForUnit(redisProv));
     for (const kv of opts.env) {
       const eq = kv.indexOf("=");
       if (eq === -1) die(`--env phải theo dạng KEY=VALUE, nhận được: '${kv}'`);
@@ -631,7 +636,7 @@ EOF`,
     const appWorkDir = unitWorkDir(webRoot, opts.appDir);
     if (appWorkDir !== webRoot) ensureDir(appWorkDir);
     const envPath = `${appWorkDir}/.env`;
-    mergeEnvFile(envPath, envUpdates, 0o600);
+    mergeEnvFile(envPath, envUpdates, 0o600, user);
     // Khối GỢI Ý (comment) về CSRF của SvelteKit — mergeEnvFile chỉ ghi KEY=VALUE
     // và lược bỏ comment, nên phải append riêng ở đây. Chỉ có trong .env "mẫu"
     // lúc tạo app; lần `napp app env set` sau sẽ ghi lại file và bỏ khối này —
@@ -654,14 +659,12 @@ EOF`,
         "",
       ].join("\n")
     );
-    runCmd("chown", [`${user}:${user}`, envPath]);
     ok("Đã ghi cấu hình vào .env (quyền 600, chỉ user của app đọc được)");
 
     // --- phân quyền chuẩn ---
-    runCmd("chown", ["-R", `${user}:${user}`, webRoot]);
+    runCmd("chown", ["-hR", `${user}:${user}`, webRoot]);
     runCmd("find", [webRoot, "-type", "d", "-exec", "chmod", "750", "{}", "+"]);
     runCmd("find", [webRoot, "-type", "f", "-exec", "chmod", "640", "{}", "+"]);
-    runCmd("chmod", ["600", envPath]);
 
     // --- asset tĩnh: nhận diện framework từ THƯ MỤC BUILD (xem lib/framework.ts) ---
     // Chạy Ở ĐÂY vì đây là điểm sớm nhất có đủ hai điều kiện: build đã xong (nên
@@ -723,6 +726,7 @@ EOF`,
 
     // --- systemd service ---
     ensureDir("/var/log/napp", 0o750);
+    ensureLogrotate(); // log app không được phình vô hạn
     const record: AppRecord = {
       domain,
       aliasDomains: [],
@@ -739,6 +743,7 @@ EOF`,
       dbName: dbInfo?.name,
       dbUser: dbInfo?.user,
       dbEngine: dbInfo ? dbEngine : undefined,
+      redisInstance,
       redisDbIndex,
       appDir: opts.appDir,
       maxBodySize: opts.maxBody,
@@ -821,7 +826,8 @@ EOF`,
     if (dbInfo && dbEngine) {
       console.log(`  Database     : ${driverFor(dbEngine).label} '${dbInfo.name}'  (user: ${dbInfo.user}, mật khẩu + DATABASE_URL trong .env)`);
     }
-    if (redisDbIndex !== undefined) console.log(`  Redis DB     : #${redisDbIndex}`);
+    if (redisInstance || redisDbIndex !== undefined) console.log(`  Redis        : ${describeUnitRedis(redisProv)}`);
+    if (redisInstance) console.log(`                 (REDIS_URL có mật khẩu trong .env — app chỉ đọc REDIS_HOST/PORT thì phải đọc thêm REDIS_PASSWORD)`);
     console.log();
     console.log("  Các bước tiếp theo:");
     console.log(`  1. Trỏ bản ghi DNS A của ${domain} (và www.${domain} nếu dùng) về server này.`);
@@ -862,8 +868,8 @@ export async function cmdAppDeploy(domain: string): Promise<void> {
       runAs(app.user, "bash", ["-lc", app.buildCmd], { cwd: app.webRoot });
     }
 
-    runCmd("chown", ["-R", `${app.user}:${app.user}`, app.webRoot]);
-    runCmd("chmod", ["600", `${unitWorkDir(app.webRoot, app.appDir)}/.env`], { silentFail: true });
+    runCmd("chown", ["-hR", `${app.user}:${app.user}`, app.webRoot]);
+    chmodNoFollow(`${unitWorkDir(app.webRoot, app.appDir)}/.env`, 0o600);
 
     runCmd("systemctl", ["restart", serviceNameFor(domain)]);
     app.updatedAt = new Date().toISOString();
@@ -1025,6 +1031,9 @@ export async function cmdAppRemove(domain: string, opts: AppRemoveOptions): Prom
       info(`Giữ lại database '${app.dbName}'. Muốn xoá sau: napp db delete ${app.dbName} --engine ${unitEngine(app)} --yes --user ${app.dbUser ?? app.dbName}`);
     }
 
+    // Redis riêng: rời instance; thành viên cuối thì instance bị gỡ (dữ liệu
+    // giữ lại trừ khi xoá cả mã nguồn lẫn database — tức '--all').
+    if (app.redisInstance) leaveRedisInstance(app.redisInstance, domain, app.user, { purgeData: opts.source && opts.database });
     removeAppFromState(domain);
     ok(`Đã gỡ app '${domain}' khỏi napp.`);
 
@@ -1067,7 +1076,7 @@ export function cmdAppList(): void {
     console.log(
       `  ${running ? "●" : "○"} ${app.domain.padEnd(30)} port=${String(app.port).padEnd(6)} ${`${app.nodeRuntime}/${app.packageManager ?? "npm"}`.padEnd(10)} user=${app.user.padEnd(18)} ${
         app.dbName ? `db=${unitEngine(app)}:${app.dbName} ` : ""
-      }${app.redisDbIndex !== undefined ? `redis=${app.redisDbIndex} ` : ""}${running ? "đang chạy" : "ĐÃ DỪNG"}`
+      }${app.redisInstance ? "redis=riêng " : app.redisDbIndex !== undefined ? `redis=#${app.redisDbIndex}(chung) ` : ""}${running ? "đang chạy" : "ĐÃ DỪNG"}`
     );
   }
 }
@@ -1118,9 +1127,7 @@ export function cmdAppEnvSet(domain: string, pairs: string[]): void {
   }
   // Cùng đường dẫn systemd đọc — xem chú thích ở cmdAppCreate.
   const appEnv = `${unitWorkDir(app.webRoot, app.appDir)}/.env`;
-  mergeEnvFile(appEnv, updates, 0o600);
-  runCmd("chown", [`${app.user}:${app.user}`, appEnv]);
-  runCmd("chmod", ["600", appEnv]);
+  mergeEnvFile(appEnv, updates, 0o600, app.user);
   ok(`Đã cập nhật .env cho '${domain}'. Chạy 'napp app restart ${domain}' để áp dụng.`);
 }
 
@@ -1139,11 +1146,10 @@ export function cmdAppEnvUnset(domain: string, keys: string[]): void {
   const app = requireApp(domain);
   for (const k of keys) validateEnvKey(k);
   const appEnv = `${unitWorkDir(app.webRoot, app.appDir)}/.env`;
-  const removed = removeEnvKeys(appEnv, keys, 0o600);
+  const removed = removeEnvKeys(appEnv, keys, 0o600, app.user);
   const missing = keys.filter((k) => !removed.includes(k));
   if (missing.length > 0) warn(`Không có trong .env: ${missing.join(", ")}`);
   if (removed.length === 0) return;
-  runCmd("chown", [`${app.user}:${app.user}`, appEnv]);
   ok(`Đã xoá ${removed.join(", ")} khỏi .env của '${domain}'. Chạy 'napp app restart ${domain}' để áp dụng.`);
 }
 
@@ -1163,7 +1169,7 @@ export function cmdAppShow(domain: string): void {
     ["Runtime", `${app.nodeRuntime} · ${app.packageManager ?? "npm"}`],
     ["Lệnh", `install: ${app.installCmd} · build: ${app.buildCmd || "-"} · start: ${app.startCmd}`],
     ["Database", app.dbName ? `${driverFor(unitEngine(app)).label} '${app.dbName}' (user ${app.dbUser ?? app.dbName})` : "-"],
-    ["Redis DB", app.redisDbIndex !== undefined ? `#${app.redisDbIndex}` : "-"],
+    ["Redis", describeUnitRedis(app)],
     ["Asset tĩnh", app.staticRoot ? `${app.staticRoot} ${(app.staticPrefixes ?? []).join(" ")}` : app.staticAliases?.length ? app.staticAliases.map((a) => `${a.prefix}=${a.dir}`).join(" ") : "-"],
     ["File tải lên", app.uploadDir ? `${app.uploadDir} (${app.uploadPrefix ?? "/uploads/"})` : "-"],
     ["Chặn hotlink", app.hotlinkProtect ? `bật${app.hotlinkStrict ? " (strict)" : ""}${app.hotlinkAllow?.length ? ` · cho phép ${app.hotlinkAllow.join(", ")}` : ""}` : "tắt"],
@@ -1330,6 +1336,7 @@ export function cmdAppSet(domain: string, opts: SetAppOptions): void {
   // client_max_body_size là chỉ thị ĐƠN đã có sẵn trong vhost — vá tại chỗ thay
   // vì thêm bản thứ hai, để không phụ thuộc vào thứ tự khai báo.
   if (opts.maxBody) {
+    validateMaxBody(opts.maxBody); // đi thẳng vào vhost bằng regex bên dưới
     text = text.replace(/client_max_body_size\s+[^;]+;/, `client_max_body_size ${opts.maxBody};`);
   }
   const includeLine = `include ${locPath};`;

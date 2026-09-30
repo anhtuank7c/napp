@@ -101,8 +101,9 @@ export function setupRepoAuth(user: string, repo: string, auth: RepoAuth): void 
     // credential.helper=store đọc ~/.git-credentials, khớp theo host -> token
     // nằm đúng MỘT chỗ (quyền 600), remote HTTPS giữ nguyên URL sạch.
     const host = repoHost(repo) || "github.com";
-    writeFile(`${home}/.git-credentials`, `https://x-access-token:${auth.token}@${host}\n`, 0o600);
-    runCmd("chown", [`${user}:${user}`, `${home}/.git-credentials`]);
+    // Tạo sẵn đúng chủ + 0600 rồi rename (xem writeFile): không 'chown' theo
+    // đường dẫn trong home của app — symlink đặt sẵn ở đó sẽ kéo chown sang file của root.
+    writeFile(`${home}/.git-credentials`, `https://x-access-token:${auth.token}@${host}\n`, 0o600, { owner: user });
     runAs(user, "git", ["config", "--global", "credential.helper", "store"]);
     ok("Đã lưu token để clone repo private qua HTTPS (chỉ user chạy chương trình đọc được).");
   } else if (auth.sshKey) {
@@ -124,7 +125,7 @@ export function setupRepoAuth(user: string, repo: string, auth: RepoAuth): void 
       ].join("\n"),
       0o600
     );
-    runCmd("chown", ["-R", `${user}:${user}`, sshDir]);
+    runCmd("chown", ["-hR", `${user}:${user}`, sshDir]);
     ok("Đã cài deploy key để clone repo private qua SSH (chỉ user chạy chương trình đọc được).");
   }
 }

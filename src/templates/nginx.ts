@@ -1,4 +1,5 @@
 import type { AppRecord } from "../lib/state";
+import { assertSafeNginxInputs, validateMaxBody } from "../lib/validate";
 
 export const CLOUDFLARE_REALIP_CONF = "/etc/nginx/conf.d/cloudflare-realip.conf";
 export const NGINX_TUNING_CONF = "/etc/nginx/conf.d/napp-tuning.conf";
@@ -304,6 +305,9 @@ ${blocks}
  * vì `include` trỏ vào file không tồn tại làm nginx từ chối khởi động.
  */
 export function renderAppLocationsConf(app: AppRecord): string {
+  // Chốt chặn cuối: mọi giá trị đi vào nginx đều qua đây, kể cả giá trị cũ đã
+  // nằm sẵn trong state.json từ bản napp chưa kiểm tra.
+  assertSafeNginxInputs(app);
   const staticRoot = app.staticRoot;
   const staticPrefixes = app.staticPrefixes;
   const uploadDir = app.uploadDir;
@@ -376,6 +380,7 @@ ${staticPrefixes!
         add_header X-Frame-Options "SAMEORIGIN" always;
         add_header X-Content-Type-Options "nosniff" always;
         add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Strict-Transport-Security "max-age=15552000" always;
         # Một 'Cache-Control' duy nhất. KHÔNG dùng kèm 'expires' — expires cũng
         # sinh ra Cache-Control, và hai chỉ thị cùng lúc trả về HAI header.
         # 'immutable' mới là phần đáng giá: nó bỏ luôn bước revalidate khi người
@@ -409,6 +414,7 @@ ${staticPrefixes!
         add_header X-Frame-Options "SAMEORIGIN" always;
         add_header X-Content-Type-Options "nosniff" always;
         add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Strict-Transport-Security "max-age=15552000" always;
         add_header Cache-Control "public, max-age=31536000, immutable" always;${corpHeader}
         access_log off;
     }
@@ -477,6 +483,7 @@ ${hotlinkBlock}
         add_header X-Frame-Options "SAMEORIGIN" always;
         add_header X-Content-Type-Options "nosniff" always;
         add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Strict-Transport-Security "max-age=15552000" always;
         # Ngắn hơn asset build rất nhiều: tên file tải lên KHÔNG băm nội dung,
         # nên cùng một URL có thể đổi nội dung. 'immutable' ở đây sẽ khoá bản cũ
         # trong cache trình duyệt hàng năm trời.
@@ -524,6 +531,8 @@ ${hotlinkBlock}
 // Vhost reverse-proxy CHỈ HTTP (giống lara.sh: certbot sẽ tự sửa file này để
 // thêm khối SSL khi 'napp cert create' chạy `certbot --nginx`).
 export function renderAppNginxConf(app: AppRecord, opts: NginxAppOptions = {}): string {
+  assertSafeNginxInputs(app);
+  if (opts.clientMaxBodySize) validateMaxBody(opts.clientMaxBodySize);
   const allNames = [app.domain, `www.${app.domain}`, ...app.aliasDomains, ...(opts.extraServerNames ?? [])];
   const serverNames = Array.from(new Set(allNames)).join(" ");
   // Đọc từ AppRecord trước, opts chỉ để ghi đè. Trước đây các giá trị này CHỈ
@@ -553,6 +562,7 @@ server {
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Strict-Transport-Security "max-age=15552000" always;
 
     # Location riêng của app (asset build / file tải lên / chặn hotlink).
     # Nằm ở file riêng để đổi cấu hình về sau KHÔNG phải render lại vhost này —

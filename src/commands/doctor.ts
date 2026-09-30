@@ -61,6 +61,8 @@ function managedUnits(): string[] {
     ...["nginx", "mariadb", "mysql", "postgresql", "mongod", "redis-server", "ssh", "sshd", "fail2ban"].filter((u) => isServiceActive(u)),
     ...Object.values(st.apps).map((a) => `${serviceNameFor(a.domain)}.service`),
     ...Object.values(st.services).map((s) => `${svcSystemdName(s.name)}.service`),
+    // Redis riêng: vá libssl/redis mà không restart thì chúng vẫn chạy mã cũ.
+    ...Object.keys(st.redisInstances ?? {}).map((id) => `napp-redis-${id}.service`),
   ];
 }
 

@@ -126,7 +126,30 @@ info "Đang tải napp từ: $NAPP_CJS_URL"
 # sẽ ném ERR_UNKNOWN_FILE_EXTENSION và fail dù nội dung hoàn toàn hợp lệ.
 TMP_DIR="$(mktemp -d)"
 TMP_FILE="$TMP_DIR/napp.cjs"
+TMP_SIG="$TMP_DIR/napp.cjs.sig"
 trap 'rm -rf "$TMP_DIR"' EXIT
+
+# --- Chữ ký bản phát hành (Ed25519) -------------------------------------------
+# napp chạy bằng ROOT: chỉ cài napp.cjs có chữ ký hợp lệ của một trong các khoá
+# dưới đây — trùng TRUSTED_KEYS trong src/lib/signature.ts. HTTPS thôi không đủ:
+# ai chiếm được gist/tài khoản GitHub là thay được napp.cjs, nhưng không ký được.
+# (Chính install.sh thì không tự kiểm tra được mình: hãy tải nó từ một release
+#  có tag và đọc qua trước khi chạy — xem README.)
+NAPP_TRUSTED_KEYS="MCowBQYDK2VwAyEAGLWyHX06nz1YZpXpLHAyhheAPl0JlSlBWjsKIK/ftos="
+NAPP_SIG_URL="${NAPP_SIG_URL:-${NAPP_CJS_URL%%\?*}.sig}"
+
+verify_signature() {  # $1 = file, $2 = chữ ký base64
+  NAPP_KEYS="$NAPP_TRUSTED_KEYS" node -e '
+    const c = require("crypto"), fs = require("fs");
+    const data = fs.readFileSync(process.argv[1]);
+    const sig = Buffer.from(fs.readFileSync(process.argv[2], "utf8").trim(), "base64");
+    const ok = sig.length === 64 && process.env.NAPP_KEYS.split(/\s+/).filter(Boolean).some((k) => {
+      try { return c.verify(null, data, c.createPublicKey({ key: Buffer.from(k, "base64"), format: "der", type: "spki" }), sig); }
+      catch (e) { return false; }
+    });
+    process.exit(ok ? 0 : 1);
+  ' "$1" "$2"
+}
 
 # Vẫn thử lại vài lần để phòng lỗi mạng tạm thời / gist cache chưa đồng bộ.
 ATTEMPTS="${NAPP_DL_ATTEMPTS:-3}"
@@ -139,6 +162,13 @@ while :; do
             -H 'Cache-Control: no-cache' \
             "$NAPP_CJS_URL" -o "$TMP_FILE"; then
     reason="curl tải thất bại — kiểm tra URL hoặc kết nối mạng"
+  elif ! curl --proto '=https' --tlsv1.2 -fsSL --retry 3 --retry-delay 2 --retry-all-errors \
+            -H 'Cache-Control: no-cache' "$NAPP_SIG_URL" -o "$TMP_SIG"; then
+    reason="không tải được chữ ký $NAPP_SIG_URL"
+  elif ! verify_signature "$TMP_FILE" "$TMP_SIG"; then
+    # Có thể chỉ là gist chưa đồng bộ file và chữ ký ngay sau khi phát hành — thử
+    # lại; hết lượt mà vẫn sai thì TUYỆT ĐỐI không cài.
+    reason="CHỮ KÝ KHÔNG HỢP LỆ — file có thể đã bị sửa (gist/tài khoản bị chiếm, bị chặn giữa đường) hoặc chưa đồng bộ"
   elif ! check_err="$(node --check "$TMP_FILE" 2>&1)"; then
     reason="node --check báo lỗi (file tải dở/hỏng?): ${check_err##*$'\n'}"
   elif ! grep -q '__NAPP_MARKER__' "$TMP_FILE"; then
@@ -157,6 +187,7 @@ while :; do
   sleep 2
 done
 
+ok "Chữ ký hợp lệ (Ed25519, khoá phát hành của napp)."
 install -m 0755 "$TMP_FILE" "$INSTALL_PATH"
 ok "Đã cài napp vào $INSTALL_PATH"
 

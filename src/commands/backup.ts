@@ -6,7 +6,7 @@ import { dbBackupDir } from "./db";
 import { loadState, BACKUP_ROOT, SYSTEMD_DIR } from "../lib/state";
 import { writeManagedUnit } from "../lib/unitfile";
 import { renderBackupService, renderBackupTimer } from "../templates/systemd";
-import { timeToDailyOnCalendar } from "../lib/validate";
+import { timeToDailyOnCalendar, validateDbName } from "../lib/validate";
 import { showTimer } from "../lib/timer";
 
 const NAPP_BIN_PATH = "/usr/local/bin/napp";
@@ -72,6 +72,8 @@ export function cmdBackupRun(opts: BackupRunOptions): void {
       // Backup MỘT database cụ thể (đã nén trong dump()).
       const engine = resolveEngine(opts.engine);
       const driver = driverFor(engine);
+      // Tên đi vào lệnh shell của dump — kiểm tra TRƯỚC mọi thứ khác.
+      validateDbName(opts.database, driver.maxNameLength);
       if (!driver.isRunning()) die(`${driver.label} không chạy — không backup được '${opts.database}'.`);
       if (!driver.exists(opts.database)) die(`Database ${driver.label} '${opts.database}' không tồn tại.`);
       const dir = dbBackupDir(engine);

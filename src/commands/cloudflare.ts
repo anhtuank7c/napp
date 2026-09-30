@@ -19,6 +19,9 @@ export async function cmdCloudflareSync(opts: { quiet?: boolean } = {}): Promise
 
   log("Đang tải dải IP Cloudflare hiện tại...");
   const ranges = await fetchCloudflareIpRanges();
+  // Giữ bản cũ để trả lại nếu 'nginx -t' báo lỗi — không để lại một file hỏng
+  // làm lần reload nginx kế tiếp (của bất kỳ lệnh nào) cũng thất bại.
+  const previous = existsSync(CLOUDFLARE_REALIP_CONF) ? readFileSync(CLOUDFLARE_REALIP_CONF, "utf8") : undefined;
   writeFile(CLOUDFLARE_REALIP_CONF, renderCloudflareRealIpSnippet(ranges.ipv4, ranges.ipv6), 0o644);
 
   // Đảm bảo nginx.conf (khối http) có include conf.d/*.conf — hầu hết cài
@@ -32,7 +35,11 @@ export async function cmdCloudflareSync(opts: { quiet?: boolean } = {}): Promise
   }
 
   const test = execCapture("nginx", ["-t"]);
-  if (test.code !== 0) die(`Kiểm tra cấu hình nginx thất bại:\n${test.stderr}`);
+  if (test.code !== 0) {
+    if (previous !== undefined) writeFile(CLOUDFLARE_REALIP_CONF, previous, 0o644);
+    else runCmd("rm", ["-f", CLOUDFLARE_REALIP_CONF], { silentFail: true });
+    die(`Kiểm tra cấu hình nginx thất bại — ĐÃ TRẢ LẠI ${CLOUDFLARE_REALIP_CONF} như trước, KHÔNG reload:\n${test.stderr}`);
+  }
   runCmd("systemctl", ["reload", "nginx"]);
   ok(`Đã đồng bộ ${ranges.ipv4.length + ranges.ipv6.length} dải IP Cloudflare vào ${CLOUDFLARE_REALIP_CONF} và reload nginx.`);
 }

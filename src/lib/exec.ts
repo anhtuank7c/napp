@@ -1,6 +1,7 @@
 import { spawnSync, type SpawnSyncOptionsWithStringEncoding } from "node:child_process";
-import { mkdirSync, writeFileSync, appendFileSync, chmodSync, existsSync, statSync, accessSync, constants as fsConstants } from "node:fs";
-import { dirname, join, delimiter } from "node:path";
+import { mkdirSync, existsSync, statSync, accessSync, lstatSync, openSync, writeSync, closeSync, fchmodSync, fchownSync, fsyncSync, renameSync, rmSync, constants as fsConstants } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { dirname, join, basename, delimiter } from "node:path";
 import { dryRunNotice, die } from "./log";
 
 // Cờ toàn cục --dry-run, được set một lần khi parse CLI args ở index.ts.
@@ -21,10 +22,13 @@ export interface RunResult {
 
 // Chạy lệnh và LUÔN trả kết quả (không throw), dùng cho các thao tác chỉ đọc
 // hoặc khi caller tự muốn xử lý mã lỗi (vd: kiểm tra service có đang chạy).
-export function execCapture(cmd: string, args: string[] = []): RunResult {
+export function execCapture(cmd: string, args: string[] = [], extra: { input?: string } = {}): RunResult {
+  // input: đưa dữ liệu qua stdin — dùng cho bí mật (vd 'AUTH <mật khẩu>' cho
+  // redis-cli) để chúng không bao giờ nằm trong argv, nơi mọi user đọc được qua 'ps'.
   const opts: SpawnSyncOptionsWithStringEncoding = {
     encoding: "utf8",
     maxBuffer: 1024 * 1024 * 32,
+    ...(extra.input !== undefined ? { input: extra.input } : {}),
   };
   const res = spawnSync(cmd, args, opts);
   if (res.error) {
@@ -231,9 +235,85 @@ export function execCaptureAs(
 
 // Ghi nội dung ra file. Dry-run: chỉ in preview. Thật: tạo thư mục cha, ghi
 // file, và có thể chmod ngay (mặc định 0644).
-export function writeFile(path: string, content: string, mode = 0o644): void {
+// O_NOFOLLOW không có trên Windows (máy dev) — 0 = bỏ qua.
+const O_NOFOLLOW = (fsConstants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
+
+/** uid/gid của một user hệ thống (để tạo file đã đúng chủ, không cần chown sau). */
+export function userIds(user: string): { uid: number; gid: number } {
+  const uid = parseInt(execCapture("id", ["-u", user]).stdout.trim(), 10);
+  const gid = parseInt(execCapture("id", ["-g", user]).stdout.trim(), 10);
+  if (!Number.isInteger(uid) || !Number.isInteger(gid)) die(`Không tìm thấy user hệ thống '${user}'.`);
+  return { uid, gid };
+}
+
+/** gid của một nhóm hệ thống. */
+export function groupId(group: string): number {
+  const line = execCapture("getent", ["group", group]).stdout.trim();
+  const gid = parseInt(line.split(":")[2] ?? "", 10);
+  if (!Number.isInteger(gid)) die(`Không tìm thấy nhóm hệ thống '${group}'.`);
+  return gid;
+}
+
+/** Từ chối nếu `path` là symlink — dùng trước khi root ĐỌC file nằm trong thư mục của app. */
+export function assertNotSymlink(path: string): void {
+  try {
+    if (lstatSync(path).isSymbolicLink()) {
+      die(
+        `${path} là một symlink — napp (chạy bằng root) từ chối đọc/ghi qua nó.\n` +
+          `  File này nằm trong thư mục do app sở hữu; symlink ở đây có thể trỏ tới file của root\n` +
+          `  (vd /etc/shadow). Thay nó bằng một file thường rồi thử lại.`
+      );
+    }
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+  }
+}
+
+/**
+ * chmod KHÔNG đi theo symlink ('chmod' của hệ thống luôn đi theo). Dùng cho file
+ * nằm trong thư mục do app sở hữu: một repo git có thể commit '.env' là symlink
+ * tới /etc/passwd, và 'chmod 600 .env' sau deploy sẽ khoá luôn mọi đăng nhập.
+ * Là symlink -> bỏ qua kèm cảnh báo.
+ */
+export function chmodNoFollow(path: string, mode: number): void {
   if (state.dryRun) {
-    dryRunNotice(`Sẽ ghi file ${path} (${content.length} bytes, mode ${mode.toString(8)})`);
+    dryRunNotice(`chmod ${mode.toString(8)} ${path} (không theo symlink)`);
+    return;
+  }
+  let fd: number;
+  try {
+    fd = openSync(path, fsConstants.O_RDONLY | O_NOFOLLOW);
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return;
+    if (code === "ELOOP") {
+      console.error(`[CẢNH BÁO] ${path} là symlink — bỏ qua chmod (napp không đổi quyền file qua symlink).`);
+      return;
+    }
+    throw e;
+  }
+  try {
+    fchmodSync(fd, mode);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Ghi file AN TOÀN khi chạy bằng root:
+ *  - tạo một file tạm MỚI (O_EXCL, không theo symlink) ngay trong thư mục đích,
+ *    với ĐÚNG mode và (nếu có) đúng chủ sở hữu NGAY TỪ LÚC TẠO — không có khoảnh
+ *    khắc nào file chứa bí mật (.env, token) mang quyền 0644;
+ *  - rồi rename đè lên đích. rename THAY THẾ một symlink chứ không đi theo nó.
+ *
+ * Vì sao quan trọng: nhiều file napp ghi nằm trong thư mục do user của app sở
+ * hữu (.env, .git-credentials). Trước đây ghi thẳng + 'chown' theo đường dẫn:
+ * app (hoặc một repo git có commit '.env' là symlink) đổi .env thành symlink tới
+ * /etc/shadow là napp — bằng quyền root — ghi đè VÀ chown file đó cho app.
+ */
+export function writeFile(path: string, content: string, mode = 0o644, opts: { owner?: string; group?: string } = {}): void {
+  if (state.dryRun) {
+    dryRunNotice(`Sẽ ghi file ${path} (${content.length} bytes, mode ${mode.toString(8)}${opts.owner ? `, chủ ${opts.owner}` : ""})`);
     if (state.verbose) {
       console.log(
         content
@@ -244,9 +324,29 @@ export function writeFile(path: string, content: string, mode = 0o644): void {
     }
     return;
   }
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, content, { encoding: "utf8" });
-  chmodSync(path, mode);
+  const dir = dirname(path);
+  mkdirSync(dir, { recursive: true });
+  // owner: chủ + nhóm chính của user đó. group (không có owner): root + nhóm này
+  // (vd cấu hình Redis 0640 root:nr_<id> — tiến trình Redis đọc được, không sửa được).
+  const ids = opts.owner
+    ? { uid: userIds(opts.owner).uid, gid: opts.group ? groupId(opts.group) : userIds(opts.owner).gid }
+    : opts.group
+      ? { uid: 0, gid: groupId(opts.group) }
+      : undefined;
+  const tmp = join(dir, `.${basename(path)}.napp-${process.pid}-${randomBytes(4).toString("hex")}`);
+  const fd = openSync(tmp, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | O_NOFOLLOW, mode);
+  try {
+    writeSync(fd, content, null, "utf8");
+    fchmodSync(fd, mode); // mode lúc tạo còn bị umask cắt bớt
+    if (ids) fchownSync(fd, ids.uid, ids.gid);
+    fsyncSync(fd);
+  } catch (e) {
+    closeSync(fd);
+    rmSync(tmp, { force: true });
+    throw e;
+  }
+  closeSync(fd);
+  renameSync(tmp, path);
 }
 
 // Nối thêm nội dung vào cuối file (giữ nguyên phần đã có). Dùng để chèn khối
@@ -257,7 +357,13 @@ export function appendFile(path: string, content: string): void {
     dryRunNotice(`Sẽ nối thêm vào file ${path} (${content.length} bytes)`);
     return;
   }
-  appendFileSync(path, content, { encoding: "utf8" });
+  // O_NOFOLLOW: không nối vào file của root qua một symlink đặt sẵn.
+  const fd = openSync(path, fsConstants.O_WRONLY | fsConstants.O_APPEND | O_NOFOLLOW);
+  try {
+    writeSync(fd, content, null, "utf8");
+  } finally {
+    closeSync(fd);
+  }
 }
 
 export function ensureDir(path: string, mode = 0o755): void {

@@ -27,6 +27,28 @@ const FALLBACK_IPV4 = [
 ];
 const FALLBACK_IPV6 = ["2400:cb00::/32", "2606:4700::/32", "2803:f800::/32", "2405:b500::/32", "2405:8100::/32", "2a06:98c0::/29", "2c0f:f248::/32"];
 
+/**
+ * Một dải CIDR hợp lệ VÀ không quá rộng. Dải của Cloudflare thực tế là /12-/22
+ * (IPv4) và /29-/32 (IPv6); từ chối rộng hơn /8 (v4) hay /16 (v6).
+ */
+export function isCidr(s: string, family: 4 | 6): boolean {
+  const m = /^([^/]+)\/(\d{1,3})$/.exec(s);
+  if (!m) return false;
+  const prefix = Number(m[2]);
+  if (family === 4) {
+    const parts = m[1]!.split(".");
+    if (parts.length !== 4 || !parts.every((p) => /^\d{1,3}$/.test(p) && Number(p) <= 255)) return false;
+    return prefix >= 8 && prefix <= 32;
+  }
+  // IPv6: chỉ chữ số hex và dấu ':', tối đa một '::', 2-8 nhóm.
+  const addr = m[1]!;
+  if (!/^[0-9a-fA-F:]+$/.test(addr) || (addr.match(/::/g) ?? []).length > 1) return false;
+  const groups = addr.split(":").filter((g) => g.length > 0);
+  if (groups.length > 8 || groups.some((g) => g.length > 4)) return false;
+  if (!addr.includes("::") && groups.length !== 8) return false;
+  return prefix >= 16 && prefix <= 128;
+}
+
 async function fetchText(url: string): Promise<string> {
   const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
   if (!res.ok) throw new Error(`HTTP ${res.status} khi tải ${url}`);
@@ -39,6 +61,13 @@ export async function fetchCloudflareIpRanges(): Promise<CloudflareIpRanges> {
     const ipv4 = v4.trim().split("\n").map((l) => l.trim()).filter(Boolean);
     const ipv6 = v6.trim().split("\n").map((l) => l.trim()).filter(Boolean);
     if (ipv4.length === 0 || ipv6.length === 0) throw new Error("Danh sách IP trả về rỗng");
+    // Mỗi dòng đi thẳng vào 'set_real_ip_from ...;' của nginx. Một dòng lạ (trang
+    // lỗi HTML, proxy chen vào, phản hồi bị giả) là chèn được cấu hình nginx; một
+    // dải quá rộng (0.0.0.0/0) là nginx tin header IP do BẤT KỲ AI gửi -> kẻ tấn
+    // công tự nhận IP tuỳ ý, qua mặt fail2ban và giới hạn tốc độ. Sai một dòng là
+    // bỏ cả danh sách, dùng bản dự phòng.
+    const bad = [...ipv4.filter((c) => !isCidr(c, 4)), ...ipv6.filter((c) => !isCidr(c, 6))];
+    if (bad.length) throw new Error(`Danh sách có mục không hợp lệ hoặc quá rộng: ${bad.slice(0, 3).map((b) => JSON.stringify(b.slice(0, 40))).join(", ")}`);
     return { ipv4, ipv6 };
   } catch (e) {
     // Cảnh báo nhưng không chặn — dùng bản dự phòng đóng gói sẵn để lệnh vẫn

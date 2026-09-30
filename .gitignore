@@ -27,3 +27,7 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# Khoá ký bản phát hành — KHÔNG BAO GIỜ commit (keygen ghi ra ~/.config/napp, không phải repo)
+*.pem
+*.key

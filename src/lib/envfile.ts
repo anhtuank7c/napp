@@ -1,9 +1,12 @@
 import { existsSync, readFileSync } from "node:fs";
-import { writeFile } from "./exec";
+import { writeFile, assertNotSymlink } from "./exec";
 
 // Parse .env đơn giản (KEY=VALUE mỗi dòng, bỏ qua dòng trống/comment). Không
 // xử lý multi-line values — đủ dùng cho mục đích cấu hình kết nối DB/Redis.
 export function parseEnvFile(path: string): Record<string, string> {
+  // .env nằm trong thư mục do app sở hữu: là symlink thì có thể trỏ tới file của
+  // root (vd /root/.my.cnf) và napp sẽ chép nội dung đó vào .env mà app đọc được.
+  assertNotSymlink(path);
   if (!existsSync(path)) return {};
   const out: Record<string, string> = {};
   for (const line of readFileSync(path, "utf8").split("\n")) {
@@ -37,11 +40,11 @@ function needsQuote(v: string): boolean {
 // vào, giữ nguyên các key khác. Dùng khi tạo app (--db/--redis) và khi
 // 'napp app env set' cập nhật biến môi trường.
 /** Xoá các key khỏi .env, giữ nguyên các key khác. Trả về các key thật sự đã có để xoá. */
-export function removeEnvKeys(path: string, keys: string[], mode = 0o600): string[] {
+export function removeEnvKeys(path: string, keys: string[], mode = 0o600, owner?: string): string[] {
   const current = parseEnvFile(path);
   const removed = keys.filter((k) => k in current);
   for (const k of removed) delete current[k];
-  if (removed.length > 0) writeFile(path, serializeEnv(current), mode);
+  if (removed.length > 0) writeFile(path, serializeEnv(current), mode, { owner });
   return removed;
 }
 
@@ -64,8 +67,8 @@ export function printEnvFile(path: string, reveal: boolean): void {
   if (!reveal && keys.some((k) => SECRET_KEY.test(k))) console.log("\n  (giá trị bí mật đã che — thêm --reveal để xem)");
 }
 
-export function mergeEnvFile(path: string, updates: Record<string, string>, mode = 0o600): void {
+export function mergeEnvFile(path: string, updates: Record<string, string>, mode = 0o600, owner?: string): void {
   const current = parseEnvFile(path);
   const merged = { ...current, ...updates };
-  writeFile(path, serializeEnv(merged), mode);
+  writeFile(path, serializeEnv(merged), mode, { owner });
 }

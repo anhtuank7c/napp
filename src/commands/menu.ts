@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { audit, redactArgs, isStateChanging, cmdAuditShow } from "../lib/audit";
 import { ask as promptAsk, askBlock, select, checkbox, interactive, PromptCancelled } from "../lib/prompt";
 import { execCapture } from "../lib/exec";
 import { cmdCheck } from "./check";
@@ -38,7 +39,7 @@ import { getAcmeEmail, findUnit, getApp, getService, serviceNameFor, svcSystemdN
 import { cmdDomainAdd, cmdDomainRemove, cmdDomainList } from "./domain";
 import { cmdCertIssue, cmdCertRenew, cmdCertList, cmdCertRevoke, cmdCertStatus } from "./cert";
 import { cmdDbCreate, cmdDbList, cmdDbBackup, cmdDbDrop } from "./db";
-import { cmdRedisAllocations, cmdRedisInfo, cmdRedisFlush } from "./redis";
+import { cmdRedisAllocations, cmdRedisInfo, cmdRedisFlush, cmdRedisList, cmdRedisShow, cmdRedisMigrate } from "./redis";
 import {
   cmdBackupRun,
   cmdBackupSchedule,
@@ -285,16 +286,21 @@ function reportError(e: unknown): void {
 
 /** Chạy một lệnh từ menu: lỗi gì cũng được báo rõ và quay lại menu. */
 async function guard(fn: () => Promise<void> | void): Promise<void> {
+  menuAudit = undefined;
   try {
     await fn();
+    if (menuAudit) audit({ command: menuAudit, via: "menu", result: "ok" });
   } catch (e) {
     if (e instanceof PromptCancelled) {
+      if (menuAudit) audit({ command: menuAudit, via: "menu", result: "cancelled" });
       if (e.reason === "eof") throw e; // stdin đã đóng: không còn ai để hỏi -> runMenu thoát có lời
       notice = colorText("dim", "Đã huỷ.");
       return;
     }
+    if (menuAudit) audit({ command: menuAudit, via: "menu", result: "error", error: (e as Error)?.message });
     reportError(e);
   }
+  menuAudit = undefined;
   await pause();
 }
 
@@ -369,7 +375,11 @@ const running = (on: boolean) => (on ? colorText("green", "● đang chạy") : 
 /** In lệnh CLI tương đương — người dùng menu học dần được lệnh để viết script. */
 function cli(cmd: string): void {
   console.log(colorText("dim", `Lệnh tương đương: sudo napp ${cmd}`));
+  // Thao tác qua menu cũng vào nhật ký, dưới dạng lệnh CLI tương đương.
+  const parts = cmd.split(/\s+/);
+  menuAudit = isStateChanging(parts.filter((p) => !p.startsWith("-")).slice(0, 3), parts) ? redactArgs(parts).join(" ") : undefined;
 }
+let menuAudit: string | undefined;
 
 /** Một công tắc: hỏi xác nhận theo chiều sẽ đổi, rồi gọi hàm bật/tắt tương ứng. */
 async function flip(what: string, on: boolean, enable: () => unknown, disable: () => unknown, cmdOn: string, cmdOff: string): Promise<void> {
@@ -511,10 +521,14 @@ async function createAppFlow(): Promise<void> {
   const pmDefault: PackageManager = runtime === "bun" ? "bun" : "npm";
   const packageManager = await askChoice<PackageManager>("Trình quản lý gói phụ thuộc", ["npm", "pnpm", "yarn", "bun"], pmDefault);
   const dbEngine = (await askYesNo("Tạo database riêng cho app này?")) ? await askEngine("tạo database") : undefined;
-  const redis = await askYesNo("Cấp Redis DB riêng cho app này?");
+  const redis = await askYesNo("Cấp Redis RIÊNG (có mật khẩu, chỉ app này dùng) cho app này?");
   // Hỏi thay vì bật ngầm: napp chiếm tiền tố URL bằng 'location ^~', thứ thắng
   // cả proxy_pass. Người dùng phải BIẾT điều đó đang xảy ra.
   const autoStatic = await askYesNo("Cho nginx trả thẳng asset tĩnh nếu nhận diện được framework (nhanh hơn nhiều)?");
+  cli(
+    `app create ${domain}${repo ? ` --repo ${repo}` : ""} --runtime ${runtime} --package-manager ${packageManager}` +
+      `${dbEngine ? ` --db ${dbEngine}` : ""}${redis ? " --redis" : ""}${autoStatic ? " --auto-static" : ""}`
+  );
   await cmdAppCreate(domain, {
     repo: repo || undefined,
     branch: "main",
@@ -558,7 +572,7 @@ async function appContext(domain: string): Promise<void> {
       title: `App ${domain}`,
       header: [
         `${running(up)} · 127.0.0.1:${app.port} · ${app.nodeRuntime}/${app.packageManager ?? "npm"} · ` +
-          `SSL: ${ssl ? "có" : "chưa"} · DB: ${app.dbName ? `${unitEngine(app)} '${app.dbName}'` : "-"} · Redis: ${app.redisDbIndex !== undefined ? `#${app.redisDbIndex}` : "-"}`,
+          `SSL: ${ssl ? "có" : "chưa"} · DB: ${app.dbName ? `${unitEngine(app)} '${app.dbName}'` : "-"} · Redis: ${app.redisInstance ? "riêng" : app.redisDbIndex !== undefined ? `#${app.redisDbIndex} (chung)` : "-"}`,
       ],
       items: [
         { label: "Xem chi tiết", run: () => (cli(`app show ${domain}`), cmdAppShow(domain)) },
@@ -569,6 +583,14 @@ async function appContext(domain: string): Promise<void> {
           : { label: "Khởi động app", run: () => (cli(`app start ${domain}`), cmdAppStart(domain)) },
         { label: "Xem log (100 dòng)", run: () => (cli(`app logs ${domain} -n 100`), cmdAppLogs(domain, { follow: false, lines: 100 })) },
         { label: "Biến môi trường (.env)", run: () => envMenu("app", domain), open: true },
+        ...(app.redisInstance || app.redisDbIndex !== undefined
+          ? [
+              { label: "Xem Redis", run: () => (cli(`redis show ${domain}`), cmdRedisShow(domain)) },
+              ...(app.redisDbIndex !== undefined
+                ? [{ label: colorText("yellow", "Chuyển sang Redis RIÊNG (đang dùng Redis chung, chưa cô lập)"), run: () => (cli(`redis migrate ${domain}`), cmdRedisMigrate(domain, { yes: false })) }]
+                : []),
+            ]
+          : []),
         { label: `Domain phụ (${app.aliasDomains.length})`, run: () => aliasMenu(domain), open: true },
         { label: `SSL`, run: () => appSslMenu(domain), open: true },
         { label: "Nginx: asset tĩnh · file tải lên · hotlink · giới hạn upload", run: () => appNginxMenu(domain), open: true },
@@ -799,16 +821,21 @@ async function createServiceFlow(): Promise<void> {
     runAs = await askAppDomain("chạy chung user hệ thống (worker sẽ ghi được vào thư mục của app này)");
   }
   const dbEngine = (await askYesNo("Tạo database riêng cho service này?")) ? await askEngine("tạo database") : undefined;
-  const redis = await askYesNo("Cấp Redis DB riêng cho service này?");
+  const redis = await askYesNo("Dùng Redis cho service này?");
   // Dùng chung user gần như luôn đi kèm dùng chung hàng đợi. Chỉ hỏi khi app kia
   // thật sự có Redis DB, tránh dẫn người dùng vào lựa chọn chết.
-  const sharedRedis = runAs ? findUnit(runAs)?.redisDbIndex : undefined;
+  const runAsUnit = runAs ? findUnit(runAs) : undefined;
+  const sharedRedis = runAsUnit && (runAsUnit.redisInstance || runAsUnit.redisDbIndex !== undefined) ? runAsUnit : undefined;
   let shareRedisWith: string | undefined;
-  if (redis && runAs && sharedRedis !== undefined) {
-    if (await askYesNo(`Dùng CHUNG Redis DB #${sharedRedis} với '${runAs}' (BẮT BUỘC nếu worker tiêu thụ hàng đợi của app đó)?`, true)) {
+  if (redis && runAs && sharedRedis) {
+    if (await askYesNo(`Dùng CHUNG Redis với '${runAs}' (BẮT BUỘC nếu worker tiêu thụ hàng đợi của app đó)? Không = Redis riêng cho worker`, true)) {
       shareRedisWith = runAs;
     }
   }
+  cli(
+    `service create ${name}${repo ? ` --repo ${repo}` : ""} --runtime ${runtime}${runAs ? ` --run-as ${runAs}` : ""}` +
+      `${dbEngine ? ` --db ${dbEngine}` : ""}${redis ? " --redis" : ""}${shareRedisWith ? ` --share-redis-with ${shareRedisWith}` : ""}`
+  );
   await cmdServiceCreate(name, {
     repo: repo || undefined,
     branch: "main",
@@ -855,7 +882,7 @@ async function serviceContext(name: string): Promise<void> {
       title: `Service ${name}`,
       header: [
         `${running(up)} · ${svc.nodeRuntime}/${svc.packageManager ?? "npm"} · user ${svc.user}${svc.runAsUnit ? ` (mượn của '${svc.runAsUnit}')` : ""} · ` +
-          `DB: ${svc.dbName ? `${unitEngine(svc)} '${svc.dbName}'` : "-"} · Redis: ${svc.redisDbIndex !== undefined ? `#${svc.redisDbIndex}` : "-"}`,
+          `DB: ${svc.dbName ? `${unitEngine(svc)} '${svc.dbName}'` : "-"} · Redis: ${svc.redisInstance ? "riêng" : svc.redisDbIndex !== undefined ? `#${svc.redisDbIndex} (chung)` : "-"}`,
       ],
       items: [
         { label: "Xem chi tiết", run: () => (cli(`service show ${name}`), cmdServiceShow(name)) },
@@ -866,6 +893,14 @@ async function serviceContext(name: string): Promise<void> {
           : { label: "Khởi động service", run: () => (cli(`service start ${name}`), cmdServiceStart(name)) },
         { label: "Xem log (100 dòng)", run: () => (cli(`service logs ${name} -n 100`), cmdServiceLogs(name, { follow: false, lines: 100 })) },
         { label: "Biến môi trường (.env)", run: () => envMenu("service", name), open: true },
+        ...(svc.redisInstance || svc.redisDbIndex !== undefined
+          ? [
+              { label: "Xem Redis", run: () => (cli(`redis show ${name}`), cmdRedisShow(name)) },
+              ...(svc.redisDbIndex !== undefined
+                ? [{ label: colorText("yellow", "Chuyển sang Redis RIÊNG (đang dùng Redis chung, chưa cô lập)"), run: () => (cli(`redis migrate ${name}`), cmdRedisMigrate(name, { yes: false })) }]
+                : []),
+            ]
+          : []),
         { label: "Danh tính & quyền ghi (chạy bằng user nào, được ghi vào đâu)", run: () => serviceIdentityMenu(name), open: true },
         {
           label: `${state(Boolean(svc.leakGuard))} Leak guard — tự chụp heap trước khi chết vì hết bộ nhớ`,
@@ -1030,22 +1065,56 @@ async function menuDbEngine(): Promise<void> {
 
 // ----------------------------------------------------------------- 6. Redis
 async function menuRedis(): Promise<void> {
-  await menuLoop(() => ({
-    title: "Redis",
-    items: [
-      { label: "Xem bộ nhớ Redis", run: () => (cli("redis show"), cmdRedisInfo()) },
-      { label: "DB index nào đang cấp cho app/service nào", run: () => (cli("redis db list"), cmdRedisAllocations()) },
-      {
-        label: colorText("red", "Xoá TOÀN BỘ dữ liệu của một DB index"),
-        run: async () => {
-          const n = parseInt(await ask("DB index (0-15): "), 10);
-          if (!Number.isInteger(n)) return info("Không thay đổi gì.");
-          cli(`redis db flush ${n}`);
-          await cmdRedisFlush(n, { yes: false });
+  await menuLoop(() => {
+    const st = loadState();
+    const legacy = [
+      ...Object.values(st.apps).filter((x) => x.redisDbIndex !== undefined).map((x) => x.domain),
+      ...Object.values(st.services).filter((x) => x.redisDbIndex !== undefined).map((x) => x.name),
+    ];
+    return {
+      title: "Redis",
+      header: [
+        `Redis riêng: ${Object.keys(st.redisInstances ?? {}).length}` +
+          (legacy.length ? colorText("yellow", ` · còn ${legacy.length} đơn vị trên Redis DÙNG CHUNG (chưa cô lập)`) : ""),
+      ],
+      items: [
+        { label: "Danh sách Redis riêng (+ đơn vị còn dùng Redis chung)", run: () => (cli("redis list"), cmdRedisList()) },
+        {
+          label: "Xem Redis của một app/service",
+          run: async () => {
+            const id = await askUnit("xem Redis");
+            if (!id) return;
+            cli(`redis show ${id}`);
+            cmdRedisShow(id);
+          },
         },
-      },
-    ],
-  }));
+        ...(legacy.length
+          ? [
+              {
+                label: colorText("yellow", "Chuyển một app/service sang Redis RIÊNG (giữ nguyên dữ liệu)"),
+                run: async () => {
+                  const id = await pickOrCancel("Chuyển đơn vị nào (cả nhóm dùng chung DB sẽ chuyển cùng)?", legacy.map((x) => ({ label: x, value: x })));
+                  if (!id) return;
+                  cli(`redis migrate ${id}`);
+                  await cmdRedisMigrate(id, { yes: false });
+                },
+              },
+            ]
+          : []),
+        { label: "Redis DÙNG CHUNG (kiểu cũ): bộ nhớ", run: () => (cli("redis show"), cmdRedisInfo()) },
+        { label: "Redis DÙNG CHUNG (kiểu cũ): DB index nào cấp cho ai", run: () => (cli("redis db list"), cmdRedisAllocations()) },
+        {
+          label: colorText("red", "Redis DÙNG CHUNG (kiểu cũ): xoá TOÀN BỘ dữ liệu của một DB index"),
+          run: async () => {
+            const n = parseInt(await ask("DB index (0-15): "), 10);
+            if (!Number.isInteger(n)) return info("Không thay đổi gì.");
+            cli(`redis db flush ${n}`);
+            await cmdRedisFlush(n, { yes: false });
+          },
+        },
+      ],
+    };
+  });
 }
 
 // ---------------------------------------------------------------- 7. Sao lưu
@@ -1190,6 +1259,7 @@ async function menuSecurity(): Promise<void> {
           run: () => flip("chặn quét lỗ hổng trên mọi site", scanBlock, cmdNginxScanBlock, cmdNginxUnscanBlock, "nginx scan-block enable", "nginx scan-block disable"),
         },
         { label: "Quét bản vá & rủi ro dependencies (doctor)", run: menuDoctor, open: true },
+        { label: "Nhật ký thao tác — ai đã làm gì qua napp", run: () => (cli("audit show"), cmdAuditShow({ last: 40 })) },
       ],
     };
   });

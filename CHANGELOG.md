@@ -2,6 +2,22 @@
 
 Tất cả thay đổi đáng chú ý của `napp` được ghi lại ở đây.
 
+## 1.31.0
+
+Rà bảo mật theo OWASP Top 10 (napp chạy bằng root và quản lý nhiều app trên một máy, nên lỗ nào cũng là lỗ của cả server) + rà rò rỉ bộ nhớ.
+
+- **Cập nhật có chữ ký (A08).** Mỗi bản `napp.cjs` được ký Ed25519, chữ ký `napp.cjs.sig` đi kèm trên gist và GitHub release. `napp update` và `install.sh` kiểm chữ ký **trước khi ghi bất cứ thứ gì**; thiếu/sai chữ ký là từ chối, không có cờ bỏ qua. Trước đây ai chiếm được gist là đẩy được mã chạy bằng root lên mọi server. `napp update` cũng từ chối **hạ phiên bản** (chặn phát lại bản cũ có lỗ hổng) trừ khi thêm `--allow-downgrade`. Lưu ý: server ≤ 1.30.4 lên 1.31.0 vẫn qua đường cũ; từ 1.31.0 trở đi mọi lần cập nhật đều được kiểm.
+- **Redis riêng cho mỗi app (A01).** Redis dùng chung không mật khẩu cho phép mọi app `SELECT` sang DB của app khác — đọc session, sửa job. Nay `--redis` tạo một `redis-server` riêng: user Linux riêng, mật khẩu 32 byte, chỉ nghe `127.0.0.1` (cổng 6400-6499) + unix socket. Worker `--share-redis-with` tham gia đúng instance của app. `.env` thêm `REDIS_PASSWORD`, `REDIS_URL` chứa mật khẩu — **app chỉ đọc `REDIS_HOST`/`REDIS_PORT` cần đọc thêm `REDIS_PASSWORD`**. App cũ vẫn chạy như trước; chuyển bằng `sudo napp redis migrate <app>` (dừng vài giây, giữ nguyên dữ liệu + TTL, so số key, lệch thì không đổi gì, DB cũ không bị xoá). Lệnh mới: `redis list`, `redis show <app>`, `redis migrate`. `--redis-db <n>` còn giữ làm kiểu cũ, có cảnh báo.
+- **Không đi theo symlink khi làm việc bằng root (A01).** Một app (hoặc repo commit sẵn `.env` là symlink tới `/etc/shadow`) có thể khiến napp ghi đè/chown file của root hay in lộ bí mật của root. Nay mọi ghi/đọc/chown/chmod trong thư mục app từ chối symlink; file bí mật được ghi nguyên tử với đúng quyền và chủ **ngay từ lúc tạo** (trước đây có khoảnh khắc `.env` đọc được bởi mọi người).
+- **Kiểm tra giá trị đưa vào nginx (A03).** Thư mục `--static-root`/`--upload-dir`/`--static-alias` phải nằm trong webRoot của app (kể cả sau khi giải symlink), tiền tố URL, `--max-body` (≤ 10G), `--hotlink-allow` chỉ nhận hostname. Kiểm lại lúc sinh cấu hình, nên giá trị xấu đã nằm sẵn trong `state.json` cũng không lọt vào nginx.
+- **systemd (A03/A05).** Từ chối ký tự điều khiển trong lệnh install/build/start, thoát `%` trong `ExecStart`; `--write-dir` không được là thư mục hệ thống. Unit thêm `CapabilityBoundingSet=`, `PrivateDevices`, `ProtectKernelLogs`, `SystemCallArchitectures=native`, `UMask=0027` (áp cho unit cũ: `tune apply --sync-units`). Cố ý **không** bật `RestrictNamespaces` — làm hỏng Chrome/Puppeteer.
+- **Dải IP Cloudflare được kiểm (A08).** Từng dòng phải là CIDR hợp lệ và không rộng hơn `/8` (IPv4) · `/16` (IPv6); một dòng sai là bỏ cả danh sách, dùng bản dự phòng. `nginx -t` hỏng thì khôi phục file cũ. Trước đây một trang lỗi HTML hay `0.0.0.0/0` có thể biến mọi IP thành "IP thật" tuỳ ý.
+- **Repo `http://`/`git://` bị từ chối (A02)** — mã có thể bị tráo giữa đường; cần thì thêm `--allow-insecure-repo`.
+- **Nhật ký thao tác (A09).** Mọi lệnh làm thay đổi hệ thống, từ CLI hay menu, ghi một dòng JSON vào `/var/log/napp/audit.log`: thời điểm, ai (`SUDO_USER`), lệnh, kết quả. Token, mật khẩu, giá trị `KEY=VALUE`, mật khẩu trong URL được che. Xem: `sudo napp audit show` hoặc menu Bảo mật.
+- **Xoay vòng log (A05).** `/etc/logrotate.d/napp`: log app/service giữ 14 ngày, tối đa 100 MB/file; nhật ký thao tác giữ 1 năm. `napp check` báo nếu thiếu.
+- **Nhỏ mà đáng:** `backup create --database` kiểm tên trước khi đưa vào lệnh dump; lệnh dump MySQL/PostgreSQL dùng quote shell đúng thay vì `JSON.stringify`; file khoá chuyển sang `/run/napp` (chỉ root) và mở `O_NOFOLLOW`; site có SSL gửi `Strict-Transport-Security: max-age=15552000` (không `includeSubDomains`); không cài MySQL khi MariaDB đang có (và ngược lại).
+- **Rò rỉ bộ nhớ: napp không rò.** Đo 1 500 lần hỏi liên tiếp trong menu: số listener và handle không đổi, heap lên rồi đứng yên (+247/+295/+297 KB qua ba chặng). Thứ duy nhất lớn không giới hạn là file log của app — đã xử lý bằng logrotate ở trên. Log lấy mẫu bộ nhớ (`mem watch`) giới hạn 20 000 dòng.
+
 ## 1.30.4
 
 - **Di chuyển trong menu mượt hơn — học theo cách các TUI phổ biến (Bubble Tea, Ink, ncurses) làm.** Đo trước/sau bằng cùng một bài đo:

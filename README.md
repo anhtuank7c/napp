@@ -160,7 +160,8 @@ cặp `--x` / `--no-x` · cờ lặp lại được viết số ít và lặp l�
 | `sudo napp check [--fix] [--db <engines>]` | Kiểm tra / tự cài môi trường máy chủ (chọn database engine bằng `--db`) |
 | `sudo napp doctor [--deep]` | **Soi bảo mật**: bản vá đang chờ + rủi ro dependencies của mọi app/service |
 | `sudo napp doctor system\|deps [<domain\|name>]\|upgrade [--all] [-y]` | Từng phần của `doctor` |
-| `sudo napp update` · `napp version` · `napp changelog` · `sudo napp install\|uninstall` | Cập nhật / phiên bản / lịch sử / cài-gỡ napp |
+| `sudo napp audit show [-n 50]` | Nhật ký thao tác: ai đã làm gì qua napp |
+| `sudo napp update [--allow-downgrade]` · `napp version` · `napp changelog` · `sudo napp install\|uninstall` | Cập nhật / phiên bản / lịch sử / cài-gỡ napp |
 | **`app`** — ứng dụng web (có domain) | |
 | `napp app list` · `napp app show <domain>` | Liệt kê / xem cấu hình + trạng thái |
 | `sudo napp app create <domain> [--repo <url>] [--branch <b>] [--runtime node\|bun] [--db [engine]] [--redis] [--port <n>] [--env K=V]` | Tạo app mới |
@@ -169,7 +170,8 @@ cặp `--x` / `--no-x` · cờ lặp lại được viết số ít và lặp l�
 | ↳ `[--static-root <dir> --static-prefix /_app/]` · `[--static-alias /_next/static/=<dir>]` | Cho **nginx** trả asset build thay vì Node (cấu hình tay) |
 | ↳ `[--upload-dir <dir>]` | Thư mục file **tải lên lúc chạy** — không phải asset build, xem cảnh báo dưới |
 | ↳ `[--hotlink-protect]` `[--hotlink-allow <domain>]` · `[--max-body 100M]` | Chặn hotlink · `client_max_body_size` (mặc định `20M`) |
-| ↳ `[--share-redis-with <domain>]` · `[--redis-db <n>]` | Dùng **chung** Redis DB với đơn vị khác |
+| ↳ `[--share-redis-with <domain>]` · `[--redis-db <n>]` | Dùng **chung** Redis với đơn vị khác · kiểu cũ: DB index trên Redis dùng chung (không cô lập) |
+| ↳ `[--allow-insecure-repo]` | Cho phép repo `http://`/`git://` (mặc định từ chối — dễ bị tráo mã giữa đường) |
 | `sudo napp app update <domain> [--auto-static] [--static-root …] [--upload-dir …] [--[no-]hotlink-protect] [--max-body …] [--[no-]scan-block]` | **Đổi cấu hình nginx của app ĐÃ TẠO** — chỉ đổi đúng cờ được truyền |
 | `sudo napp app delete <domain> [-y] [--source] [--database] [--all] [--keep-nginx] [--keep-ssl]` | Gỡ app — mặc định xoá nginx + SSL, **GIỮ** mã nguồn + database |
 | `sudo napp app deploy\|start\|stop\|restart <domain>` · `napp app logs <domain> [-f] [-n 200]` | Triển khai / điều khiển / xem log |
@@ -195,7 +197,9 @@ cặp `--x` / `--no-x` · cờ lặp lại được viết số ít và lặp l�
 | `sudo napp db engine create <e...> [--default]` · `delete <e> [--force] [--purge]` | Cài / gỡ engine (xem [Chọn database engine](#️-chọn-database-engine)) |
 | `sudo napp db engine update <e> --default` · `set <e,e\|none>` | Đặt engine mặc định · ghi đè danh sách engine (không cài/gỡ) |
 | **`redis`** | |
-| `napp redis show` · `napp redis db list` · `sudo napp redis db flush <index> [-y]` | INFO memory · DB index nào cấp cho ai · xoá dữ liệu một DB |
+| `sudo napp redis list` · `show [<domain\|name>]` | Mọi Redis riêng (cổng, RAM, ai dùng) · Redis của một đơn vị |
+| `sudo napp redis migrate <domain\|name> [-y]` | Chuyển đơn vị (cùng nhóm dùng chung DB) từ Redis dùng chung sang Redis **riêng**, giữ dữ liệu |
+| `napp redis db list` · `sudo napp redis db flush <index> [-y]` | Redis dùng chung kiểu cũ: DB index nào cấp cho ai · xoá dữ liệu một DB |
 | **`backup`** | |
 | `sudo napp backup list` | Danh sách backup (kèm dung lượng) |
 | `sudo napp backup create [--target db\|files\|all] [--database <name>] [--engine <e>] [--keep-days n] [--keep-count n]` | Backup ngay |
@@ -323,7 +327,7 @@ sudo napp app create api.example.com \
 
 - Tạo user hệ thống `na_api_example_com`, clone repo, cài deps, build
 - Tạo `/var/www/api.example.com`, systemd service `napp-api_example_com`, vhost nginx (HTTP)
-- Tạo sẵn database + user riêng (engine đang cài — máy có nhiều engine thì ghi rõ, vd `--db postgresql`), cấp một Redis DB riêng, ghi hết vào `.env` (kèm `DATABASE_URL`)
+- Tạo sẵn database + user riêng (engine đang cài — máy có nhiều engine thì ghi rõ, vd `--db postgresql`), tạo một **Redis riêng** (tiến trình riêng, có mật khẩu), ghi hết vào `.env` (kèm `DATABASE_URL`, `REDIS_URL`)
 
 **Repo private?** napp không hỏi mật khẩu tương tác (tránh treo) — truyền xác thực ngay khi tạo:
 
@@ -786,10 +790,10 @@ sudo napp service update shop-images --write-dir /mnt/media      # đặt lại 
 
 Lệnh này `chown` lại mã nguồn sang user mới, ghi lại unit và restart service.
 
-> **Worker của một web app phải dùng CHUNG Redis DB với web app đó.** `--redis`
-> cấp cho mỗi đơn vị một DB riêng — đúng với hai sản phẩm khác nhau, sai với hai
+> **Worker của một web app phải dùng CHUNG Redis với web app đó.** `--redis`
+> cấp cho mỗi đơn vị một Redis riêng — đúng với hai sản phẩm khác nhau, sai với hai
 > nửa của cùng một sản phẩm. Hàng đợi chỉ chạy khi bên đẩy việc và bên tiêu thụ
-> nhìn cùng một keyspace; khác DB thì web đẩy job vào `#1` còn worker nghe `#2`,
+> nhìn cùng một keyspace; khác Redis thì web đẩy job vào một nơi còn worker nghe nơi khác,
 > **không bên nào báo lỗi** và mọi việc nền lặng lẽ không bao giờ chạy:
 >
 > ```bash
@@ -866,11 +870,88 @@ Sau khi sửa tay: `sudo systemctl daemon-reload && sudo systemctl restart <unit
 - Database: mỗi app một database + user CSDL riêng, quyền chỉ trên database đó (không dùng root)
 - UFW: mặc định deny incoming, mở SSH + **80/443 công khai**. Việc lấy đúng IP client thật khi qua Cloudflare do nginx real-IP đảm nhiệm (`napp cloudflare apply`), độc lập với tường lửa. Nếu muốn khoá origin chỉ nhận traffic từ dải IP Cloudflare (chống bypass thẳng origin IP) thì thêm `--restrict-cloudflare` — lưu ý mọi domain phải bật proxy Cloudflare
 - fail2ban: chặn brute-force SSH + bot dò nginx + IP spam lỗi 502/504/429 + **jail `napp-scanner`** (quét lỗ hổng PHP — xem mục riêng bên dưới)
-- Cloudflare real-IP: nginx trích xuất đúng IP client thật (không phải IP edge Cloudflare) để app phía sau nhận `X-Real-IP`/`X-Forwarded-For` chính xác
+- Cloudflare real-IP: nginx trích xuất đúng IP client thật (không phải IP edge Cloudflare) để app phía sau nhận `X-Real-IP`/`X-Forwarded-For` chính xác. Danh sách tải về được kiểm tra từng dòng (CIDR hợp lệ, không rộng hơn `/8` · `/16`); sai một dòng là dùng danh sách dự phòng, và `nginx -t` hỏng thì khôi phục file cũ
+- **Redis riêng cho mỗi app** (từ 1.31): tiến trình `redis-server` riêng, user Linux riêng, mật khẩu ngẫu nhiên 32 byte, chỉ nghe `127.0.0.1` — app này không đọc được hàng đợi/session của app khác. Xem [Redis riêng cho mỗi app](#-redis-riêng-cho-mỗi-app)
+- **`napp update` chỉ cài bản có chữ ký Ed25519 hợp lệ** và từ chối hạ phiên bản — xem [Chữ ký bản phát hành](#️-chữ-ký-bản-phát-hành)
+- Không bao giờ đi theo symlink khi root ghi/chown/đọc file trong thư mục app (`.env`, `.git-credentials`…): một app (hay repo có commit sẵn symlink `.env` -> `/etc/shadow`) không lừa được napp ghi đè hay làm lộ file của root. File bí mật được ghi nguyên tử với đúng quyền **ngay từ lúc tạo**
+- Giá trị đưa vào nginx/systemd được kiểm tra: thư mục asset/upload phải nằm trong webRoot của app, tiền tố URL, `--max-body`, `--hotlink-allow`, không ký tự điều khiển trong lệnh chạy, `--write-dir` không được là thư mục hệ thống. Unit thêm `CapabilityBoundingSet=`, `PrivateDevices`, `ProtectKernelLogs`, `SystemCallArchitectures=native`, `UMask=0027`
+- Site có SSL gửi thêm `Strict-Transport-Security: max-age=15552000` (không `includeSubDomains` — không ép subdomain khác của bạn)
+- Repo `http://`/`git://` bị từ chối (mã có thể bị tráo giữa đường) trừ khi thêm `--allow-insecure-repo`
+- **Nhật ký thao tác** `/var/log/napp/audit.log`: mọi lệnh làm thay đổi hệ thống (từ CLI lẫn menu) ghi một dòng JSON — thời điểm, ai (`SUDO_USER`), lệnh, kết quả. Token, mật khẩu, giá trị `KEY=VALUE` được che (`***`). Xem: `sudo napp audit show`
+- **Xoay vòng log** `/etc/logrotate.d/napp`: log app/service giữ 14 ngày, tối đa 100 MB/file (trước đây log lớn mãi đến đầy đĩa); nhật ký thao tác giữ 1 năm
 
 ⚠️ **An toàn khi chạy `napp firewall apply` lần đầu**: hãy giữ một phiên
 SSH/console **thứ hai** đang mở song song — nếu cổng SSH bị dò sai hoặc UFW
 cấu hình nhầm, phiên hiện tại có thể bị khoá ngay lập tức.
+
+---
+
+## 🧱 Redis riêng cho mỗi app
+
+Từ 1.31, `--redis` không còn cấp "một DB index trên Redis dùng chung" nữa.
+Redis dùng chung (`127.0.0.1:6379`, không mật khẩu) có một lỗ hổng không vá
+được bằng cấu hình: **DB index không phải ranh giới bảo mật** — mọi user trên
+máy, kể cả app khác, đều `SELECT` được sang DB của bạn, đọc session, sửa job
+trong hàng đợi.
+
+Nay mỗi app (cùng các worker dùng chung với nó qua `--share-redis-with`) có:
+
+| | |
+|---|---|
+| Tiến trình | `napp-redis-<id>.service`, chạy bằng user riêng `nr_<id>` |
+| Kết nối | `127.0.0.1:<cổng 6400-6499>` + socket `/run/napp-redis/<id>/redis.sock` |
+| Mật khẩu | 32 byte ngẫu nhiên, chỉ nằm trong `/etc/napp/redis/<id>.conf` (`640`) và `.env` của app (`600`) |
+| Dữ liệu | `/var/lib/napp-redis/<id>` (AOF, `noeviction` — không lặng lẽ xoá job) |
+| RAM | ngân sách Redis của `tune` chia đều cho các instance, áp dụng không cần restart |
+
+**`.env` có thêm `REDIS_PASSWORD`**, và `REDIS_URL` nay chứa mật khẩu
+(`redis://:<mật khẩu>@127.0.0.1:<cổng>/0`). App tạo client từ `REDIS_URL` không
+phải sửa gì. **App chỉ đọc `REDIS_HOST`/`REDIS_PORT` phải đọc thêm
+`REDIS_PASSWORD`**, nếu không sẽ gặp lỗi `NOAUTH`.
+
+### App tạo bằng bản napp cũ
+
+Vẫn chạy nguyên như trước trên Redis dùng chung — napp **không tự chuyển** vì
+việc chuyển cần dừng app vài giây. `sudo napp check` liệt kê các đơn vị còn
+dùng Redis chung. Chuyển từng nhóm:
+
+```bash
+sudo napp redis migrate shop.example.com
+```
+
+1. Dừng app **và mọi worker cùng DB index** (chúng phải sang cùng một Redis)
+2. Chép toàn bộ key sang Redis riêng (`MIGRATE COPY`, giữ TTL), so số key hai bên
+3. Khớp → ghi `.env` mới cho cả nhóm, chạy lại. Lệch → **không đổi gì**, chạy lại trên Redis cũ
+4. DB index cũ **không bị xoá** — kiểm tra app ổn rồi tự dọn: `sudo napp redis db flush <index>`
+
+Nếu app của bạn chỉ đọc `REDIS_HOST`/`REDIS_PORT`, sửa code đọc
+`REDIS_PASSWORD` và deploy **trước** khi migrate.
+
+---
+
+## ✍️ Chữ ký bản phát hành
+
+Mỗi bản `napp.cjs` được ký Ed25519; chữ ký nằm cạnh nó (`napp.cjs.sig`) trên
+gist và trong GitHub release. Khoá công khai được nhúng sẵn trong napp và
+`install.sh`.
+
+- `napp update` tải cả file lẫn chữ ký, **kiểm tra trước khi ghi bất cứ thứ gì**.
+  Thiếu chữ ký, chữ ký sai hay ký bằng khoá lạ → từ chối, không có cờ bỏ qua.
+  Ai chiếm được gist (hay chen giữa đường) cũng không đẩy được mã lên server của bạn.
+- Từ chối cài bản **cũ hơn** bản đang chạy (chặn phát lại một bản cũ có lỗ hổng
+  nhưng chữ ký vẫn đúng). Cố ý hạ bản: `sudo napp update --allow-downgrade`.
+- `install.sh` kiểm tra chữ ký của `napp.cjs` trước khi cài. Giới hạn: chính
+  `install.sh` khi chạy kiểu `curl | sudo bash` thì không tự kiểm tra được mình —
+  muốn chắc chắn, tải `install.sh` từ một GitHub release có tag, đọc qua rồi mới chạy.
+- Server đang ở bản ≤ 1.30.4 lên 1.31.0 bằng cơ chế cũ (chưa kiểm chữ ký); từ
+  1.31.0 trở đi mọi lần cập nhật đều được kiểm.
+
+**Người phát hành** (tự host bản fork): `npm run keygen` tạo cặp khoá — khoá bí
+mật lưu ở `~/.config/napp/signing-ed25519.pem` (hoặc `NAPP_SIGNING_KEY`), **không
+bao giờ vào repo** (`.gitignore` chặn `*.pem`). Dán khoá công khai vào
+`TRUSTED_KEYS` (`src/lib/signature.ts`) và `NAPP_TRUSTED_KEYS` (`install.sh`).
+`npm run gist:napp` tự build, ký rồi đăng cả hai file. **Sao lưu khoá bí mật** —
+mất nó thì không phát hành được bản mà server hiện có chịu nhận.
 
 ---
 
@@ -1281,9 +1362,10 @@ Từ lần sau, mỗi khi sửa code + build lại + cập nhật gist, chạy t
 sudo napp update
 ```
 
-`napp update` tải file mới về **tạm thời trước**, kiểm tra cú pháp hợp lệ +
-đúng là `napp.cjs` (qua marker phiên bản), rồi mới cài đè — không bao giờ
-dùng kiểu `curl | bash` để cài trực tiếp bản chưa kiểm chứng.
+`napp update` tải file mới + chữ ký về **tạm thời trước**, kiểm tra chữ ký
+Ed25519 (xem [Chữ ký bản phát hành](#️-chữ-ký-bản-phát-hành)), không hạ phiên
+bản, kiểm tra cú pháp + marker phiên bản, rồi mới cài đè. Gist phải chứa cả
+`napp.cjs` lẫn `napp.cjs.sig` (`npm run gist:napp` đăng cả hai).
 
 ---
 
@@ -1310,7 +1392,7 @@ src/
                           # firewall, fail2ban, tune, cloudflare, update, menu, installSelf
 ```
 
-Registry trạng thái (danh sách app, cổng đã cấp, Redis DB đã cấp) lưu tại
+Registry trạng thái (danh sách app, cổng đã cấp, Redis riêng / Redis DB đã cấp) lưu tại
 `/etc/napp/state.json`.
 
 ---

@@ -1,4 +1,4 @@
-import { execCapture, runCmd, commandExists, ensureDir, writeFile, state as execState } from "../exec";
+import { execCapture, runCmd, commandExists, ensureDir, writeFile, shQuote, state as execState } from "../exec";
 import { die, dryRunNotice, ok, info } from "../log";
 import type { HardwareProfile } from "../hardware";
 import type { CreatedDb, DbDriver } from "./types";
@@ -217,14 +217,14 @@ FLUSH PRIVILEGES;`;
     dump(name, outPath) {
       runCmd("bash", [
         "-lc",
-        `set -o pipefail; mysqldump --single-transaction --quick --routines --triggers ${JSON.stringify(name)} | gzip > ${JSON.stringify(outPath)}`,
+        `set -o pipefail; mysqldump --single-transaction --quick --routines --triggers ${shQuote(name)} | gzip > ${shQuote(outPath)}`,
       ]);
     },
 
     dumpAll(outPath) {
       runCmd("bash", [
         "-lc",
-        `set -o pipefail; mysqldump --all-databases --routines --triggers --events --single-transaction --quick | gzip > ${JSON.stringify(outPath)}`,
+        `set -o pipefail; mysqldump --all-databases --routines --triggers --events --single-transaction --quick | gzip > ${shQuote(outPath)}`,
       ]);
     },
 

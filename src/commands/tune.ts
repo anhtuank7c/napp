@@ -1,4 +1,5 @@
 import { execCapture, runCmd, requireRoot, ensureDir, writeFile, commandExists, isServiceActive } from "../lib/exec";
+import { redisBudgetSplit, setInstanceMaxmemory } from "../lib/redis";
 import { ask } from "../lib/prompt";
 import { info, ok, warn, die, section } from "../lib/log";
 import { detectHardware, formatHardware, detectResourceControl, formatResourceControl } from "../lib/hardware";
@@ -21,6 +22,18 @@ import { activeEngines, driverFor, unmanagedEngines } from "../lib/db";
 import type { HardwareProfile } from "../lib/hardware";
 import type { TuningPlan } from "../templates/tuning";
 import { readFileSync, existsSync } from "node:fs";
+
+/** In phần phân bổ RAM cho Redis: chia đều giữa các Redis riêng (+ Redis chung nếu còn dùng). */
+function printRedisPlan(totalMB: number): void {
+  const { ids, legacyInUse, perMB } = redisBudgetSplit(totalMB);
+  if (ids.length === 0) {
+    console.log(`  Redis maxmemory    : ${totalMB} MB (maxmemory-policy: noeviction — bắt buộc cho BullMQ)`);
+    return;
+  }
+  console.log(
+    `  Redis              : ${totalMB} MB chia cho ${ids.length} Redis riêng${legacyInUse ? " + Redis dùng chung (còn đơn vị kiểu cũ)" : ""} — mỗi cái ${Math.round(perMB)} MB, noeviction`
+  );
+}
 
 /** In phần phân bổ RAM cho database — dùng chung cho `tune show` và `tune apply`. */
 function printDbPlan(hw: HardwareProfile, plan: TuningPlan): void {
@@ -92,7 +105,7 @@ export function cmdTuneShow(): void {
   console.log();
   section("Kế hoạch tối ưu (chưa áp dụng — dùng `napp tune apply`)");
   printDbPlan(hw, plan);
-  console.log(`  Redis maxmemory    : ${plan.redisMaxMemoryMB} MB (maxmemory-policy: noeviction — bắt buộc cho BullMQ)`);
+  printRedisPlan(plan.redisMaxMemoryMB);
   console.log(`  nginx worker_connections : ${plan.workerConnections}`);
   // Máy chưa có đơn vị nào: cả hai con số đều bị kẹp về trần của tier, in ra
   // như một "kế hoạch" là gây hiểu nhầm (trông như mỗi app sẽ được từng ấy RAM).
@@ -221,7 +234,7 @@ export async function cmdTuneApply(opts: TuneApplyOptions): Promise<void> {
   console.log(formatHardware(hw));
   console.log();
   printDbPlan(hw, plan);
-  console.log(`  Redis maxmemory    -> ${plan.redisMaxMemoryMB} MB (maxmemory-policy: noeviction — bắt buộc cho BullMQ)`);
+  printRedisPlan(plan.redisMaxMemoryMB);
   console.log(`  nginx worker_connections -> ${plan.workerConnections}`);
   console.log(
     `  Node heap          -> web app ${plan.heap.webMB} MB · background service ${plan.heap.serviceMB} MB ` +
@@ -276,7 +289,11 @@ export async function cmdTuneApply(opts: TuneApplyOptions): Promise<void> {
   // Redis
   if (commandExists("redis-server")) {
     ensureDir("/etc/redis/conf.d", 0o755);
-    writeFile(REDIS_TUNING_PATH, renderRedisTuning(hw, plan), 0o644);
+    // Redis dùng chung chỉ còn nhận một phần (bằng mỗi Redis riêng) nếu vẫn có đơn
+    // vị kiểu cũ dùng nó; không còn ai dùng thì giữ nguyên cả phần — nó rỗng.
+    const split = redisBudgetSplit(plan.redisMaxMemoryMB);
+    const sharedMB = split.ids.length && split.legacyInUse ? split.perMB : plan.redisMaxMemoryMB;
+    writeFile(REDIS_TUNING_PATH, renderRedisTuning(hw, { ...plan, redisMaxMemoryMB: Math.round(sharedMB) }), 0o644);
     // Ubuntu package redis-server thường không tự include conf.d/*.conf —
     // đảm bảo có dòng include trong redis.conf chính.
     const mainConf = "/etc/redis/redis.conf";
@@ -295,6 +312,12 @@ export async function cmdTuneApply(opts: TuneApplyOptions): Promise<void> {
   } else {
     warn("Redis chưa cài — bỏ qua.");
   }
+
+  // Redis riêng của từng nhóm app: áp maxmemory NGAY (CONFIG SET), không restart
+  // — restart một Redis đang giữ hàng đợi là rủi ro mất job đang chạy.
+  const redisSplit = redisBudgetSplit(plan.redisMaxMemoryMB);
+  for (const id of redisSplit.ids) setInstanceMaxmemory(id, redisSplit.perMB);
+  if (redisSplit.ids.length) ok(`Đã đặt maxmemory ${Math.round(redisSplit.perMB)} MB cho ${redisSplit.ids.length} Redis riêng (áp ngay, không restart).`);
 
   // Các app: cân đối lại heap V8 (chia theo tổng số đơn vị node). Mặc định CHỈ
   // vá đúng con số trong --max-old-space-size, không đụng dòng nào khác của unit

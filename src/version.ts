@@ -16,6 +16,20 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.31.0
+- Bảo mật (OWASP): napp update + install.sh chỉ cài bản có chữ ký Ed25519, từ
+  chối hạ phiên bản (--allow-downgrade để cố ý hạ).
+- Redis RIÊNG cho mỗi app (tiến trình, user, mật khẩu riêng); .env thêm
+  REDIS_PASSWORD. App cũ: sudo napp redis migrate <app>. Lệnh mới: redis list,
+  redis show, redis migrate.
+- Không đi theo symlink khi root ghi/chown/đọc file của app; file bí mật ghi
+  nguyên tử, đúng quyền ngay từ lúc tạo.
+- Kiểm tra giá trị đưa vào nginx/systemd; unit thêm hardening; HSTS cho site SSL;
+  kiểm dải IP Cloudflare; từ chối repo http:// / git:// (--allow-insecure-repo).
+- Nhật ký thao tác /var/log/napp/audit.log (napp audit show); logrotate cho log
+  app (14 ngày, 100 MB/file).
+- Rà rò rỉ bộ nhớ: napp không rò (1 500 lần hỏi, heap đứng yên).
+
 ## 1.30.4
 - Menu mượt hơn: Esc phản hồi sau 31ms thay vì 500ms (tự giải mã phím); chỉ vẽ
   lại dòng thay đổi (214 thay vì 1 062 byte mỗi lần ↓); gộp phím đến dồn thành

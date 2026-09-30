@@ -107,8 +107,17 @@ ReadWritePaths=${writePaths.join(" ")}
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
+ProtectKernelLogs=yes
+PrivateDevices=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
+SystemCallArchitectures=native
+# App không cần quyền đặc biệt nào của root (cổng nội bộ >= 1024).
+CapabilityBoundingSet=
+# File app tạo ra: 640/750 — nhóm (có nginx) đọc được file tải lên, người khác không.
+UMask=0027
+# Cố ý KHÔNG đặt RestrictNamespaces=yes: làm hỏng Chrome/Puppeteer (sandbox của
+# Chrome cần namespace) — thứ nhiều app Node dùng để xuất PDF/ảnh chụp.
 
 # --- Giới hạn tài nguyên ---
 LimitNOFILE=65535
@@ -184,7 +193,9 @@ export function renderServiceSystemdService(svc: ServiceRecord, execStart: strin
 // kể cả có biến môi trường PATH của nvm). Đánh đổi một lớp shell mỏng để lấy
 // sự linh hoạt — chấp nhận được cho một service quản lý ứng dụng.
 export function execStartLine(startCmd: string): string {
-  const escaped = startCmd.replace(/'/g, `'\\''`);
+  // '%' là mã đặc biệt của systemd (%h, %n...): 'date +%s' sẽ bị systemd đổi
+  // thành thứ khác trước khi tới bash. '%%' = một dấu '%' thật.
+  const escaped = startCmd.replace(/'/g, `'\\''`).replace(/%/g, "%%");
   return `/bin/bash -lc '${escaped}'`;
 }
 

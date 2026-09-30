@@ -1,6 +1,6 @@
 {
   "name": "napp",
-  "version": "1.30.4",
+  "version": "1.31.0",
   "description": "napp — Node.js multi-app server manager (domains, SSL, systemd, MariaDB/MySQL/PostgreSQL/MongoDB, Redis, nginx, fail2ban, UFW, Cloudflare, backups, hardware tuning, OTA update)",
   "private": true,
   "type": "commonjs",
@@ -12,7 +12,9 @@
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm run build",
     "gist:install": "gh gist edit cc1e8194608e3f5a942d6d1d6669e6a3 -a install.sh",
-    "gist:napp": "npm run build && gh gist edit ef7ac27df205d70cf1f789bb420ec013 -a ./dist/napp.cjs"
+    "sign": "node scripts/sign.mjs",
+    "keygen": "node scripts/keygen.mjs",
+    "gist:napp": "npm run build && npm run sign && gh gist edit ef7ac27df205d70cf1f789bb420ec013 -a ./dist/napp.cjs && gh gist edit ef7ac27df205d70cf1f789bb420ec013 -a ./dist/napp.cjs.sig"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

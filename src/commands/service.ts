@@ -1,8 +1,10 @@
 import { existsSync, rmSync } from "node:fs";
+import { provisionRedis, redisEnvForUnit, rollbackRedis, describeUnitRedis, leaveRedisInstance, type RedisProvision } from "../lib/redis";
+import { ensureLogrotate } from "../lib/logrotate";
 import { ask } from "../lib/prompt";
-import { execCapture, runCmd, runAs, ensureDir, requireRoot } from "../lib/exec";
+import { execCapture, runCmd, runAs, ensureDir, requireRoot, chmodNoFollow } from "../lib/exec";
 import { info, ok, warn, die, section } from "../lib/log";
-import { validateServiceName, validatePort, validateRepoUrl, validateBranch, validateEnvKey } from "../lib/validate";
+import { validateServiceName, validatePort, validateRepoUrl, validateBranch, validateEnvKey, validateUnitCommand, validateWriteDir } from "../lib/validate";
 import {
   ServiceRecord,
   Runtime,
@@ -12,8 +14,6 @@ import {
   upsertService,
   removeService as removeServiceFromState,
   allocatePort,
-  resolveRedisDb,
-  redisDbOf,
   serviceUserFor,
   svcSystemdName,
   serviceWorkDirFor,
@@ -49,6 +49,7 @@ export interface CreateServiceOptions {
   redisDb?: number; // index cụ thể — dùng CHUNG keyspace với web app của cùng sản phẩm
   shareRedisWith?: string; // domain/name của đơn vị muốn dùng chung Redis DB
   env: string[]; // "KEY=VALUE"
+  allowInsecureRepo?: boolean; // cho phép repo http:// / git:// (không mã hoá)
   token?: string; // PAT clone repo PRIVATE qua HTTPS
   sshKey?: string; // deploy key clone repo PRIVATE qua SSH
   appDir?: string; // monorepo: thư mục con chứa worker, tương đối so với workDir
@@ -72,6 +73,7 @@ function resolveWritePaths(dirs: string[], borrowedRoot?: string): string[] {
     const p = raw.trim().replace(/\/+$/, "");
     if (!p.startsWith("/")) die(`--write-dir phải là đường dẫn TUYỆT ĐỐI, nhận được: '${raw}'`);
     if (/\s/.test(p)) die(`--write-dir không được chứa khoảng trắng (systemd tách ReadWritePaths bằng dấu cách): '${raw}'`);
+    validateWriteDir(p);
     if (!existsSync(p)) die(`--write-dir '${p}' không tồn tại. systemd sẽ TỪ CHỐI khởi động unit nếu ReadWritePaths trỏ vào chỗ không có — hãy tạo thư mục trước.`);
     out.push(p);
   }
@@ -119,7 +121,7 @@ export async function cmdServiceCreate(name: string, opts: CreateServiceOptions)
     );
   }
   validateBranch(opts.branch);
-  if (opts.repo) validateRepoUrl(opts.repo);
+  if (opts.repo) validateRepoUrl(opts.repo, { allowInsecure: opts.allowInsecureRepo });
 
   // Fail sớm cho xác thực repo private; --ssh-key được resolve thành nội dung key.
   prepareRepoAuth(opts);
@@ -163,6 +165,7 @@ export async function cmdServiceCreate(name: string, opts: CreateServiceOptions)
   const release = acquireLock(name);
   let rollbackActive = true;
   let dbCreatedName: string | undefined;
+  let redisProv: RedisProvision = {}; // Redis riêng vừa tạo/tham gia -> rollback phải gỡ
   const rollback = () => {
     if (!rollbackActive) return;
     warn("Tạo service thất bại — đang hoàn tác các thay đổi đã thực hiện...");
@@ -177,6 +180,7 @@ export async function cmdServiceCreate(name: string, opts: CreateServiceOptions)
       if (!borrowed && execCapture("id", [user]).code === 0) {
         runCmd("userdel", ["-r", user], { silentFail: true });
       }
+      rollbackRedis(redisProv, name, user);
       if (dbCreatedName) {
         try {
           driverFor(dbEngine!).drop(dbCreatedName, dbCreatedName);
@@ -260,6 +264,9 @@ EOF`,
     const installCmd = opts.installCmd ?? defaultInstallCmd(pm);
     const buildCmd = opts.buildCmd ?? "";
     const startCmd = opts.startCmd ?? defaultStartCmd(opts.runtime, pm);
+    validateUnitCommand(installCmd, "--install-cmd");
+    validateUnitCommand(buildCmd, "--build-cmd");
+    validateUnitCommand(startCmd, "--start-cmd");
 
     if (existsSync(`${workDir}/package.json`) || opts.repo) {
       info("Đang cài dependencies...");
@@ -279,27 +286,20 @@ EOF`,
     }
 
     // --- redis (tuỳ chọn) ---
-    let redisDbIndex: number | undefined;
-    if (opts.redis || opts.redisDb !== undefined || opts.shareRedisWith) {
-      const preferred = opts.shareRedisWith ? redisDbOf(opts.shareRedisWith) : opts.redisDb;
-      redisDbIndex = resolveRedisDb(preferred);
-      if (redisDbIndex === undefined) {
-        warn("Đã hết database Redis riêng (0-15). Bỏ qua cấp DB riêng — hãy dùng key-prefix trong service thay vì DB riêng.");
-      } else if (preferred !== undefined) {
-        ok(`Dùng CHUNG Redis DB #${redisDbIndex}${opts.shareRedisWith ? ` với '${opts.shareRedisWith}'` : ""}`);
-      } else {
-        // Một worker gần như luôn là NỬA KIA của một web app: hàng đợi chỉ chạy
-        // khi bên đẩy và bên tiêu thụ nhìn cùng một keyspace. Cấp DB riêng ở đây
-        // là mặc định an toàn cho worker độc lập, nhưng SAI cho cặp web+worker —
-        // và cái sai đó hoàn toàn im lặng, nên phải nói ra tại chỗ.
-        ok(`Đã cấp Redis DB #${redisDbIndex} cho service này`);
-        warn(
-          `Service này dùng Redis DB RIÊNG (#${redisDbIndex}).\n` +
-            `  Nếu nó là worker xử lý hàng đợi của một web app, hai bên PHẢI dùng chung DB —\n` +
-            `  khác DB thì job được đẩy vào một nơi còn worker nghe ở nơi khác, KHÔNG BÊN NÀO BÁO LỖI.\n` +
-            `  Tạo lại với: --share-redis-with <domain-cua-web-app>`
-        );
-      }
+    // Mặc định: Redis RIÊNG có mật khẩu (lib/redis.ts). --share-redis-with: dùng
+    // chung instance của app kia (BẮT BUỘC cho worker tiêu thụ hàng đợi của app đó).
+    redisProv = provisionRedis(name, user, { redis: opts.redis, redisDb: opts.redisDb, shareRedisWith: opts.shareRedisWith });
+    const { redisInstance, redisDbIndex } = redisProv;
+    if (redisProv.createdInstance) {
+      // Một worker gần như luôn là NỬA KIA của một web app: hàng đợi chỉ chạy khi
+      // bên đẩy và bên tiêu thụ nhìn CÙNG một Redis. Redis riêng ở đây đúng cho
+      // worker độc lập, nhưng SAI cho cặp web+worker — và sai hoàn toàn im lặng.
+      warn(
+        `Service này có Redis RIÊNG ('${redisProv.createdInstance}').\n` +
+          `  Nếu nó là worker xử lý hàng đợi của một web app, hai bên PHẢI dùng chung một Redis —\n` +
+          `  khác Redis thì job đẩy vào một nơi, worker nghe một nơi, KHÔNG BÊN NÀO BÁO LỖI.\n` +
+          `  Tạo lại với: --share-redis-with <domain-cua-web-app>`
+      );
     }
 
     // --- .env ---
@@ -309,12 +309,7 @@ EOF`,
     const envUpdates: Record<string, string> = { NODE_ENV: "production" };
     if (port !== undefined) envUpdates.PORT = String(port);
     if (dbInfo && dbEngine) Object.assign(envUpdates, driverFor(dbEngine).envFor(dbInfo));
-    if (redisDbIndex !== undefined) {
-      envUpdates.REDIS_HOST = "127.0.0.1";
-      envUpdates.REDIS_PORT = "6379";
-      envUpdates.REDIS_DB = String(redisDbIndex);
-      envUpdates.REDIS_URL = `redis://127.0.0.1:6379/${redisDbIndex}`;
-    }
+    Object.assign(envUpdates, redisEnvForUnit(redisProv));
     for (const kv of opts.env) {
       const eq = kv.indexOf("=");
       if (eq === -1) die(`--env phải theo dạng KEY=VALUE, nhận được: '${kv}'`);
@@ -326,18 +321,17 @@ EOF`,
     const svcWorkDir = unitWorkDir(workDir, opts.appDir);
     if (svcWorkDir !== workDir) ensureDir(svcWorkDir);
     const envPath = `${svcWorkDir}/.env`;
-    mergeEnvFile(envPath, envUpdates, 0o600);
-    runCmd("chown", [`${user}:${user}`, envPath]);
+    mergeEnvFile(envPath, envUpdates, 0o600, user);
     ok("Đã ghi cấu hình vào .env (quyền 600, chỉ user của service đọc được)");
 
     // --- phân quyền chuẩn ---
-    runCmd("chown", ["-R", `${user}:${user}`, workDir]);
+    runCmd("chown", ["-hR", `${user}:${user}`, workDir]);
     runCmd("find", [workDir, "-type", "d", "-exec", "chmod", "750", "{}", "+"]);
     runCmd("find", [workDir, "-type", "f", "-exec", "chmod", "640", "{}", "+"]);
-    runCmd("chmod", ["600", envPath]);
 
     // --- systemd service ---
     ensureDir("/var/log/napp", 0o750);
+    ensureLogrotate(); // log app không được phình vô hạn
     const record: ServiceRecord = {
       name,
       user,
@@ -353,6 +347,7 @@ EOF`,
       dbName: dbInfo?.name,
       dbUser: dbInfo?.user,
       dbEngine: dbInfo ? dbEngine : undefined,
+      redisInstance,
       redisDbIndex,
       appDir: opts.appDir,
       runAsUnit: borrowed?.id,
@@ -405,7 +400,7 @@ EOF`,
     if (port !== undefined) console.log(`  Cổng nội bộ  : 127.0.0.1:${port} (service tự bind — KHÔNG public qua nginx)`);
     else console.log(`  Cổng         : không cấp (worker chạy ngầm, không listen)`);
     if (dbInfo && dbEngine) console.log(`  Database     : ${driverFor(dbEngine).label} '${dbInfo.name}'  (user: ${dbInfo.user}, mật khẩu + DATABASE_URL trong .env)`);
-    if (redisDbIndex !== undefined) console.log(`  Redis DB     : #${redisDbIndex}`);
+    if (redisInstance || redisDbIndex !== undefined) console.log(`  Redis        : ${describeUnitRedis(redisProv)}`);
     console.log();
     console.log("  Các bước tiếp theo:");
     console.log(`  1. Xem log:      sudo napp service logs ${name} -f`);
@@ -441,8 +436,8 @@ export async function cmdServiceDeploy(name: string): Promise<void> {
       runAs(svc.user, "bash", ["-lc", svc.buildCmd], { cwd: svc.workDir });
     }
 
-    runCmd("chown", ["-R", `${svc.user}:${svc.user}`, svc.workDir]);
-    runCmd("chmod", ["600", `${unitWorkDir(svc.workDir, svc.appDir)}/.env`], { silentFail: true });
+    runCmd("chown", ["-hR", `${svc.user}:${svc.user}`, svc.workDir]);
+    chmodNoFollow(`${unitWorkDir(svc.workDir, svc.appDir)}/.env`, 0o600);
 
     runCmd("systemctl", ["restart", svcSystemdName(name)]);
     svc.updatedAt = new Date().toISOString();
@@ -524,8 +519,8 @@ export async function cmdServiceSet(name: string, opts: ServiceSetOptions): Prom
     svc.writePaths = writePaths.length > 0 ? writePaths : undefined;
 
     if (svc.user !== oldUser) {
-      runCmd("chown", ["-R", `${svc.user}:${svc.user}`, svc.workDir]);
-      runCmd("chmod", ["600", `${unitWorkDir(svc.workDir, svc.appDir)}/.env`], { silentFail: true });
+      runCmd("chown", ["-hR", `${svc.user}:${svc.user}`, svc.workDir]);
+      chmodNoFollow(`${unitWorkDir(svc.workDir, svc.appDir)}/.env`, 0o600);
       ok(`Mã nguồn ${svc.workDir} đã chuyển sang user '${svc.user}'.`);
     }
 
@@ -654,6 +649,7 @@ export async function cmdServiceRemove(name: string, opts: ServiceRemoveOptions)
       info(`Giữ lại database '${svc.dbName}'. Muốn xoá sau: napp db delete ${svc.dbName} --engine ${unitEngine(svc)} --yes --user ${svc.dbUser ?? svc.dbName}`);
     }
 
+    if (svc.redisInstance) leaveRedisInstance(svc.redisInstance, name, svc.user, { purgeData: opts.source && opts.database });
     removeServiceFromState(name);
     ok(`Đã gỡ service '${name}' khỏi napp.`);
 
@@ -694,7 +690,7 @@ export function cmdServiceList(): void {
     console.log(
       `  ${running ? "●" : "○"} ${svc.name.padEnd(30)} ${svc.port !== undefined ? `port=${String(svc.port).padEnd(6)}` : "no-port".padEnd(11)} ${`${svc.nodeRuntime}/${svc.packageManager ?? "npm"}`.padEnd(10)} user=${svc.user.padEnd(18)} ${
         svc.runAsUnit ? `run-as=${svc.runAsUnit} ` : ""
-      }${svc.dbName ? `db=${unitEngine(svc)}:${svc.dbName} ` : ""}${svc.redisDbIndex !== undefined ? `redis=${svc.redisDbIndex} ` : ""}${running ? "đang chạy" : "ĐÃ DỪNG"}`
+      }${svc.dbName ? `db=${unitEngine(svc)}:${svc.dbName} ` : ""}${svc.redisInstance ? "redis=riêng " : svc.redisDbIndex !== undefined ? `redis=#${svc.redisDbIndex}(chung) ` : ""}${running ? "đang chạy" : "ĐÃ DỪNG"}`
     );
   }
 }
@@ -745,9 +741,7 @@ export function cmdServiceEnvSet(name: string, pairs: string[]): void {
   }
   // Cùng đường dẫn systemd đọc — ghi ở gốc repo thì unit của monorepo không thấy.
   const svcEnv = `${unitWorkDir(svc.workDir, svc.appDir)}/.env`;
-  mergeEnvFile(svcEnv, updates, 0o600);
-  runCmd("chown", [`${svc.user}:${svc.user}`, svcEnv]);
-  runCmd("chmod", ["600", svcEnv]);
+  mergeEnvFile(svcEnv, updates, 0o600, svc.user);
   ok(`Đã cập nhật .env cho service '${name}'. Chạy 'napp service restart ${name}' để áp dụng.`);
 }
 
@@ -766,11 +760,10 @@ export function cmdServiceEnvUnset(name: string, keys: string[]): void {
   const svc = requireService(name);
   for (const k of keys) validateEnvKey(k);
   const svcEnv = `${unitWorkDir(svc.workDir, svc.appDir)}/.env`;
-  const removed = removeEnvKeys(svcEnv, keys, 0o600);
+  const removed = removeEnvKeys(svcEnv, keys, 0o600, svc.user);
   const missing = keys.filter((k) => !removed.includes(k));
   if (missing.length > 0) warn(`Không có trong .env: ${missing.join(", ")}`);
   if (removed.length === 0) return;
-  runCmd("chown", [`${svc.user}:${svc.user}`, svcEnv]);
   ok(`Đã xoá ${removed.join(", ")} khỏi .env của service '${name}'. Chạy 'napp service restart ${name}' để áp dụng.`);
 }
 
@@ -790,7 +783,7 @@ export function cmdServiceShow(name: string): void {
     ["Runtime", `${svc.nodeRuntime} · ${svc.packageManager ?? "npm"}`],
     ["Lệnh", `install: ${svc.installCmd} · build: ${svc.buildCmd || "-"} · start: ${svc.startCmd}`],
     ["Database", svc.dbName ? `${driverFor(unitEngine(svc)).label} '${svc.dbName}' (user ${svc.dbUser ?? svc.dbName})` : "-"],
-    ["Redis DB", svc.redisDbIndex !== undefined ? `#${svc.redisDbIndex}` : "-"],
+    ["Redis", describeUnitRedis(svc)],
     ["Leak guard", svc.leakGuard ? "bật" : undefined],
     ["Tạo lúc", svc.createdAt],
   ];

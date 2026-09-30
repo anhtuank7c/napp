@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { ask } from "../lib/prompt";
-import { execCapture, runCmd, requireRoot, writeFile, ensureDir, commandExists } from "../lib/exec";
+import { execCapture, runCmd, requireRoot, writeFile, ensureDir, commandExists, chmodNoFollow } from "../lib/exec";
 import { info, ok, warn, die, section, colorText } from "../lib/log";
 import { writeManagedUnit } from "../lib/unitfile";
 import { showTimer } from "../lib/timer";
@@ -309,7 +309,7 @@ export async function cmdMemSnapshot(id: string, opts: { yes?: boolean } = {}): 
   ensureDir(HEAPSNAP_DIR, 0o700);
   const dest = `${HEAPSNAP_DIR}/${ref!.id}-${new Date().toISOString().replace(/[:.]/g, "-")}.heapsnapshot`;
   runCmd("mv", [full, dest]);
-  runCmd("chmod", ["600", dest]);
+  chmodNoFollow(dest, 0o600);
 
   const sizeMB = Math.round(statSync(dest).size / 1048576);
   ok(`Đã chụp xong: ${dest} (${sizeMB} MB)`);

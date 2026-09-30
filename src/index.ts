@@ -1,5 +1,6 @@
 import { Command, Option } from "commander";
 import { legacy, legacyGroup, rawOpt, warnRenamed } from "./lib/cli";
+import { audit, redactArgs, isStateChanging, cmdAuditShow } from "./lib/audit";
 import { setDryRun, state as execState } from "./lib/exec";
 import { printDie, NappError } from "./lib/log";
 import { PromptCancelled } from "./lib/prompt";
@@ -41,7 +42,7 @@ import { cmdDomainAdd, cmdDomainRemove, cmdDomainList } from "./commands/domain"
 import { cmdCertIssue, cmdCertRenew, cmdCertRevoke, cmdCertList, cmdCertStatus } from "./commands/cert";
 import { cmdDbCreate, cmdDbDrop, cmdDbList, cmdDbBackup } from "./commands/db";
 import { cmdDbEngineList, cmdDbEngineAdd, cmdDbEngineRemove, cmdDbEngineDefault, cmdDbEngineSelect } from "./commands/dbengine";
-import { cmdRedisInfo, cmdRedisAllocations, cmdRedisFlush } from "./commands/redis";
+import { cmdRedisInfo, cmdRedisAllocations, cmdRedisFlush, cmdRedisList, cmdRedisShow, cmdRedisMigrate } from "./commands/redis";
 import { cmdBackupRun, cmdBackupList, cmdBackupSchedule, cmdBackupUnschedule, cmdBackupScheduleShow, DEFAULT_RETENTION_DAYS, type BackupTarget } from "./commands/backup";
 import { cmdFirewallSync, cmdFirewallStatus } from "./commands/firewall";
 import { cmdFail2banSetup, cmdFail2banStatus, cmdFail2banUnban } from "./commands/fail2ban";
@@ -62,11 +63,19 @@ program
   .version(NAPP_VERSION, "-V, --version")
   .option("--dry-run", "chỉ in ra các bước sẽ thực hiện, không thay đổi gì thật")
   .option("--verbose", "in chi tiết các lệnh hệ thống được thực thi")
-  .hook("preAction", (thisCmd) => {
+  .hook("preAction", (thisCmd, actionCmd) => {
     const opts = thisCmd.opts();
     setDryRun(Boolean(opts.dryRun));
     execState.verbose = Boolean(opts.verbose);
+    // Nhật ký thao tác: nhớ lệnh đang chạy, ghi kết quả khi xong (xem cuối file).
+    const path: string[] = [];
+    for (let c: Command | null = actionCmd; c && c.parent; c = c.parent) path.unshift(c.name());
+    const args = process.argv.slice(2);
+    if (isStateChanging(path, args)) auditCommand = redactArgs(args).join(" ");
   });
+
+// Lệnh đang chạy (đã che bí mật) — undefined với lệnh chỉ đọc.
+let auditCommand: string | undefined;
 
 // Danh sách lệnh do commander tự sinh trả lời "có những lệnh gì", nhưng không
 // trả lời "gõ gì trước" và nhất là không nhắc các bước BẮT BUỘC sau khi nâng
@@ -252,6 +261,7 @@ app
   .option("--port <port>", "cổng nội bộ (mặc định: tự cấp phát 3000-3999)", (v) => parseInt(v, 10))
   .option("--repo <url>", "git repo để clone (bỏ trống để tạo app mẫu rỗng)")
   .option("--branch <branch>", "branch git", "main")
+  .option("--allow-insecure-repo", "cho phép repo http:// hoặc git:// (KHÔNG mã hoá — chỉ dùng trong mạng nội bộ tin cậy)")
   .option("--token <token>", "Personal Access Token để clone repo PRIVATE qua HTTPS (không hỏi mật khẩu)")
   .option("--ssh-key <path>", "deploy key để clone repo PRIVATE qua SSH — đường dẫn file HOẶC nội dung key")
   .addOption(new Option("--runtime <runtime>", "runtime chạy app").choices(["node", "bun"]).default("node"))
@@ -264,9 +274,9 @@ app
     "đặt ADDRESS_HEADER/XFF_DEPTH cho SvelteKit adapter-node — CHỈ dùng khi app KHÔNG tự phân giải IP khách (xem README)"
   )
   .addOption(dbCreateOpt("app"))
-  .option("--redis", "cấp Redis DB riêng cho app (0-15)")
-  .option("--redis-db <n>", "dùng Redis DB CHỈ ĐỊNH (cho phép dùng CHUNG với đơn vị khác)", (v) => parseInt(v, 10))
-  .option("--share-redis-with <domain|name>", "dùng CHUNG Redis DB với app/service đã có (bắt buộc cho cặp web + worker)")
+  .option("--redis", "cấp Redis RIÊNG cho app (tiến trình riêng, có mật khẩu)")
+  .option("--redis-db <n>", "KIỂU CŨ: dùng DB index trên Redis dùng chung (không mật khẩu, không cô lập)", (v) => parseInt(v, 10))
+  .option("--share-redis-with <domain|name>", "dùng CHUNG Redis với app/service đã có (bắt buộc cho cặp web + worker)")
   .option("--app-dir <path>", "monorepo: thư mục con chứa app, tương đối so với mã nguồn (vd 'apps/backend')")
   .option("--max-body <size>", "client_max_body_size của nginx (mặc định 20M; tăng nếu app cho upload file lớn)")
   .option("--static-root <dir>", "thư mục asset build để NGINX trả thẳng thay vì qua Node (vd '<webRoot>/build/client')")
@@ -294,6 +304,7 @@ app
       port: opts.port,
       repo: opts.repo,
       branch: opts.branch,
+      allowInsecureRepo: Boolean(opts.allowInsecureRepo),
       token: opts.token,
       sshKey: opts.sshKey,
       runtime: opts.runtime,
@@ -454,6 +465,7 @@ service
   .option("--port <port>", "cổng nội bộ (mặc định: KHÔNG cấp; chỉ đặt khi service tự bind, vd health-check)", (v) => parseInt(v, 10))
   .option("--repo <url>", "git repo để clone (bỏ trống để tạo worker mẫu rỗng)")
   .option("--branch <branch>", "branch git", "main")
+  .option("--allow-insecure-repo", "cho phép repo http:// hoặc git:// (KHÔNG mã hoá — chỉ dùng trong mạng nội bộ tin cậy)")
   .option("--token <token>", "Personal Access Token để clone repo PRIVATE qua HTTPS (không hỏi mật khẩu)")
   .option("--ssh-key <path>", "deploy key để clone repo PRIVATE qua SSH — đường dẫn file HOẶC nội dung key")
   .addOption(new Option("--runtime <runtime>", "runtime chạy service").choices(["node", "bun"]).default("node"))
@@ -462,9 +474,9 @@ service
   .option("--build-cmd <cmd>", "lệnh build (vd: 'npm run build')")
   .option("--start-cmd <cmd>", "lệnh khởi động (mặc định 'npm start' theo package.json; vd: 'node worker.js')")
   .addOption(dbCreateOpt("service"))
-  .option("--redis", "cấp Redis DB riêng cho service (0-15)")
-  .option("--redis-db <n>", "dùng Redis DB CHỈ ĐỊNH (cho phép dùng CHUNG với đơn vị khác)", (v) => parseInt(v, 10))
-  .option("--share-redis-with <domain|name>", "dùng CHUNG Redis DB với app/service đã có — BẮT BUỘC nếu service này tiêu thụ hàng đợi của một web app")
+  .option("--redis", "cấp Redis RIÊNG cho service (tiến trình riêng, có mật khẩu)")
+  .option("--redis-db <n>", "KIỂU CŨ: dùng DB index trên Redis dùng chung (không mật khẩu, không cô lập)", (v) => parseInt(v, 10))
+  .option("--share-redis-with <domain|name>", "dùng CHUNG Redis với app/service đã có — BẮT BUỘC nếu service này tiêu thụ hàng đợi của một web app")
   .option("--app-dir <path>", "monorepo: thư mục con chứa worker, tương đối so với mã nguồn (vd 'apps/worker')")
   .option(
     "--run-as <domain|name>",
@@ -477,6 +489,7 @@ service
       port: opts.port,
       repo: opts.repo,
       branch: opts.branch,
+      allowInsecureRepo: Boolean(opts.allowInsecureRepo),
       token: opts.token,
       sshKey: opts.sshKey,
       runtime: opts.runtime,
@@ -667,17 +680,25 @@ engineSet(dbEngine.command("set <engines>"));
 legacy(dbEngine, "select <engines>", "db engine set <engines>", engineSet);
 
 // --------------------------------------------------------------- redis ---
-const redis = program.command("redis").description("Redis dùng chung (mỗi app/service một DB index 0-15)");
-const redisShow = (c: Command) => c.description("xem INFO memory của Redis").action(() => cmdRedisInfo());
-redisShow(redis.command("show"));
-legacy(redis, "info", "redis show", redisShow);
-const redisDb = redis.command("db").description("các Redis DB index (0-15)");
-const redisDbList = (c: Command) => c.description("DB index nào đang cấp cho app/service nào").action(() => cmdRedisAllocations());
+const redis = program.command("redis").description("Redis: mỗi app (và worker dùng chung) một Redis RIÊNG có mật khẩu");
+redis.command("list").description("mọi Redis riêng + đơn vị còn dùng Redis dùng chung kiểu cũ").action(() => cmdRedisList());
+redis
+  .command("show [unit]")
+  .description("Redis của một app/service (bỏ trống = Redis dùng chung kiểu cũ)")
+  .action((unit) => cmdRedisShow(unit));
+legacy(redis, "info", "redis show", (c) => c.action(() => cmdRedisInfo()));
+redis
+  .command("migrate <unit>")
+  .description("chuyển app/service (cùng các worker dùng chung DB) từ Redis dùng chung sang Redis RIÊNG — giữ nguyên dữ liệu, dừng vài giây")
+  .addOption(yesOpt())
+  .action(async (unit, opts) => cmdRedisMigrate(unit, { yes: Boolean(opts.yes) }));
+const redisDb = redis.command("db").description("Redis DÙNG CHUNG kiểu cũ: các DB index 0-15");
+const redisDbList = (c: Command) => c.description("DB index nào đang cấp cho app/service nào (Redis dùng chung)").action(() => cmdRedisAllocations());
 redisDbList(redisDb.command("list"));
 legacy(redis, "allocations", "redis db list", redisDbList);
 const redisDbFlush = (c: Command) =>
   c
-    .description("xoá TOÀN BỘ dữ liệu trong một Redis DB index")
+    .description("xoá TOÀN BỘ dữ liệu trong một DB index của Redis dùng chung")
     .addOption(yesOpt())
     .action(async (dbIndex, opts) => cmdRedisFlush(parseInt(dbIndex, 10), { yes: Boolean(opts.yes) }));
 redisDbFlush(redisDb.command("flush <index>"));
@@ -904,8 +925,20 @@ memGuard
   });
 legacy(mem, "unguard <app|service>", "mem guard disable <app|service>", (c) => c.action((id) => cmdMemGuard(id, false)));
 
+// ---------------------------------------------------------------- audit ---
+const auditCmd = program.command("audit").description("nhật ký thao tác: ai đã làm gì qua napp, lúc nào, kết quả ra sao");
+auditCmd
+  .command("show")
+  .description("xem các thao tác gần nhất (bí mật đã được che)")
+  .option("-n, --last <n>", "số dòng", (v) => parseInt(v, 10), 50)
+  .action((opts) => cmdAuditShow({ last: opts.last }));
+
 // ------------------------------------------------------- update/version ---
-program.command("update").description("tự cập nhật napp lên bản mới nhất (OTA qua gist)").action(() => cmdUpdate());
+program
+  .command("update")
+  .description("tự cập nhật napp lên bản mới nhất (OTA qua gist) — chỉ cài bản có chữ ký hợp lệ")
+  .option("--allow-downgrade", "cho phép cài bản CŨ hơn bản đang chạy (mặc định từ chối, chống phát lại bản cũ có lỗ hổng)")
+  .action((opts) => cmdUpdate({ allowDowngrade: Boolean(opts.allowDowngrade) }));
 program.command("version").description("in phiên bản hiện tại").action(() => cmdVersion());
 program.command("changelog").description("xem lịch sử thay đổi").action(() => cmdChangelog());
 program.command("install").description("cài napp vào /usr/local/bin + banner chào mừng SSH").action(() => cmdInstallSelf());
@@ -919,7 +952,17 @@ if (process.argv.length <= 2) {
   });
 } else {
   program.exitOverride();
-  program.parseAsync(process.argv).catch((e) => {
+  program.parseAsync(process.argv).then(() => {
+    if (auditCommand) audit({ command: auditCommand, via: "cli", result: "ok" });
+  }).catch((e) => {
+    if (auditCommand) {
+      audit({
+        command: auditCommand,
+        via: "cli",
+        result: e instanceof PromptCancelled ? "cancelled" : "error",
+        error: e instanceof PromptCancelled ? undefined : (e as Error)?.message,
+      });
+    }
     if (e instanceof NappError) {
       printDie(e.message);
       process.exit(1);

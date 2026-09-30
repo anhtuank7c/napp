@@ -46,6 +46,10 @@ export interface AppRecord {
   dbUser?: string;
   // Engine của database trên. Bỏ trống = MariaDB (bản ghi từ trước khi có lựa chọn engine).
   dbEngine?: DbEngine;
+  // Redis RIÊNG (lib/redis.ts): id của instance mà đơn vị này dùng. Có giá trị thì
+  // redisDbIndex bỏ trống. redisDbIndex = kiểu CŨ: một DB index trên Redis dùng chung
+  // (không cô lập) — còn chạy được, chuyển sang Redis riêng bằng 'napp redis migrate'.
+  redisInstance?: string;
   redisDbIndex?: number;
   // Thư mục con chứa ứng dụng thật, TƯƠNG ĐỐI so với webRoot. Chỉ dùng cho
   // monorepo (vd "apps/backend"): mã nguồn vẫn clone nguyên repo vào webRoot,
@@ -111,6 +115,10 @@ export interface ServiceRecord {
   dbUser?: string;
   // Engine của database trên. Bỏ trống = MariaDB (bản ghi từ trước khi có lựa chọn engine).
   dbEngine?: DbEngine;
+  // Redis RIÊNG (lib/redis.ts): id của instance mà đơn vị này dùng. Có giá trị thì
+  // redisDbIndex bỏ trống. redisDbIndex = kiểu CŨ: một DB index trên Redis dùng chung
+  // (không cô lập) — còn chạy được, chuyển sang Redis riêng bằng 'napp redis migrate'.
+  redisInstance?: string;
   redisDbIndex?: number;
   // Như AppRecord.appDir — monorepo: WorkingDirectory/.env trỏ vào thư mục con.
   appDir?: string;
@@ -152,6 +160,8 @@ export interface NappState {
   dbEngines?: DbEngine[];
   // Engine dùng cho '--db' không kèm tên khi máy có nhiều engine.
   defaultDbEngine?: DbEngine;
+  // Redis riêng của từng nhóm app (lib/redis.ts). Mật khẩu KHÔNG nằm ở đây.
+  redisInstances?: Record<string, { port: number; owner: string; members: string[]; createdAt: string }>;
 }
 
 function emptyState(): NappState {
@@ -236,7 +246,7 @@ export function upsertApp(app: AppRecord): void {
  *
  * Gọi SAU khi đã xoá đơn vị khỏi state.
  */
-function releaseRedisDbIfUnused(s: NappState, index: number | undefined): void {
+export function releaseRedisDbIfUnused(s: NappState, index: number | undefined): void {
   if (index === undefined) return;
   const stillUsed =
     Object.values(s.apps).some((a) => a.redisDbIndex === index) ||
@@ -333,15 +343,16 @@ export interface UnitRef {
   id: string; // domain hoặc name
   user: string;
   root: string;
+  redisInstance?: string;
   redisDbIndex?: number;
 }
 
 export function findUnit(identifier: string): UnitRef | undefined {
   const s = loadState();
   const app = s.apps[identifier];
-  if (app) return { kind: "app", id: app.domain, user: app.user, root: app.webRoot, redisDbIndex: app.redisDbIndex };
+  if (app) return { kind: "app", id: app.domain, user: app.user, root: app.webRoot, redisInstance: app.redisInstance, redisDbIndex: app.redisDbIndex };
   const svc = s.services[identifier];
-  if (svc) return { kind: "service", id: svc.name, user: svc.user, root: svc.workDir, redisDbIndex: svc.redisDbIndex };
+  if (svc) return { kind: "service", id: svc.name, user: svc.user, root: svc.workDir, redisInstance: svc.redisInstance, redisDbIndex: svc.redisDbIndex };
   return undefined;
 }
 

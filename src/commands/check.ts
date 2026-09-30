@@ -1,4 +1,6 @@
 import { readFileSync, existsSync } from "node:fs";
+import { instances, instanceRunning, redisUnitFor } from "../lib/redis";
+import { ensureLogrotate, logrotateInstalled } from "../lib/logrotate";
 import { ask, checkbox } from "../lib/prompt";
 import { execCapture, runCmd, commandExists, requireRoot, isServiceActive, writeFile, ensureDir } from "../lib/exec";
 import { info, ok, warn, section, die } from "../lib/log";
@@ -644,6 +646,41 @@ export async function cmdCheck(opts: CheckOptions): Promise<void> {
     if (existsSync(path) && oldRe.test(readFileSync(path, "utf8"))) {
       info(`${path} còn gọi tên lệnh cũ (vẫn chạy bình thường). Muốn cập nhật: sudo ${again}`);
     }
+  }
+
+  // Redis riêng của từng nhóm app: phải đang chạy.
+  for (const [id, inst] of Object.entries(instances())) {
+    if (instanceRunning(id)) continue;
+    findings.push({
+      name: `redis-${id}`,
+      ok: false,
+      message: `Redis riêng '${id}' (dùng bởi ${inst.members.join(", ")}) KHÔNG chạy — các app đó mất cache/hàng đợi.`,
+      fix: () => runCmd("systemctl", ["enable", "--now", redisUnitFor(id)]),
+    });
+  }
+  // Đơn vị còn dùng Redis DÙNG CHUNG (không mật khẩu, mọi user trên máy đọc được).
+  // Chỉ báo, không tự sửa: chuyển cần dừng app vài giây — việc của người vận hành.
+  {
+    const st = loadState();
+    const legacy = [...Object.values(st.apps).filter((a) => a.redisDbIndex !== undefined).map((a) => a.domain), ...Object.values(st.services).filter((v) => v.redisDbIndex !== undefined).map((v) => v.name)];
+    if (legacy.length) {
+      warn(
+        `${legacy.length} đơn vị còn dùng Redis DÙNG CHUNG — CHƯA cô lập (app khác trên máy đọc/ghi được dữ liệu của chúng): ${legacy.join(", ")}.\n` +
+          `  Chuyển sang Redis riêng (dừng app vài giây, giữ nguyên dữ liệu): sudo napp redis migrate <app|service>`
+      );
+    }
+  }
+
+  // Xoay vòng log: thiếu là log app phình tới khi đầy đĩa.
+  if (existsSync("/var/log/napp")) {
+    if (logrotateInstalled()) ok("Log của app được xoay vòng (logrotate)");
+    else
+      findings.push({
+        name: "logrotate",
+        ok: false,
+        message: `Log app trong /var/log/napp KHÔNG được xoay vòng — một app nói nhiều sẽ làm đầy đĩa, kéo database và mọi app khác chết theo.`,
+        fix: ensureLogrotate,
+      });
   }
 
   // fail2ban
