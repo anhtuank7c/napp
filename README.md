@@ -90,7 +90,7 @@ bật** trên các app ĐANG CHẠY — những thứ không có lệnh nào t�
 sudo napp
 ```
 
-Dùng `↑`/`↓` rồi `Enter` để chọn, `Esc` để quay lại (ở menu chính, `Esc` hỏi "Thoát napp?" Có/Không, mặc định Không) (gõ số cũng được: số của mục rồi `Enter`; `0` là quay lại, ở menu chính `0` là thoát). Danh sách chọn nhiều: `Space` tick/bỏ tick, `a` tick/bỏ tất cả, `Enter` xác nhận. Menu chia theo
+Dùng `↑`/`↓` rồi `Enter` để chọn, `Esc` để quay lại (ở menu chính, `Esc` hỏi "Thoát napp?" Có/Không, mặc định Không) (gõ số cũng được: số của mục rồi `Enter`; gõ `0` làm đúng như `Esc`). Danh sách chọn nhiều: `Space` tick/bỏ tick, `a` tick/bỏ tất cả, `Enter` xác nhận. Menu chia theo
 **ngữ cảnh**: chọn **thứ** muốn làm việc trước (một app, một service, một tác vụ
 định kỳ), rồi mọi thao tác trên nó nằm cùng một chỗ — không phải chọn lại app ở
 mỗi bước.

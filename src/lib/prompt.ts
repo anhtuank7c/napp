@@ -267,10 +267,9 @@ function footerLine(parts: [string, string][], width: number): string {
   return "  " + use.map(([k, w]) => `\x1b[1;33m${k}\x1b[0m ${w}`).join(" \x1b[2m·\x1b[0m ");
 }
 
-function digitTarget(name: string, count: number, zeroIndex?: number): number | undefined {
+function digitTarget(name: string, count: number): number | undefined {
   if (!name.startsWith("digit:")) return undefined;
   const n = parseInt(name.slice(6), 10);
-  if (n === 0) return zeroIndex;
   return n >= 1 && n <= count ? n - 1 : undefined;
 }
 
@@ -279,8 +278,9 @@ const highlight = (s: string) => `\x1b[36;1m${visible(s)}\x1b[0m`;
 
 /**
  * Chọn MỘT mục bằng ↑/↓ + Enter. Esc = `escValue` nếu có (menu: quay lại),
- * không có thì là huỷ (PromptCancelled). `zeroIndex`: phím 0 nhảy tới mục này
- * (menu: "0. Quay lại" — giữ thói quen gõ 0 như trước).
+ * không có thì là huỷ (PromptCancelled). Ở terminal, phím 0 làm ĐÚNG như Esc —
+ * danh sách không cần dòng "0. Quay lại" nữa mà thói quen gõ 0 vẫn dùng được.
+ * `zeroIndex` chỉ dùng cho chế độ gõ số (pipe), nơi không có phím Esc.
  */
 export async function select<T>(opts: {
   message?: string;
@@ -317,14 +317,15 @@ export async function select<T>(opts: {
       ["Esc", opts.escValue !== undefined ? opts.escLabel ?? "quay lại" : "huỷ"],
       ["↑/↓", "di chuyển"],
       ["Enter", "chọn"],
-      ["0-9", "nhảy tới mục"],
+      ["1-9", "nhảy tới mục"],
     ],
     render: (cursor) => choices.map((c, i) => (i === cursor ? `${POINTER} ${highlight(c.label)}` : `  ${c.label}`)),
     onKey: (name, cursor) => {
-      const target = digitTarget(name, choices.length, opts.zeroIndex);
+      // "digit:0" chỉ xảy ra khi gõ RIÊNG số 0 (gõ "10" là "digit:10").
+      if (name === "escape" || name === "digit:0") return opts.escValue !== undefined ? { done: opts.escValue } : { cancel: true };
+      const target = digitTarget(name, choices.length);
       if (target !== undefined) return { move: target };
       if (name === "return" || name === "enter") return { done: choices[cursor]!.value };
-      if (name === "escape") return opts.escValue !== undefined ? { done: opts.escValue } : { cancel: true };
       return undefined;
     },
   })) as T;

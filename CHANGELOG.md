@@ -2,6 +2,12 @@
 
 Tất cả thay đổi đáng chú ý của `napp` được ghi lại ở đây.
 
+## 1.30.2
+
+- **Bỏ dòng "0. Quay lại" / "0. Thoát napp" ở mọi cấp menu** và mục "Huỷ" trong các danh sách chọn: dòng gợi ý phím đã nói rõ `Esc` làm gì ở từng màn hình. Gõ `0` vẫn làm **đúng như Esc** (menu con: quay lại; menu chính: hỏi "Thoát napp?"; danh sách chọn: huỷ) — thói quen cũ không mất. Gõ nhanh `1` rồi `0` vẫn là nhảy tới mục 10.
+
+- Chạy qua pipe/script (không có phím Esc) vẫn giữ dòng `0.` như trước.
+
 ## 1.30.1
 
 - **Gợi ý phím luôn nhìn thấy được, và nói đúng Esc làm gì ở màn hình đó:** `Esc quay lại` ở menu con, `Esc thoát napp` ở menu chính, `Esc huỷ` trong danh sách chọn, `Esc ở lại` trong câu hỏi thoát. Tên phím in đậm màu thay vì làm mờ cả dòng (nhiều terminal SSH hiển thị chữ mờ gần như vô hình). Terminal hẹp thì bỏ bớt gợi ý ít quan trọng — gợi ý Esc không bao giờ bị cắt.

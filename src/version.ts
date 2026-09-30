@@ -16,6 +16,11 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.30.2
+- Bỏ dòng "0. Quay lại / Thoát napp" ở mọi menu và mục "Huỷ" trong danh sách
+  chọn — gợi ý phím đã nói Esc làm gì. Gõ 0 vẫn làm đúng như Esc. Pipe/script
+  vẫn giữ dòng 0 như cũ.
+
 ## 1.30.1
 - Gợi ý phím luôn thấy được và nói đúng Esc làm gì: "Esc quay lại" / "Esc thoát
   napp" / "Esc huỷ". Terminal hẹp: bỏ gợi ý ít quan trọng, không cắt gợi ý Esc.

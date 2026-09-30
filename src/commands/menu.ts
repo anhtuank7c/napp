@@ -122,9 +122,13 @@ async function askChoice<T extends string>(label: string, options: readonly T[],
 
 // Chọn từ một danh sách có mục "Huỷ" ở cuối. Esc / chọn "Huỷ" / gõ 0 = undefined.
 async function pickOrCancel<T>(message: string, choices: { label: string; value: T }[]): Promise<T | undefined> {
-  const all: { label: string; value: T | undefined }[] = [...choices, { label: colorText("dim", "Huỷ"), value: undefined }];
+  // Terminal: không cần mục "Huỷ" — Esc (hoặc 0) là huỷ, dòng gợi ý phím nói rõ.
+  // Chế độ gõ số (pipe) không có Esc nên vẫn giữ mục "Huỷ" (gõ 0).
+  const all: { label: string; value: T | undefined }[] = interactive()
+    ? choices
+    : [...choices, { label: colorText("dim", "Huỷ"), value: undefined }];
   try {
-    return await select<T | undefined>({ message, choices: all, zeroIndex: all.length - 1 });
+    return await select<T | undefined>({ message, choices: all, zeroIndex: interactive() ? undefined : all.length - 1 });
   } catch (e) {
     if (e instanceof PromptCancelled && e.reason === "sigint") return undefined;
     throw e;
@@ -234,11 +238,10 @@ async function pickFromMenu(title: string, labels: string[], exitLabel: string, 
     return ask("Chọn: ");
   }
   printScreenTop(title, header);
-  const choices = [
-    ...labels.map((l, i) => ({ label: `${String(i + 1).padStart(2)}. ${l}`, value: String(i + 1) })),
-    { label: ` 0. ${exitLabel}`, value: "0" },
-  ];
-  const v = await select({ choices, initial: menuCursor.get(title) ?? 0, escValue, escLabel, zeroIndex: labels.length, summary: false });
+  // Không còn dòng "0. Quay lại / Thoát": dòng gợi ý phím đã nói Esc làm gì, và
+  // gõ 0 vẫn làm đúng như Esc (thói quen cũ không mất).
+  const choices = labels.map((l, i) => ({ label: `${String(i + 1).padStart(2)}. ${l}`, value: String(i + 1) }));
+  const v = await select({ choices, initial: menuCursor.get(title) ?? 0, escValue, escLabel, summary: false });
   const idx = Number(v);
   if (Number.isInteger(idx) && idx >= 1) menuCursor.set(title, idx - 1);
   return v;
