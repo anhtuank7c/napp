@@ -2,6 +2,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { execCapture, runCmd, commandExists, requireRoot, isServiceActive, writeFile, ensureDir } from "../lib/exec";
 import { info, ok, warn, section, die } from "../lib/log";
 import { REDIS_TUNING_PATH } from "../templates/tuning";
+import { aptGet } from "../lib/apt";
 import { loadState, NGINX_AVAILABLE, type AppRecord } from "../lib/state";
 import { cmdNginxSync, cmdNginxScanBlock, stripInlineProxyBuffers } from "./nginx";
 import { appLocationsPath, NGINX_SCANNER_BLOCK_CONF } from "../templates/nginx";
@@ -12,10 +13,26 @@ import { unitWorkDir } from "../templates/systemd";
 import { unitHasPriority } from "../lib/unitfile";
 import { allUnits, readUnitMemory, readSamples, analyseTrend, strayHeapSnapshots } from "../lib/memwatch";
 import { SYSTEMD_DIR, serviceNameFor, svcSystemdName } from "../lib/state";
+import {
+  DB_ENGINES,
+  DEFAULT_DB_ENGINE,
+  driverFor,
+  engineSelectionMade,
+  installedEngines,
+  parseEngineList,
+  selectedEngines,
+  setSelectedEngines,
+  unmanagedEngines,
+  exposedEngines,
+  exposureMessage,
+  type DbEngine,
+} from "../lib/db";
 
 export interface CheckOptions {
   fix: boolean;
   yes: boolean;
+  // Chọn database engine ngay trong lệnh check: "mariadb,postgresql" hoặc "none".
+  db?: string;
 }
 
 interface Finding {
@@ -48,35 +65,50 @@ async function confirm(question: string, autoYes: boolean): Promise<boolean> {
 function installNodejs(): void {
   info("Đang cài đặt Node.js 22.x LTS qua NodeSource...");
   runCmd("bash", ["-lc", "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -"]);
-  runCmd("apt-get", ["install", "-y", "nodejs"]);
+  aptGet(["install", "-y", "nodejs"]);
   runCmd("bash", ["-lc", "corepack enable || true"]);
   ok("Đã cài Node.js");
 }
 
 function installNginx(): void {
   info("Đang cài đặt nginx...");
-  runCmd("apt-get", ["update"]);
-  runCmd("apt-get", ["install", "-y", "nginx"]);
+  aptGet(["update"]);
+  aptGet(["install", "-y", "nginx"]);
   runCmd("systemctl", ["enable", "--now", "nginx"]);
   ok("Đã cài nginx");
 }
 
 function installCertbot(): void {
   info("Đang cài đặt certbot + plugin nginx...");
-  runCmd("apt-get", ["install", "-y", "certbot", "python3-certbot-nginx"]);
+  aptGet(["install", "-y", "certbot", "python3-certbot-nginx"]);
   ok("Đã cài certbot");
 }
 
-function installMariadb(): void {
-  info("Đang cài đặt MariaDB server...");
-  runCmd("apt-get", ["install", "-y", "mariadb-server", "mariadb-client"]);
-  runCmd("systemctl", ["enable", "--now", "mariadb"]);
-  ok("Đã cài MariaDB (khuyến nghị chạy 'sudo mysql_secure_installation' để đặt mật khẩu root)");
+// Hỏi chọn database engine — CHỈ lần đầu (chưa từng chọn, máy chưa có engine
+// nào) và chỉ khi có người ngồi trước terminal. '--yes' hoặc không có TTY ->
+// giữ mặc định MariaDB, đúng hành vi các bản trước.
+async function promptEngineSelection(): Promise<DbEngine[] | undefined> {
+  console.log();
+  console.log("Chọn database engine muốn cài (chọn nhiều thì cách nhau dấu phẩy, vd '1,3'):");
+  DB_ENGINES.forEach((e, i) => console.log(`  ${i + 1}. ${e}${e === DEFAULT_DB_ENGINE ? " (mặc định)" : ""}`));
+  console.log("  0. không dùng database");
+  const readline = await import("node:readline/promises");
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const ans = (await rl.question(`Lựa chọn [1]: `)).trim();
+  rl.close();
+  if (ans === "") return [DEFAULT_DB_ENGINE];
+  if (ans === "0") return [];
+  const mapped = ans
+    .split(/[,\s]+/)
+    .filter(Boolean)
+    .map((t) => (/^\d+$/.test(t) ? DB_ENGINES[parseInt(t, 10) - 1] ?? t : t))
+    .join(",");
+  return parseEngineList(mapped);
 }
 
 function installRedis(): void {
   info("Đang cài đặt Redis server...");
-  runCmd("apt-get", ["install", "-y", "redis-server"]);
+  aptGet(["install", "-y", "redis-server"]);
   runCmd("systemctl", ["enable", "--now", "redis-server"]);
   ok("Đã cài Redis");
 }
@@ -264,19 +296,19 @@ function uploadCandidates(): { app: AppRecord; dir: string; prefix: string }[] {
 
 function installFail2ban(): void {
   info("Đang cài đặt fail2ban...");
-  runCmd("apt-get", ["install", "-y", "fail2ban"]);
+  aptGet(["install", "-y", "fail2ban"]);
   runCmd("systemctl", ["enable", "--now", "fail2ban"]);
   ok("Đã cài fail2ban (chạy 'napp fail2ban setup' để áp cấu hình jail)");
 }
 
 function installUfw(): void {
   info("Đang cài đặt UFW...");
-  runCmd("apt-get", ["install", "-y", "ufw"]);
+  aptGet(["install", "-y", "ufw"]);
   ok("Đã cài UFW (chạy 'napp firewall sync' để bật và cấu hình)");
 }
 
 function installGit(): void {
-  runCmd("apt-get", ["install", "-y", "git"]);
+  aptGet(["install", "-y", "git"]);
   ok("Đã cài git");
 }
 
@@ -324,7 +356,7 @@ export async function cmdCheck(opts: CheckOptions): Promise<void> {
       name: "sudo",
       ok: false,
       message: "sudo chưa được cài (bắt buộc — napp dùng 'sudo -u <user>' để chạy lệnh cô lập theo từng app).",
-      fix: () => runCmd("apt-get", ["install", "-y", "sudo"]),
+      fix: () => aptGet(["install", "-y", "sudo"]),
     });
   }
 
@@ -521,25 +553,46 @@ export async function cmdCheck(opts: CheckOptions): Promise<void> {
         name: "certbot-nginx-plugin",
         ok: false,
         message: "certbot đã cài nhưng THIẾU plugin nginx.",
-        fix: () => runCmd("apt-get", ["install", "-y", "python3-certbot-nginx"]),
+        fix: () => aptGet(["install", "-y", "python3-certbot-nginx"]),
       });
     }
   } else {
     findings.push({ name: "certbot", ok: false, message: "certbot chưa được cài (cần cho SSL miễn phí).", fix: installCertbot });
   }
 
-  // MariaDB
-  if (isServiceActive("mariadb") || isServiceActive("mysql")) {
-    ok("MariaDB/MySQL đang chạy");
-  } else if (commandExists("mysqld") || commandExists("mariadbd")) {
-    findings.push({
-      name: "mariadb",
-      ok: false,
-      message: "MariaDB/MySQL đã cài nhưng chưa chạy.",
-      fix: () => runCmd("systemctl", ["enable", "--now", "mariadb"]),
-    });
-  } else {
-    findings.push({ name: "mariadb", ok: false, message: "MariaDB chưa cài (bắt buộc nếu dùng napp db).", fix: installMariadb });
+  // Database — chỉ những engine người dùng đã chọn (mặc định MariaDB). Engine
+  // đã gỡ bằng 'napp db engine remove' không còn trong danh sách nên --fix
+  // KHÔNG cài lại nó.
+  if (opts.db !== undefined) {
+    requireRoot();
+    setSelectedEngines(parseEngineList(opts.db));
+  } else if (opts.fix && !opts.yes && process.stdin.isTTY && !engineSelectionMade() && installedEngines().length === 0) {
+    const chosen = await promptEngineSelection();
+    if (chosen) setSelectedEngines(chosen);
+  }
+  const selected = selectedEngines();
+  if (selected.length === 0) ok("Database: không dùng (đã chọn) — thêm sau bằng 'napp db engine add <engine>'.");
+  for (const e of selected) {
+    const d = driverFor(e);
+    if (!d.isInstalled()) {
+      findings.push({
+        name: e,
+        ok: false,
+        message: `${d.label} chưa cài (engine đã chọn — không cần thì bỏ bằng 'napp check --db none' hoặc 'napp db engine remove ${e}').`,
+        fix: () => d.install(),
+      });
+    } else if (!d.isRunning()) {
+      findings.push({ name: e, ok: false, message: `${d.label} đã cài nhưng chưa chạy.`, fix: () => runCmd("systemctl", ["enable", "--now", d.unit()]) });
+    } else {
+      ok(`${d.label} đang chạy`);
+    }
+  }
+  // Không có --fix: bind-address là cấu hình người dùng CÓ THỂ cố ý đổi, và sửa
+  // sai là cắt kết nối của thứ gì đó ngoài máy mà napp không nhìn thấy.
+  for (const x of exposedEngines()) warn(exposureMessage(x));
+  const unmanaged = unmanagedEngines();
+  if (unmanaged.length > 0) {
+    info(`Đã cài nhưng napp KHÔNG quản lý: ${unmanaged.join(", ")} (không tune/backup/tự cài lại). Nhận quản lý: napp db engine add <engine>`);
   }
 
   // Redis
@@ -606,6 +659,7 @@ export async function cmdCheck(opts: CheckOptions): Promise<void> {
   if (!opts.fix) {
     console.log();
     info("Chạy lại với '--fix' (cần sudo) để napp tự cài/khởi động các thành phần còn thiếu.");
+    if (!engineSelectionMade()) info("Database mặc định là MariaDB — chọn engine khác: napp check --fix --db postgresql (hoặc mysql, mongodb, none; nhiều engine cách nhau dấu phẩy).");
     return;
   }
 

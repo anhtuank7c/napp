@@ -32,6 +32,7 @@ import {
 import { cmdDomainAdd, cmdDomainRemove, cmdDomainList } from "./commands/domain";
 import { cmdCertIssue, cmdCertRenew, cmdCertRevoke, cmdCertList, cmdCertStatus } from "./commands/cert";
 import { cmdDbCreate, cmdDbDrop, cmdDbList, cmdDbBackup } from "./commands/db";
+import { cmdDbEngineList, cmdDbEngineAdd, cmdDbEngineRemove, cmdDbEngineDefault, cmdDbEngineSelect } from "./commands/dbengine";
 import { cmdRedisInfo, cmdRedisAllocations, cmdRedisFlush } from "./commands/redis";
 import { cmdBackupRun, cmdBackupList, cmdBackupSchedule, cmdBackupUnschedule, DEFAULT_RETENTION_DAYS, type BackupTarget } from "./commands/backup";
 import { cmdFirewallSync, cmdFirewallStatus } from "./commands/firewall";
@@ -49,7 +50,7 @@ const program = new Command();
 
 program
   .name("napp")
-  .description("napp — quản lý server lưu trữ nhiều ứng dụng Node.js/Bun (domain, SSL, systemd, MariaDB, Redis, nginx, fail2ban, UFW, Cloudflare, backup, tối ưu phần cứng, OTA update)")
+  .description("napp — quản lý server lưu trữ nhiều ứng dụng Node.js/Bun (domain, SSL, systemd, database MariaDB/MySQL/PostgreSQL/MongoDB, Redis, nginx, fail2ban, UFW, Cloudflare, backup, tối ưu phần cứng, OTA update)")
   .version(NAPP_VERSION, "-V, --version")
   .option("--dry-run", "chỉ in ra các bước sẽ thực hiện, không thay đổi gì thật")
   .option("--verbose", "in chi tiết các lệnh hệ thống được thực thi")
@@ -70,6 +71,8 @@ program.addHelpText(
 Bắt đầu nhanh:
   sudo napp                      mở menu tương tác (gõ số, 0 để quay lại)
   sudo napp check --fix          kiểm tra + tự cài thành phần còn thiếu
+                                 (database mặc định MariaDB; chọn khác: --db postgresql
+                                  | mysql | mongodb | none, nhiều engine: --db mariadb,mongodb)
   sudo napp app create <domain> --repo <url> --db --redis
   sudo napp cert issue <domain> --email <email>
   sudo napp tune apply           tối ưu theo phần cứng (chạy lại khi nâng cấp server)
@@ -134,10 +137,11 @@ Chi tiết từng lệnh: napp <lệnh> --help · lịch sử thay đổi: napp 
 // ---------------------------------------------------------------- check ---
 program
   .command("check")
-  .description("kiểm tra môi trường máy chủ (Node.js, nginx, certbot, MariaDB, Redis, fail2ban, UFW) + phát hiện cấu hình Redis/nginx đã lỗi thời")
+  .description("kiểm tra môi trường máy chủ (Node.js, nginx, certbot, database, Redis, fail2ban, UFW) + phát hiện cấu hình Redis/nginx đã lỗi thời")
   .option("--fix", "tự cài đặt/khởi động các thành phần còn thiếu (cần sudo)")
   .option("-y, --yes", "không hỏi xác nhận khi dùng --fix")
-  .action(async (opts) => cmdCheck({ fix: Boolean(opts.fix), yes: Boolean(opts.yes) }));
+  .option("--db <engines>", "chọn database engine: mariadb (mặc định), mysql, postgresql, mongodb, hoặc 'none'; nhiều engine cách nhau dấu phẩy")
+  .action(async (opts) => cmdCheck({ fix: Boolean(opts.fix), yes: Boolean(opts.yes), db: opts.db }));
 
 // ----------------------------------------------------------------- doctor ---
 // Khác 'check' (môi trường ĐỦ chưa) — 'doctor' hỏi môi trường AN TOÀN chưa:
@@ -204,7 +208,7 @@ app
     "--address-header",
     "đặt ADDRESS_HEADER/XFF_DEPTH cho SvelteKit adapter-node — CHỈ dùng khi app KHÔNG tự phân giải IP khách (xem README)"
   )
-  .option("--db", "tạo kèm database MariaDB riêng cho app")
+  .option("--db [engine]", "tạo kèm database riêng cho app (engine: mariadb | mysql | postgresql | mongodb; bỏ trống = engine mặc định/duy nhất đang cài)")
   .option("--redis", "cấp Redis DB riêng cho app (0-15)")
   .option("--redis-db <n>", "dùng Redis DB CHỈ ĐỊNH (cho phép dùng CHUNG với đơn vị khác)", (v) => parseInt(v, 10))
   .option("--share-redis-with <domain|name>", "dùng CHUNG Redis DB với app/service đã có (bắt buộc cho cặp web + worker)")
@@ -248,6 +252,7 @@ app
       buildCmd: opts.buildCmd,
       startCmd: opts.startCmd,
       db: Boolean(opts.db),
+      dbEngine: typeof opts.db === "string" ? opts.db : undefined,
       redis: Boolean(opts.redis),
       redisDb: opts.redisDb,
       shareRedisWith: opts.shareRedisWith,
@@ -378,7 +383,7 @@ service
   .option("--install-cmd <cmd>", "lệnh cài dependencies (mặc định theo package manager)")
   .option("--build-cmd <cmd>", "lệnh build (vd: 'npm run build')")
   .option("--start-cmd <cmd>", "lệnh khởi động (mặc định 'npm start' theo package.json; vd: 'node worker.js')")
-  .option("--db", "tạo kèm database MariaDB riêng cho service")
+  .option("--db [engine]", "tạo kèm database riêng cho service (engine: mariadb | mysql | postgresql | mongodb; bỏ trống = engine mặc định/duy nhất đang cài)")
   .option("--redis", "cấp Redis DB riêng cho service (0-15)")
   .option("--redis-db <n>", "dùng Redis DB CHỈ ĐỊNH (cho phép dùng CHUNG với đơn vị khác)", (v) => parseInt(v, 10))
   .option("--share-redis-with <domain|name>", "dùng CHUNG Redis DB với app/service đã có — BẮT BUỘC nếu service này tiêu thụ hàng đợi của một web app")
@@ -407,6 +412,7 @@ service
       buildCmd: opts.buildCmd,
       startCmd: opts.startCmd,
       db: Boolean(opts.db),
+      dbEngine: typeof opts.db === "string" ? opts.db : undefined,
       redis: Boolean(opts.redis),
       redisDb: opts.redisDb,
       shareRedisWith: opts.shareRedisWith,
@@ -516,16 +522,52 @@ cert
   .action(async (domain, opts) => cmdCertRevoke(domain, { yes: Boolean(opts.yes) }));
 
 // ------------------------------------------------------------------- db ---
-const db = program.command("db").description("quản lý database MariaDB độc lập");
-db.command("create <name>").description("tạo database + user riêng").option("--user <user>", "tên user CSDL (mặc định trùng tên database)").action((name, opts) => cmdDbCreate(name, opts.user));
+const db = program.command("db").description("quản lý database (MariaDB / MySQL / PostgreSQL / MongoDB) và các database engine");
+const engineOpt = () => new Option("--engine <engine>", "database engine (bỏ trống = engine mặc định/duy nhất đang cài)");
+db
+  .command("create <name>")
+  .description("tạo database + user riêng")
+  .option("--user <user>", "tên user CSDL (mặc định trùng tên database)")
+  .addOption(engineOpt())
+  .action((name, opts) => cmdDbCreate(name, { user: opts.user, engine: opts.engine }));
 db
   .command("drop <name>")
   .description("xoá database")
   .option("-y, --yes", "không hỏi xác nhận")
   .option("--user <user>", "xoá luôn user CSDL này")
-  .action(async (name, opts) => cmdDbDrop(name, { yes: Boolean(opts.yes), user: opts.user }));
-db.command("list").description("liệt kê database").action(() => cmdDbList());
-db.command("backup <name>").description("dump database ra file .sql.gz").action((name) => cmdDbBackup(name));
+  .addOption(engineOpt())
+  .action(async (name, opts) => cmdDbDrop(name, { yes: Boolean(opts.yes), user: opts.user, engine: opts.engine }));
+db
+  .command("list")
+  .description("liệt kê database (mặc định: mọi engine đã cài)")
+  .option("--engine <engine>", "chỉ liệt kê một engine")
+  .action((opts) => cmdDbList({ engine: opts.engine }));
+db
+  .command("backup <name>")
+  .description("dump một database ra file nén")
+  .addOption(engineOpt())
+  .action((name, opts) => cmdDbBackup(name, { engine: opts.engine }));
+
+const dbEngine = db.command("engine").description("chọn / cài / gỡ database engine (mặc định: mariadb)");
+dbEngine.command("list").description("các engine hỗ trợ: đã chọn, đã cài, đang chạy, app nào đang dùng").action(() => cmdDbEngineList());
+dbEngine
+  .command("add <engine...>")
+  .description("cài (nếu chưa có) và giao cho napp quản lý: mariadb | mysql | postgresql | mongodb")
+  .option("--default", "đặt làm engine mặc định cho '--db' không kèm tên")
+  .option("-y, --yes", "không hỏi xác nhận")
+  .action(async (engines, opts) => cmdDbEngineAdd(engines, { default: Boolean(opts.default), yes: Boolean(opts.yes) }));
+dbEngine
+  .command("remove <engine>")
+  .description("gỡ engine — từ chối nếu còn app/service dùng nó; mặc định GIỮ dữ liệu trên đĩa")
+  .option("--force", "vẫn gỡ khi còn database không gắn với app nào (napp dump toàn bộ trước)")
+  .option("--purge", "xoá VĨNH VIỄN cả cấu hình và thư mục dữ liệu")
+  .option("-y, --yes", "không hỏi xác nhận (với --purge cần thêm --force)")
+  .action(async (engine, opts) => cmdDbEngineRemove(engine, { purge: Boolean(opts.purge), force: Boolean(opts.force), yes: Boolean(opts.yes) }));
+dbEngine.command("default <engine>").description("đặt engine mặc định cho '--db' không kèm tên").action((engine) => cmdDbEngineDefault(engine));
+dbEngine
+  .command("select <engines>")
+  .description("chỉ GHI NHẬN lựa chọn, không cài ('mariadb,postgresql' hoặc 'none') — 'napp check --fix' sẽ cài theo")
+  .action((engines) => cmdDbEngineSelect(engines));
 
 // --------------------------------------------------------------- redis ---
 const redis = program.command("redis").description("quản lý Redis dùng chung");
@@ -544,6 +586,7 @@ backup
   .description("chạy backup ngay (file nén gzip)")
   .addOption(new Option("--target <target>", "phạm vi backup").choices(["db", "files", "all"]).default("all"))
   .option("--database <name>", "chỉ backup một database cụ thể (mặc định: tất cả)")
+  .option("--engine <engine>", "engine của --database, hoặc chỉ backup một engine (mặc định: mọi engine napp quản lý)")
   .option("--keep-days <n>", "retention: giữ backup trong N ngày", (v) => parseInt(v, 10), DEFAULT_RETENTION_DAYS)
   .option("--keep <n>", "(tuỳ chọn) giữ tối đa N bản gần nhất bất kể ngày", (v) => parseInt(v, 10))
   .option("--quiet", "giảm log (dùng khi chạy từ systemd timer)")
@@ -551,6 +594,7 @@ backup
     cmdBackupRun({
       target: opts.target as BackupTarget,
       database: opts.database,
+      engine: opts.engine,
       keepDays: opts.keepDays,
       keepCount: opts.keep,
       quiet: Boolean(opts.quiet),
@@ -597,12 +641,12 @@ fail2ban.command("status").description("xem trạng thái các jail").action(() 
 fail2ban.command("unban <jail> <ip>").description("gỡ chặn một IP khỏi jail").action((jail, ip) => cmdFail2banUnban(jail, ip));
 
 // ----------------------------------------------------------------- tune ---
-const tune = program.command("tune").description("tối ưu nginx/MariaDB/Redis/sysctl theo phần cứng thực tế");
+const tune = program.command("tune").description("tối ưu nginx/database/Redis/sysctl theo phần cứng thực tế");
 tune.command("show").description("xem phần cứng phát hiện được + kế hoạch tối ưu (chưa áp dụng)").action(() => cmdTuneShow());
 tune
   .command("apply")
   .description("áp cấu hình tối ưu — chạy lại bất cứ khi nào nâng cấp phần cứng server")
-  .option("--db-ram-percent <n>", "ghi đè % RAM dành cho InnoDB buffer pool", (v) => parseInt(v, 10))
+  .option("--db-ram-percent <n>", "ghi đè % RAM dành cho database (TỔNG mọi engine, chia đều giữa các engine)", (v) => parseInt(v, 10))
   .option("-y, --yes", "không hỏi xác nhận")
   .option("--skip-restart", "chỉ ghi file cấu hình, không restart service")
   .option(

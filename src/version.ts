@@ -16,6 +16,35 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.27.0
+- MỚI: TỰ CHỌN DATABASE ENGINE — MariaDB (mặc định), MySQL, PostgreSQL, MongoDB;
+  cài một, vài, hoặc KHÔNG cài gì. Chưa từng chọn = MariaDB như trước, nên nâng
+  cấp napp không đổi gì trên server đang chạy.
+- Chọn lúc cài: 'curl ... | sudo NAPP_DB=postgresql bash', hoặc
+  'napp check --fix --db postgresql' ('none' = không dùng DB). Lần đầu check --fix
+  trên máy chưa có engine nào sẽ HỎI.
+- 'napp db engine list|add|remove|default|select'. '--db [engine]' cho app/service
+  create, '--engine' cho db create|drop|list|backup và backup run. Máy có nhiều
+  engine mà không chỉ định -> napp dừng lại bắt chọn, KHÔNG đoán.
+- .env có thêm DATABASE_URL (Prisma/Drizzle/TypeORM/Knex/Mongoose đọc thẳng).
+- MariaDB + MySQL bị chặn cài chung (xung đột apt, cùng cổng 3306, cùng datadir).
+- SỬA LỖI NGẦM: RAM cho DB bị giữ chỗ kể cả khi máy KHÔNG có DB -> heap V8 bị bóp
+  vô cớ. Nay 0 engine = 0%, nhiều engine CHIA NHAU cùng một phần (không cộng dồn).
+  Chạy 'sudo napp tune apply' để áp.
+- Gỡ engine an toàn: từ chối khi còn app dùng; DB lẻ cần --force và được dump
+  toàn bộ trước; mặc định GIỮ dữ liệu, chỉ --purge mới xoá (phải gõ tên engine).
+  Engine đã gỡ không bị check --fix cài lại.
+- MongoDB: kiểm tra AVX trước khi cài, BẬT xác thực ngay (mặc định của MongoDB là
+  tắt), đặt cache WiredTiger theo ngân sách RAM. Mật khẩu không nằm trong argv.
+- Trước khi cài engine: cổng mặc định đã bị chiếm (vd container Docker publish
+  5432) -> dừng và nêu tên tiến trình; thiếu đĩa -> dừng trước khi apt chạy.
+- Mọi lệnh apt chờ khoá dpkg (tối đa 5 phút) thay vì chết ngay khi
+  unattended-upgrades đang chạy — chuyện gần như chắc chắn gặp trên VPS mới.
+- check/doctor cảnh báo database lắng nghe ngoài 127.0.0.1 (kể cả cổng 33060
+  của MySQL), chỉ rõ dòng cấu hình cần sửa.
+- Backup tách thư mục theo engine (/var/backups/napp/db/<engine>/). SỬA LỖI: dump
+  dùng pipefail — trước đây mysqldump lỗi vẫn để lại file .sql.gz rỗng.
+
 ## 1.26.0
 - MỚI 'napp mem': phát hiện rò rỉ bộ nhớ TRƯỚC khi app chết, và chụp heap để tìm
   thủ phạm. Không sửa một dòng code nào của app.

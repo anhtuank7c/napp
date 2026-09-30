@@ -20,6 +20,10 @@
 #   NAPP_CJS_URL      URL raw của napp.cjs (mặc định: gist chính thức bên dưới)
 #   NODE_MAJOR        phiên bản Node.js LTS cài qua NodeSource (mặc định: 24)
 #   NAPP_INSTALL_BUN  cài bun runtime system-wide hay không (1=có mặc định, 0=bỏ qua)
+#   NAPP_DB           database engine muốn dùng: mariadb (mặc định), mysql, postgresql,
+#                     mongodb, nhiều engine cách nhau dấu phẩy, hoặc 'none'. Chỉ GHI NHẬN
+#                     lựa chọn — 'napp check --fix' mới cài. Ví dụ:
+#                       curl -fsSL .../install.sh | sudo NAPP_DB=postgresql bash
 # ==============================================================================
 set -euo pipefail
 NAPP_CJS_URL_DEFAULT="https://gist.githubusercontent.com/anhtuank7c/ef7ac27df205d70cf1f789bb420ec013/raw/napp.cjs"
@@ -159,12 +163,25 @@ ok "Đã cài napp vào $INSTALL_PATH"
 # napp install: thêm banner chào mừng SSH (không bắt buộc, bỏ qua nếu lỗi)
 "$INSTALL_PATH" install || true
 
+# Database engine: qua 'curl | sudo bash' thì stdin là chính script nên KHÔNG hỏi
+# được — lựa chọn đi bằng biến NAPP_DB. Không đặt -> 'napp check --fix' sẽ hỏi
+# (hoặc dùng MariaDB nếu chạy với --yes).
+if [[ -n "${NAPP_DB:-}" ]]; then
+  "$INSTALL_PATH" db engine select "$NAPP_DB" || warn "NAPP_DB='$NAPP_DB' không hợp lệ — bỏ qua (chọn lại sau: sudo napp check --fix --db <engine>)."
+fi
+
 echo
 ok "Hoàn tất! Chạy lệnh sau để kiểm tra môi trường máy chủ:"
 echo
 echo "    sudo napp check --fix"
 echo
+echo "Database mặc định là MariaDB. Muốn PostgreSQL / MySQL / MongoDB (hoặc không dùng DB):"
+echo
+echo "    sudo napp check --fix --db postgresql      # hoặc: mysql, mongodb, none, mariadb,mongodb"
+echo
 echo "Sau đó tạo app Node.js/Bun đầu tiên, ví dụ:"
 echo
 echo "    sudo napp app create api.example.com --repo git@github.com:you/app.git --db --redis"
+echo
+echo "(--db tạo database trên engine đang cài; máy có nhiều engine thì ghi rõ, vd --db postgresql)"
 echo

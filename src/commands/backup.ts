@@ -1,7 +1,8 @@
 import { readdirSync, statSync, unlinkSync, existsSync } from "node:fs";
 import { runCmd, requireRoot, ensureDir, writeFile, commandExists } from "../lib/exec";
 import { info, ok, warn, die, section } from "../lib/log";
-import { dumpAllDatabases, dumpDatabase, dbServiceRunning, dbExists, listDatabases } from "../lib/mysql";
+import { activeEngines, driverFor, parseEngine, resolveEngine } from "../lib/db";
+import { dbBackupDir } from "./db";
 import { loadState, BACKUP_ROOT, SYSTEMD_DIR } from "../lib/state";
 import { writeManagedUnit } from "../lib/unitfile";
 import { renderBackupService, renderBackupTimer } from "../templates/systemd";
@@ -26,8 +27,12 @@ export interface RetentionPolicy {
 // keepCount bản gần nhất. Một file bị xoá nếu vi phạm BẤT KỲ điều kiện nào.
 function pruneOldBackups(dir: string, policy: RetentionPolicy, log: (m: string) => void): void {
   if (!existsSync(dir)) return;
+  // Chỉ xét FILE: db/ nay có thư mục con theo engine (db/mariadb, db/postgresql...)
+  // bên cạnh các bản backup phẳng từ bản napp cũ.
   const files = readdirSync(dir)
-    .map((f) => ({ f, path: `${dir}/${f}`, mtime: statSync(`${dir}/${f}`).mtimeMs }))
+    .map((f) => ({ f, path: `${dir}/${f}`, st: statSync(`${dir}/${f}`) }))
+    .filter((x) => x.st.isFile())
+    .map((x) => ({ f: x.f, path: x.path, mtime: x.st.mtimeMs }))
     .sort((a, b) => b.mtime - a.mtime); // mới nhất trước
   const remove = new Set<string>();
   if (policy.keepDays > 0) {
@@ -50,6 +55,7 @@ export interface BackupRunOptions {
   keepDays: number; // retention theo ngày
   keepCount?: number; // (tuỳ chọn) trần số bản gần nhất
   database?: string; // chỉ backup một database cụ thể (bỏ trống = tất cả)
+  engine?: string; // engine của database trên / giới hạn backup vào một engine
   quiet?: boolean;
 }
 
@@ -61,23 +67,44 @@ export function cmdBackupRun(opts: BackupRunOptions): void {
   const policy: RetentionPolicy = { keepDays: opts.keepDays, keepCount: opts.keepCount };
 
   if (opts.target === "db" || opts.target === "all") {
-    if (!dbServiceRunning()) {
-      warn("MariaDB/MySQL không chạy — bỏ qua backup database.");
+    if (opts.database) {
+      // Backup MỘT database cụ thể (đã nén trong dump()).
+      const engine = resolveEngine(opts.engine);
+      const driver = driverFor(engine);
+      if (!driver.isRunning()) die(`${driver.label} không chạy — không backup được '${opts.database}'.`);
+      if (!driver.exists(opts.database)) die(`Database ${driver.label} '${opts.database}' không tồn tại.`);
+      const dir = dbBackupDir(engine);
+      ensureDir(dir, 0o750);
+      const outPath = `${dir}/${opts.database}-${ts}${driver.dumpExt}`;
+      log(`Đang backup database ${driver.label} '${opts.database}'...`);
+      driver.dump(opts.database, outPath);
+      ok(`Database: ${outPath}`);
+      pruneOldBackups(dir, policy, log);
     } else {
-      ensureDir(`${BACKUP_ROOT}/db`, 0o750);
-      if (opts.database) {
-        // Backup MỘT database cụ thể (đã nén gzip trong dumpDatabase).
-        if (!dbExists(opts.database)) die(`Database '${opts.database}' không tồn tại.`);
-        const outPath = `${BACKUP_ROOT}/db/${opts.database}-${ts}.sql.gz`;
-        log(`Đang backup database '${opts.database}'...`);
-        dumpDatabase(opts.database, outPath);
-        ok(`Database: ${outPath}`);
-      } else {
-        log("Đang backup toàn bộ database (mysqldump --all-databases, nén gzip)...");
-        const outPath = `${BACKUP_ROOT}/db/all-databases-${ts}.sql.gz`;
-        dumpAllDatabases(outPath);
-        ok(`Database: ${outPath}`);
+      // Toàn bộ database của MỌI engine napp đang quản lý. Một engine lỗi không
+      // được chặn các engine còn lại — backup chạy theo lịch, không ai ngồi xem.
+      const engines = opts.engine ? [parseEngine(opts.engine)] : activeEngines();
+      if (engines.length === 0) log("Không có database engine nào được cài — bỏ qua backup database.");
+      for (const engine of engines) {
+        const driver = driverFor(engine);
+        if (!driver.isRunning()) {
+          warn(`${driver.label} không chạy — bỏ qua backup database của engine này.`);
+          continue;
+        }
+        const dir = dbBackupDir(engine);
+        ensureDir(dir, 0o750);
+        const outPath = `${dir}/all-databases-${ts}${driver.dumpExt}`;
+        log(`Đang backup toàn bộ database ${driver.label}...`);
+        try {
+          driver.dumpAll(outPath);
+          ok(`Database (${driver.label}): ${outPath}`);
+        } catch (e) {
+          warn(`Backup ${driver.label} thất bại: ${(e as Error).message}`);
+        }
+        pruneOldBackups(dir, policy, log);
       }
+      // Bản backup phẳng từ bản napp cũ (trước khi chia thư mục theo engine)
+      // vẫn phải hết hạn theo cùng chính sách, không nằm lại mãi mãi.
       pruneOldBackups(`${BACKUP_ROOT}/db`, policy, log);
     }
   }
@@ -118,19 +145,27 @@ function humanSize(bytes: number): string {
 export function cmdBackupList(): void {
   section("Danh sách backup");
   let total = 0;
-  for (const sub of ["db", "files"]) {
-    const dir = `${BACKUP_ROOT}/${sub}`;
-    if (!existsSync(dir)) continue;
-    console.log(`  ${sub}/  (${dir})`);
-    const files = readdirSync(dir).sort();
-    if (files.length === 0) console.log("    (trống)");
+  const printDir = (label: string, dir: string) => {
+    const files = readdirSync(dir).filter((f) => statSync(`${dir}/${f}`).isFile()).sort();
+    if (files.length === 0) return;
+    console.log(`  ${label}  (${dir})`);
     for (const f of files) {
       const size = statSync(`${dir}/${f}`).size;
       total += size;
       console.log(`    - ${f.padEnd(48)} ${humanSize(size)}`);
     }
+  };
+  const dbDir = `${BACKUP_ROOT}/db`;
+  if (existsSync(dbDir)) {
+    printDir("db/", dbDir); // bản phẳng từ napp cũ
+    for (const sub of readdirSync(dbDir).sort()) {
+      if (statSync(`${dbDir}/${sub}`).isDirectory()) printDir(`db/${sub}/`, `${dbDir}/${sub}`);
+    }
   }
-  console.log(`\n  Tổng dung lượng backup: ${humanSize(total)}`);
+  if (existsSync(`${BACKUP_ROOT}/files`)) printDir("files/", `${BACKUP_ROOT}/files`);
+  if (total === 0) console.log("  (trống)");
+  console.log(`
+  Tổng dung lượng backup: ${humanSize(total)}`);
 }
 
 export interface BackupScheduleOptions {

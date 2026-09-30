@@ -11,7 +11,7 @@ cô lập hoàn toàn giữa các app, nginx chỉ đóng vai trò reverse-proxy
 
 - ✅ Quản lý domain (thêm/xoá) + domain phụ (alias) trỏ vào cùng app
 - 🔒 SSL miễn phí qua **certbot** (phát hành / gia hạn / thu hồi)
-- 🗄️ Tạo sẵn **database MariaDB** + **Redis DB riêng (0-15)** cho từng app (tùy chọn)
+- 🗄️ Tạo sẵn **database riêng** (MariaDB mặc định, hoặc MySQL / PostgreSQL / MongoDB — tự chọn, cài nhiều engine hoặc không cài gì) + **Redis DB riêng (0-15)** cho từng app (tùy chọn)
 - 👤 Mỗi app một **user Linux riêng**, systemd service riêng, thư mục riêng (750/640, `.env` 600)
 - 🌐 nginx reverse-proxy tự sinh, hỗ trợ **Cloudflare real-IP** (trích xuất đúng IP client thật)
 - ⚡ **Asset tĩnh do nginx trả thẳng** (`--auto-static`): napp nhận diện framework từ **thư mục build** (SvelteKit · Next.js · Nuxt · SolidStart · Astro · Remix · Vite), chọn đúng `root`/`alias` và tự cấp quyền đọc cho nginx — thay vì để hàng trăm chunk `.js`/`.css` xếp hàng trên event loop đơn luồng của Node
@@ -20,10 +20,10 @@ cô lập hoàn toàn giữa các app, nginx chỉ đóng vai trò reverse-proxy
 - 🚫 **Chặn quét lỗ hổng** (`napp nginx scanblock`): request dò CMS/framework PHP (`/wp-login.php`, `/wp-admin/`, `/phpmyadmin/`, `/cgi-bin/`) bị nginx trả **444** ngay, không vòng qua Node, và ghi sang **log riêng** để access log của site sạch trở lại — kèm jail fail2ban `napp-scanner` ban IP ngay ở tường lửa
 - 🛡️ **fail2ban**: sshd + nginx-botsearch/http-auth/limit-req + jail riêng chống spam 502/504/429
 - 💾 **Backup định kỳ** (database + mã nguồn) qua **systemd timer**, có xoay vòng retention
-- ⚙️ **Tối ưu theo phần cứng thực tế**: `napp tune apply` phát hiện CPU/RAM và điều chỉnh nginx/MariaDB/Redis/sysctl **và NODE_OPTIONS heap V8 cho từng app node** — chạy lại bất cứ khi nào nâng cấp server
+- ⚙️ **Tối ưu theo phần cứng thực tế**: `napp tune apply` phát hiện CPU/RAM và điều chỉnh nginx/database/Redis/sysctl **và NODE_OPTIONS heap V8 cho từng app node** — chạy lại bất cứ khi nào nâng cấp server
 - 🧠 **Phát hiện rò rỉ bộ nhớ TRƯỚC khi app chết** (`napp mem`): đếm số lần systemd âm thầm khởi động lại, theo dõi xu hướng bộ nhớ, và bật cờ Node tự chụp heap ngay trước khi OOM — mở bằng Chrome DevTools để tìm thủ phạm
 - 🥇 **Web app được ưu tiên hơn background service**: heap V8 chia theo trọng số (web gấp đôi worker) và `CPUWeight`/`IOWeight` ở systemd — một worker nén ảnh/video không còn làm chậm request của người dùng thật
-- 🔍 `napp check --fix`: kiểm tra + tự cài Node.js, nginx, certbot, MariaDB, Redis, fail2ban, UFW nếu thiếu
+- 🔍 `napp check --fix`: kiểm tra + tự cài Node.js, nginx, certbot, database engine đã chọn, Redis, fail2ban, UFW nếu thiếu
 - 🩺 **`napp doctor`**: soi **bản vá bảo mật đang chờ** (nginx, OpenSSL, OpenSSH…), dịch vụ còn chạy **thư viện cũ** sau khi vá, đối chiếu **CVE nổi bật của nginx**, vòng đời Node.js; quét **rủi ro chuỗi cung ứng** (dependency chain attack) trong dependencies của từng app/service — và `napp doctor upgrade` để lấy bản vá về
 - 🔄 Tự cập nhật (`napp update`) qua gist công khai, giống lara
 - 🇻🇳 Toàn bộ output tiếng Việt, menu tương tác dạng số
@@ -42,6 +42,12 @@ curl -fsSL "https://gist.githubusercontent.com/anhtuank7c/cc1e8194608e3f5a942d6d
 Script sẽ tự cài Node.js (qua NodeSource) nếu máy chưa có, rồi cài `napp` vào
 `/usr/local/bin/napp`. Xong, giờ gõ `sudo napp` ở bất cứ đâu để mở menu.
 
+Muốn chọn database ngay từ đầu (mặc định MariaDB — xem [Chọn database engine](#️-chọn-database-engine)):
+
+```bash
+curl -fsSL ".../install.sh" | sudo NAPP_DB=postgresql bash    # hoặc mysql, mongodb, none, mariadb,mongodb
+```
+
 > ⚠️ Trước khi dùng thật, hãy đăng `dist/napp.cjs` + `install.sh` lên một gist
 > **công khai** của bạn và sửa `<GIST_ID>` ở trên (xem mục [Tự lưu trữ / OTA
 > update](#-tự-lưu-trữ-gist--ota-update) bên dưới).
@@ -53,10 +59,12 @@ Script sẽ tự cài Node.js (qua NodeSource) nếu máy chưa có, rồi cài 
 ```bash
 sudo napp check          # chỉ kiểm tra, không thay đổi gì
 sudo napp check --fix    # tự cài/khởi động các thành phần còn thiếu
+sudo napp check --fix --db postgresql   # chọn database engine khác MariaDB (hoặc 'none')
 ```
 
-`napp` cần: **Node.js**, **sudo**, **git**, **nginx**. Tùy chọn: **MariaDB**
-(nếu dùng `--db`), **Redis** (nếu dùng `--redis`), **certbot + plugin nginx**
+`napp` cần: **Node.js**, **sudo**, **git**, **nginx**. Tùy chọn: **database
+engine** — MariaDB mặc định, hoặc MySQL / PostgreSQL / MongoDB (nếu dùng
+`--db`; lần đầu `check --fix` sẽ hỏi), **Redis** (nếu dùng `--redis`), **certbot + plugin nginx**
 (nếu dùng SSL), **fail2ban**, **UFW**. Lệnh `check` sẽ chỉ rõ thứ còn thiếu.
 
 Ngoài thành phần còn thiếu, `check` còn soi **cấu hình đã lỗi thời hoặc chưa
@@ -128,9 +136,10 @@ Gõ số rồi Enter, `0` để quay lại/thoát.
 | `sudo napp cert issue <domain> --email <email> [--no-www] [--no-redirect] [--extra <d>]` | Phát hành SSL (không tương tác; nhớ email cho lần sau) |
 | `sudo napp cert renew [<domain>] [--force]` | Gia hạn SSL |
 | `sudo napp cert revoke <domain>` / `list` / `status` | Thu hồi / liệt kê / trạng thái SSL |
-| `sudo napp db create\|drop\|backup <name>` / `list` | Database độc lập (ngoài `--db` của app) |
+| `sudo napp db create\|drop\|backup <name> [--engine <e>]` / `list` | Database độc lập (ngoài `--db` của app) |
+| `sudo napp db engine list\|add <e...>\|remove <e>\|default <e>` | Chọn / cài / gỡ database engine (xem [Chọn database engine](#️-chọn-database-engine)) |
 | `napp redis info\|allocations` / `sudo napp redis flush <n>` | Quản lý Redis |
-| `sudo napp backup run [--target db\|files\|all] [--database <name>] [--keep-days n]` | Backup ngay (nén gzip; chọn 1 DB hoặc tất cả) |
+| `sudo napp backup run [--target db\|files\|all] [--database <name>] [--engine <e>] [--keep-days n]` | Backup ngay (nén gzip; chọn 1 DB hoặc tất cả) |
 | `sudo napp backup schedule --time 03:00 --keep-days 14` | Lên lịch backup hàng ngày (retention theo ngày) qua systemd timer |
 | `sudo napp backup list` / `unschedule` | Danh sách backup (kèm dung lượng) / gỡ lịch |
 | `sudo napp firewall sync [--ssh-port n] [--restrict-cloudflare]` | Đồng bộ UFW (mặc định mở 80/443; `--restrict-cloudflare` để khoá origin theo IP Cloudflare) |
@@ -155,6 +164,68 @@ Gõ số rồi Enter, `0` để quay lại/thoát.
 
 ---
 
+## 🗄️ Chọn database engine
+
+MariaDB là **mặc định** (giữ nguyên hành vi các bản cũ), nhưng không bắt buộc.
+napp cài và quản lý được **MariaDB, MySQL, PostgreSQL, MongoDB** — một engine,
+vài engine, hoặc **không engine nào**.
+
+```bash
+sudo napp check --fix --db postgresql        # lần đầu: chọn engine rồi cài
+sudo napp check --fix --db none              # không dùng database
+sudo napp db engine list                     # engine nào: đã chọn / đã cài / đang chạy / app nào dùng
+sudo napp db engine add mongodb              # thêm engine sau này
+sudo napp db engine add postgresql --default # và đặt làm mặc định cho '--db'
+sudo napp db engine remove mariadb           # gỡ (mặc định GIỮ dữ liệu trên đĩa)
+
+sudo napp app create api.example.com --repo ... --db postgresql
+```
+
+| Engine | Nguồn cài | `DB_CONNECTION` | `DATABASE_URL` |
+|---|---|---|---|
+| `mariadb` (mặc định) | kho Ubuntu | `mysql` | `mysql://user:pass@127.0.0.1:3306/db` |
+| `mysql` | kho Ubuntu | `mysql` | `mysql://user:pass@127.0.0.1:3306/db` |
+| `postgresql` | kho Ubuntu (24.04 → 16) | `pgsql` | `postgresql://user:pass@127.0.0.1:5432/db` |
+| `mongodb` | kho chính thức MongoDB 8.0 | `mongodb` | `mongodb://user:pass@127.0.0.1:27017/db?authSource=db` |
+
+`.env` của app vẫn có đủ `DB_HOST/DB_PORT/DB_DATABASE/DB_USERNAME/DB_PASSWORD`
+như trước, thêm **`DATABASE_URL`** — biến mà Prisma, Drizzle, TypeORM, Knex,
+Mongoose đều đọc thẳng. Mỗi app một user CSDL riêng, **chỉ có quyền trên đúng
+database của nó** (MongoDB: `readWrite` trên đúng DB đó).
+
+**Những điều cần biết:**
+
+- **MariaDB và MySQL không cài cùng lúc được** — gói apt xung đột, cùng cổng 3306,
+  cùng `/var/lib/mysql`. napp chặn từ lúc chọn. Muốn chuyển: backup, gỡ engine cũ,
+  thêm engine mới, import lại.
+- **Lựa chọn được lưu** (`/etc/napp/state.json`). `check --fix` chỉ cài đúng các
+  engine đã chọn, và **không bao giờ cài lại** engine bạn đã gỡ. Engine cài tay
+  ngoài napp được báo là "không quản lý" và napp không đụng tới cho tới khi bạn
+  `napp db engine add` nó.
+- **RAM cho database là TỔNG, không phải mỗi engine.** Máy 4GB tier medium dành
+  40% cho DB: một engine được 40%, hai engine mỗi cái 20%. **Không có engine nào
+  thì 0%** — phần đó về tay heap của các app Node. Thêm/gỡ engine xong napp hỏi
+  có cân đối lại ngay không (việc này restart DB và app — chọn lúc thấp điểm).
+- **Gỡ engine an toàn theo mặc định:** từ chối nếu còn app/service dùng nó;
+  còn database không gắn với app nào thì phải thêm `--force` và napp **dump toàn
+  bộ** vào `/var/backups/napp/db/<engine>/` trước khi gỡ; `apt remove` giữ nguyên
+  dữ liệu. Chỉ `--purge` mới xoá thư mục dữ liệu, và phải gõ tên engine để xác nhận.
+- **MongoDB:** cần CPU có **AVX** (nhiều VPS giá rẻ dùng CPU ảo `kvm64` không có —
+  napp kiểm tra trước thay vì để mongod chết bằng `Illegal instruction`). Xác thực
+  của MongoDB **tắt theo mặc định**; napp bật ngay khi cài và giữ tài khoản quản trị
+  ở `/etc/napp/mongo-admin.json` (chỉ root đọc được). Cache WiredTiger được đặt
+  theo ngân sách RAM — mặc định của mongod (50% RAM − 1GB) sẽ bóp chết các app Node.
+- **Kiểm tra trước khi cài:** cổng mặc định (3306 / 5432 / 27017) đã bị chiếm
+  — thường là container Docker hoặc một database cài tay — thì napp dừng và nêu
+  tên tiến trình; thiếu đĩa cũng dừng trước khi apt chạy. Chưa hỗ trợ đổi cổng:
+  database chỉ lắng nghe 127.0.0.1 nên cổng mặc định không lộ ra ngoài.
+- **`check` / `doctor` cảnh báo** khi một database lắng nghe ngoài `127.0.0.1`.
+- **Backup** tách thư mục theo engine: `/var/backups/napp/db/<engine>/`
+  (`.sql.gz` cho MariaDB/MySQL/PostgreSQL, `.archive.gz` của `mongodump` cho MongoDB).
+- **App tạo bằng bản napp cũ** được hiểu là dùng MariaDB — không cần làm gì.
+
+---
+
 ## 🌱 Ví dụ: tạo một app Node.js kèm database + Redis + SSL
 
 ```bash
@@ -169,7 +240,7 @@ sudo napp app create api.example.com \
 
 - Tạo user hệ thống `na_api_example_com`, clone repo, cài deps, build
 - Tạo `/var/www/api.example.com`, systemd service `napp-api_example_com`, vhost nginx (HTTP)
-- Tạo sẵn database + user MariaDB, cấp một Redis DB riêng, ghi hết vào `.env`
+- Tạo sẵn database + user riêng (engine đang cài — máy có nhiều engine thì ghi rõ, vd `--db postgresql`), cấp một Redis DB riêng, ghi hết vào `.env` (kèm `DATABASE_URL`)
 
 **Repo private?** napp không hỏi mật khẩu tương tác (tránh treo) — truyền xác thực ngay khi tạo:
 
@@ -737,7 +808,7 @@ sudo napp doctor upgrade         # LẤY BẢN VÁ VỀ: cài bản vá bảo m�
 
 | Kiểm tra | Vì sao quan trọng |
 | --- | --- |
-| **Bản vá bảo mật đang chờ** | Đọc từ apt (`-security`), đánh dấu `!` cho gói trọng yếu: nginx, OpenSSL, OpenSSH, libc, MariaDB, Redis, Node.js, certbot… |
+| **Bản vá bảo mật đang chờ** | Đọc từ apt (`-security`), đánh dấu `!` cho gói trọng yếu: nginx, OpenSSL, OpenSSH, libc, MariaDB/MySQL/PostgreSQL/MongoDB, Redis, Node.js, certbot… |
 | **Dịch vụ còn nạp thư viện CŨ** | Cái bẫy kinh điển: `apt upgrade` xong tưởng đã an toàn, nhưng nginx vẫn giữ `libssl` cũ **trong RAM** cho tới khi restart. napp đọc `/proc/<pid>/maps` tìm thư viện `(deleted)` — không cần cài thêm gói nào |
 | **CVE nổi bật của nginx** | Đối chiếu bảng CVE kèm theo (CVE-2021-23017 RCE qua resolver, HTTP/2 Rapid Reset, mp4 module, mTLS session resumption…) rồi **kết luận bằng bằng chứng trên máy**: `[ĐÃ VÁ]` / `[KHÔNG DÍNH]` / mức độ cần chú ý |
 | **Vòng đời Node.js** | Bản EOL **không còn nhận bản vá nào nữa** — rủi ro lớn hơn một CVE lẻ vì vĩnh viễn không được sửa |
@@ -821,7 +892,7 @@ gợi ý nâng cấp OS hoặc chuyển sang [kho chính thức nginx.org](https
 
 ```bash
 sudo napp tune show     # xem phần cứng phát hiện được + kế hoạch (chưa áp dụng)
-sudo napp tune apply    # áp: nginx worker/gzip, MariaDB innodb_buffer_pool, Redis maxmemory, sysctl,
+sudo napp tune apply    # áp: nginx worker/gzip, database (theo từng engine), Redis maxmemory, sysctl,
                         # cân đối heap V8, và ƯU TIÊN TÀI NGUYÊN cho web app
 sudo napp tune apply --service-weight 0.3   # worker chỉ được 30% heap của web app
 sudo napp tune apply --sync-units           # + render lại toàn bộ unit systemd từ template

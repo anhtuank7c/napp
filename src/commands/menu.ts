@@ -17,7 +17,8 @@ import { getAcmeEmail, findUnit } from "../lib/state";
 import { cmdDbCreate, cmdDbList, cmdDbBackup } from "./db";
 import { cmdRedisAllocations, cmdRedisInfo } from "./redis";
 import { cmdBackupRun, cmdBackupSchedule, cmdBackupList, cmdBackupUnschedule, DEFAULT_RETENTION_DAYS } from "./backup";
-import { listDatabases } from "../lib/mysql";
+import { activeEngines, driverFor, DB_ENGINES, type DbEngine } from "../lib/db";
+import { cmdDbEngineList, cmdDbEngineAdd, cmdDbEngineRemove } from "./dbengine";
 import { cmdFirewallSync, cmdFirewallStatus } from "./firewall";
 import { cmdFail2banSetup, cmdFail2banStatus } from "./fail2ban";
 import { cmdTuneApply, cmdTuneShow } from "./tune";
@@ -126,23 +127,35 @@ async function askServiceName(actionLabel: string): Promise<string | undefined> 
   return undefined;
 }
 
-// Xổ danh sách database để chọn. Trả về tên DB, "__ALL__" nếu chọn tất cả, hoặc
-// undefined nếu huỷ / không có DB nào.
-async function askDatabase(actionLabel: string): Promise<string | "__ALL__" | undefined> {
-  const dbs = listDatabases();
+// Chọn một engine trong số engine napp đang quản lý. Chỉ có một -> trả luôn,
+// không hỏi. undefined = không có engine nào.
+async function askEngine(actionLabel: string): Promise<DbEngine | undefined> {
+  const engines = activeEngines();
+  if (engines.length === 0) {
+    warn("Chưa có database engine nào được cài — thêm ở menu Quản lý Database > Thêm database engine.");
+    return undefined;
+  }
+  if (engines.length === 1) return engines[0];
+  return askChoice<DbEngine>(`Database engine để ${actionLabel}`, engines, engines[0]!);
+}
+
+// Xổ danh sách database (mọi engine) để chọn. Trả về {engine, name}, "__ALL__"
+// nếu chọn tất cả, hoặc undefined nếu huỷ / không có DB nào.
+async function askDatabase(actionLabel: string): Promise<{ engine: DbEngine; name: string } | "__ALL__" | undefined> {
+  const dbs = activeEngines().flatMap((engine) => driverFor(engine).list().map((name) => ({ engine, name })));
   if (dbs.length === 0) {
-    warn("Không tìm thấy database nào (hoặc MariaDB chưa chạy / chưa kết nối được).");
+    warn("Không tìm thấy database nào (hoặc database engine chưa chạy / chưa kết nối được).");
     return undefined;
   }
   console.log(`Chọn database để ${actionLabel}:`);
-  dbs.forEach((d, i) => console.log(`  ${i + 1}. ${d}`));
+  dbs.forEach((d, i) => console.log(`  ${i + 1}. ${d.name}  (${driverFor(d.engine).label})`));
   console.log(`  a. TẤT CẢ database`);
   const ans = (await ask(`Chọn [1-${dbs.length} / a = tất cả] (0 = huỷ): `)).trim();
   if (!ans || ans === "0") return undefined;
   if (ans.toLowerCase() === "a") return "__ALL__";
   const n = parseInt(ans, 10);
   if (Number.isInteger(n) && n >= 1 && n <= dbs.length) return dbs[n - 1];
-  const byName = dbs.find((d) => d === ans);
+  const byName = dbs.find((d) => d.name === ans);
   if (byName) return byName;
   warn(`Lựa chọn không hợp lệ: '${ans}'.`);
   return undefined;
@@ -237,7 +250,7 @@ async function menuApp(): Promise<void> {
         // Mặc định package manager theo runtime: bun -> bun, node -> npm.
         const pmDefault: PackageManager = runtime === "bun" ? "bun" : "npm";
         const packageManager = await askChoice<PackageManager>("Trình quản lý gói phụ thuộc", ["npm", "pnpm", "yarn", "bun"], pmDefault);
-        const db = await askYesNo("Tạo database MariaDB riêng cho app này?");
+        const dbEngine = (await askYesNo("Tạo database riêng cho app này?")) ? await askEngine("tạo database") : undefined;
         const redis = await askYesNo("Cấp Redis DB riêng cho app này?");
         // Hỏi thay vì bật ngầm: napp chiếm tiền tố URL bằng 'location ^~', thứ
         // thắng cả proxy_pass. Người dùng phải BIẾT điều đó đang xảy ra.
@@ -249,7 +262,8 @@ async function menuApp(): Promise<void> {
           sshKey,
           runtime,
           packageManager,
-          db,
+          db: dbEngine !== undefined,
+          dbEngine,
           redis,
           autoStatic,
           env: [],
@@ -344,7 +358,7 @@ async function menuService(): Promise<void> {
         if (await askYesNo("Worker này có đọc/ghi FILE của một app web đã có không (nén ảnh, thumbnail, dọn cache)?")) {
           runAs = await askAppDomain("chạy chung user hệ thống (worker sẽ ghi được vào thư mục của app này)");
         }
-        const db = await askYesNo("Tạo database MariaDB riêng cho service này?");
+        const dbEngine = (await askYesNo("Tạo database riêng cho service này?")) ? await askEngine("tạo database") : undefined;
         const redis = await askYesNo("Cấp Redis DB riêng cho service này?");
         // Dùng chung user gần như luôn đi kèm dùng chung hàng đợi. Chỉ hỏi khi
         // app kia thật sự có Redis DB, tránh dẫn người dùng vào lựa chọn chết.
@@ -364,7 +378,8 @@ async function menuService(): Promise<void> {
           runtime,
           packageManager,
           port,
-          db,
+          db: dbEngine !== undefined,
+          dbEngine,
           redis,
           shareRedisWith,
           runAs,
@@ -445,12 +460,42 @@ async function menuCert(): Promise<void> {
 
 async function menuDb(): Promise<void> {
   while (true) {
-    printMenu("Quản lý Database", ["Danh sách database", "Tạo database mới", "Backup một database"]);
+    printMenu("Quản lý Database", [
+      "Danh sách database",
+      "Tạo database mới",
+      "Backup một database",
+      "Database engine: xem (đã cài / đang chạy / app nào dùng)",
+      "Thêm database engine (mariadb / mysql / postgresql / mongodb)",
+      "Gỡ database engine",
+    ]);
     const choice = await ask("Chọn: ");
     if (choice === "0" || choice === "") return;
     if (choice === "1") await guard(() => cmdDbList());
-    else if (choice === "2") await guard(async () => cmdDbCreate(await ask("Tên database: ")));
-    else if (choice === "3") await guard(async () => cmdDbBackup(await ask("Tên database: ")));
+    else if (choice === "2")
+      await guard(async () => {
+        const engine = await askEngine("tạo database");
+        if (engine) cmdDbCreate(await ask("Tên database: "), { engine });
+      });
+    else if (choice === "3")
+      await guard(async () => {
+        const db = await askDatabase("backup");
+        if (db && db !== "__ALL__") cmdDbBackup(db.name, { engine: db.engine });
+      });
+    else if (choice === "4") await guard(() => cmdDbEngineList());
+    else if (choice === "5")
+      await guard(async () => {
+        const engine = await askChoice<DbEngine>("Engine muốn thêm", DB_ENGINES, "postgresql");
+        await cmdDbEngineAdd([engine], { yes: false });
+      });
+    else if (choice === "6")
+      await guard(async () => {
+        const engines = activeEngines();
+        if (engines.length === 0) return warn("Không có engine nào để gỡ.");
+        const engine = await askChoice<DbEngine>("Engine muốn gỡ", engines, engines[0]!);
+        const purge = await askYesNo("XOÁ VĨNH VIỄN cả dữ liệu (--purge)? Chọn 'không' để giữ dữ liệu trên đĩa", false);
+        const force = await askYesNo("Vẫn gỡ nếu còn database không gắn với app nào (napp dump toàn bộ trước)?", false);
+        await cmdDbEngineRemove(engine, { purge, force, yes: false });
+      });
   }
 }
 
@@ -471,7 +516,7 @@ async function menuBackup(): Promise<void> {
         const db = await askDatabase("backup");
         if (!db) return;
         const keepDays = await askRetentionDays();
-        cmdBackupRun({ target: "db", database: db === "__ALL__" ? undefined : db, keepDays });
+        cmdBackupRun(db === "__ALL__" ? { target: "db", keepDays } : { target: "db", database: db.name, engine: db.engine, keepDays });
       });
     else if (choice === "2")
       await guard(async () => {
@@ -508,7 +553,7 @@ async function menuInfra(): Promise<void> {
       "Gỡ bảo vệ nginx (unharden)",
       "Đồng bộ cấu hình proxy nginx vào vhost đã có (bộ đệm — sửa 502 route sâu)",
       "Xem đề xuất tối ưu phần cứng",
-      "Áp tối ưu phần cứng (nginx/MariaDB/Redis/sysctl)",
+      "Áp tối ưu phần cứng (nginx/database/Redis/sysctl)",
       // Thêm vào CUỐI chứ không chèn cạnh các mục nginx ở trên: chèn giữa là
       // đánh số lại "Xem/Áp tối ưu phần cứng" — hai mục người dùng đã quen gõ.
       "Chặn quét lỗ hổng PHP/WordPress (.php, /wp-admin/ -> 444, log riêng)",

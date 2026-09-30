@@ -3,7 +3,6 @@ import { info, ok, warn, die, section } from "../lib/log";
 import { detectHardware, formatHardware, detectResourceControl, formatResourceControl } from "../lib/hardware";
 import {
   computeTuningPlan,
-  renderMariadbTuning,
   renderRedisTuning,
   renderSysctlTuning,
   serviceMemoryHighMB,
@@ -11,14 +10,56 @@ import {
   CPU_WEIGHT_SERVICE,
   IO_WEIGHT_WEB,
   IO_WEIGHT_SERVICE,
-  MARIADB_TUNING_PATH,
   REDIS_TUNING_PATH,
   SYSCTL_TUNING_PATH,
 } from "../templates/tuning";
 import { renderNginxTuningConf, NGINX_TUNING_CONF } from "../templates/nginx";
 import { loadState, saveState, serviceNameFor, svcSystemdName } from "../lib/state";
 import { applyNodeHeaps, syncAllUnits, reportBalance } from "./app";
+import { activeEngines, driverFor, unmanagedEngines } from "../lib/db";
+import type { HardwareProfile } from "../lib/hardware";
+import type { TuningPlan } from "../templates/tuning";
 import { readFileSync, existsSync } from "node:fs";
+
+/** In phần phân bổ RAM cho database — dùng chung cho `tune show` và `tune apply`. */
+function printDbPlan(hw: HardwareProfile, plan: TuningPlan): void {
+  const engines = activeEngines();
+  if (engines.length === 0) {
+    console.log(`  Database           : không có engine nào — 0% RAM dành cho DB, phần đó về heap của app Node`);
+  } else {
+    console.log(
+      `  Database           : ${plan.dbRamPercent}% RAM cho ${engines.length} engine` +
+        (engines.length > 1 ? ` — chia đều, mỗi engine ${plan.dbBudgetPerEngineMB} MB` : ` (${plan.dbBudgetPerEngineMB} MB)`)
+    );
+    for (const e of engines) {
+      const d = driverFor(e);
+      for (const line of d.describeTuning?.(hw, plan.dbBudgetPerEngineMB) ?? []) console.log(`    ${d.label.padEnd(11)}: ${line}`);
+    }
+  }
+  const unmanaged = unmanagedEngines();
+  if (unmanaged.length > 0) {
+    console.log(`    (đã cài nhưng napp KHÔNG quản lý, không tune: ${unmanaged.join(", ")} — xem 'napp db engine list')`);
+  }
+}
+
+/** Ghi cấu hình tuning cho mọi engine napp đang quản lý. */
+export function applyDbTuning(hw: HardwareProfile, plan: TuningPlan, opts: { skipRestart: boolean }): void {
+  const engines = activeEngines();
+  if (engines.length === 0) {
+    info("Không có database engine nào được cài — bỏ qua tuning database.");
+    return;
+  }
+  for (const e of engines) {
+    const d = driverFor(e);
+    if (!d.applyTuning) continue;
+    try {
+      d.applyTuning(hw, plan.dbBudgetPerEngineMB, opts);
+    } catch (err) {
+      // Một engine lỗi không được chặn các phần tuning còn lại.
+      warn(`Tuning ${d.label} thất bại: ${(err as Error).message}`);
+    }
+  }
+}
 
 /** Phần in chung về ưu tiên tài nguyên — dùng cho cả `tune show` và `tune apply`. */
 function printPriorityPlan(serviceHeapMB: number): void {
@@ -46,11 +87,10 @@ export function cmdTuneShow(): void {
   const mix = { webApps: Object.keys(st.apps).length, services: Object.keys(st.services).length };
   section("Phần cứng phát hiện được");
   console.log(formatHardware(hw));
-  const plan = computeTuningPlan(hw, undefined, mix, st.serviceHeapWeight);
+  const plan = computeTuningPlan(hw, undefined, mix, st.serviceHeapWeight, activeEngines().length);
   console.log();
   section("Kế hoạch tối ưu (chưa áp dụng — dùng `napp tune apply`)");
-  console.log(`  InnoDB buffer pool : ${plan.innodbBufferPoolMB} MB`);
-  console.log(`  MariaDB max_connections : ${plan.maxConnections}`);
+  printDbPlan(hw, plan);
   console.log(`  Redis maxmemory    : ${plan.redisMaxMemoryMB} MB (maxmemory-policy: noeviction — bắt buộc cho BullMQ)`);
   console.log(`  nginx worker_connections : ${plan.workerConnections}`);
   // Máy chưa có đơn vị nào: cả hai con số đều bị kẹp về trần của tier, in ra
@@ -174,12 +214,12 @@ export async function cmdTuneApply(opts: TuneApplyOptions): Promise<void> {
     st.serviceHeapWeight = opts.serviceWeight;
     saveState(st);
   }
-  const plan = computeTuningPlan(hw, opts.dbRamPercent, mix, st.serviceHeapWeight);
+  const plan = computeTuningPlan(hw, opts.dbRamPercent, mix, st.serviceHeapWeight, activeEngines().length);
 
   section("Tối ưu theo phần cứng thực tế");
   console.log(formatHardware(hw));
   console.log();
-  console.log(`  InnoDB buffer pool -> ${plan.innodbBufferPoolMB} MB`);
+  printDbPlan(hw, plan);
   console.log(`  Redis maxmemory    -> ${plan.redisMaxMemoryMB} MB (maxmemory-policy: noeviction — bắt buộc cho BullMQ)`);
   console.log(`  nginx worker_connections -> ${plan.workerConnections}`);
   console.log(
@@ -196,7 +236,7 @@ export async function cmdTuneApply(opts: TuneApplyOptions): Promise<void> {
   if (!opts.yes) {
     const readline = await import("node:readline/promises");
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    const ans = await rl.question("Áp dụng cấu hình trên và khởi động lại nginx/MariaDB/Redis + các app? [y/N] ");
+    const ans = await rl.question("Áp dụng cấu hình trên và khởi động lại nginx/database/Redis + các app? [y/N] ");
     rl.close();
     if (!/^y(es)?$/i.test(ans.trim())) {
       info("Đã huỷ. Không thay đổi gì.");
@@ -232,22 +272,8 @@ export async function cmdTuneApply(opts: TuneApplyOptions): Promise<void> {
     warn("nginx chưa cài — bỏ qua.");
   }
 
-  // MariaDB
-  if (commandExists("mysqld") || commandExists("mariadbd")) {
-    ensureDir("/etc/mysql/conf.d", 0o755);
-    writeFile(MARIADB_TUNING_PATH, renderMariadbTuning(hw, plan), 0o644);
-    if (!opts.skipRestart && isServiceActive("mariadb")) {
-      runCmd("systemctl", ["restart", "mariadb"]);
-      ok("Đã áp tuning cho MariaDB và khởi động lại.");
-    } else if (!opts.skipRestart && isServiceActive("mysql")) {
-      runCmd("systemctl", ["restart", "mysql"]);
-      ok("Đã áp tuning cho MySQL và khởi động lại.");
-    } else {
-      ok(`Đã ghi ${MARIADB_TUNING_PATH} — service chưa chạy nên chưa restart.`);
-    }
-  } else {
-    warn("MariaDB/MySQL chưa cài — bỏ qua.");
-  }
+  // Database — mọi engine napp đang quản lý, mỗi engine một phần ngân sách.
+  applyDbTuning(hw, plan, { skipRestart: opts.skipRestart });
 
   // Redis
   if (commandExists("redis-server")) {

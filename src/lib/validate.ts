@@ -59,9 +59,9 @@ export function validateEnvKey(key: string): void {
   }
 }
 
-export function validateDbName(name: string): void {
-  if (!/^[a-zA-Z0-9_]{1,64}$/.test(name)) {
-    die(`Tên database không hợp lệ: '${name}' (chỉ chữ, số, gạch dưới, tối đa 64 ký tự)`);
+export function validateDbName(name: string, maxLength = 64): void {
+  if (!/^[a-zA-Z0-9_]+$/.test(name) || name.length > maxLength) {
+    die(`Tên database không hợp lệ: '${name}' (chỉ chữ, số, gạch dưới, tối đa ${maxLength} ký tự)`);
   }
 }
 

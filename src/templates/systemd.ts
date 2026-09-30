@@ -78,7 +78,7 @@ function renderUnit(spec: UnitSpec): string {
 # Muốn khoá trước một directive: thêm dòng '# napp-preserve: Tên1 Tên2'.
 [Unit]
 Description=${spec.description}
-After=network.target mariadb.service redis-server.service
+After=network.target mariadb.service mysql.service postgresql.service mongod.service redis-server.service
 Wants=network-online.target
 StartLimitIntervalSec=60
 StartLimitBurst=5
@@ -193,7 +193,7 @@ export function renderBackupService(scriptPath: string): string {
   return `# Managed by napp — backup định kỳ (database + source code)
 [Unit]
 Description=napp scheduled backup (database + source code)
-After=network.target mariadb.service
+After=network.target mariadb.service mysql.service postgresql.service mongod.service
 
 [Service]
 Type=oneshot

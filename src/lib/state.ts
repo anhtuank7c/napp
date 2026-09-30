@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { writeFile, ensureDir, state as execState } from "./exec";
 import { die } from "./log";
+import type { DbEngine } from "./db/types";
 
 export const NAPP_ROOT = "/etc/napp";
 export const STATE_PATH = `${NAPP_ROOT}/state.json`;
@@ -43,6 +44,8 @@ export interface AppRecord {
   branch: string;
   dbName?: string;
   dbUser?: string;
+  // Engine của database trên. Bỏ trống = MariaDB (bản ghi từ trước khi có lựa chọn engine).
+  dbEngine?: DbEngine;
   redisDbIndex?: number;
   // Thư mục con chứa ứng dụng thật, TƯƠNG ĐỐI so với webRoot. Chỉ dùng cho
   // monorepo (vd "apps/backend"): mã nguồn vẫn clone nguyên repo vào webRoot,
@@ -106,6 +109,8 @@ export interface ServiceRecord {
   branch: string;
   dbName?: string;
   dbUser?: string;
+  // Engine của database trên. Bỏ trống = MariaDB (bản ghi từ trước khi có lựa chọn engine).
+  dbEngine?: DbEngine;
   redisDbIndex?: number;
   // Như AppRecord.appDir — monorepo: WorkingDirectory/.env trỏ vào thư mục con.
   appDir?: string;
@@ -141,6 +146,12 @@ export interface NappState {
   // mặc định và âm thầm lật ngược lựa chọn của người dùng — cùng loại trôi cấu
   // hình mà cả module unitfile.ts sinh ra để ngăn.
   serviceHeapWeight?: number;
+  // Database engine người dùng MUỐN có trên máy (xem lib/db/index.ts). Bỏ trống
+  // = chưa từng chọn -> coi như ["mariadb"], đúng hành vi các bản trước. Mảng
+  // rỗng = chủ động KHÔNG dùng database nào; `check --fix` sẽ không cài gì.
+  dbEngines?: DbEngine[];
+  // Engine dùng cho '--db' không kèm tên khi máy có nhiều engine.
+  defaultDbEngine?: DbEngine;
 }
 
 function emptyState(): NappState {

@@ -2,6 +2,34 @@
 
 Tất cả thay đổi đáng chú ý của `napp` được ghi lại ở đây.
 
+## 1.27.0
+
+- **Tự chọn database engine: MariaDB (mặc định), MySQL, PostgreSQL, MongoDB — cài một, vài, hoặc không cài gì.** Trước đây `napp check --fix` luôn cài MariaDB. Nay lựa chọn được lưu trong `/etc/napp/state.json`; chưa từng chọn thì vẫn là MariaDB, nên **nâng cấp napp không thay đổi gì trên server đang chạy**, và app tạo bằng bản cũ được hiểu là dùng MariaDB.
+
+- **Chọn lúc cài:** `curl ... | sudo NAPP_DB=postgresql bash` (qua `curl | bash` thì không hỏi được, nên chọn bằng biến môi trường), hoặc `napp check --fix --db postgresql` (`none` = không dùng database; nhiều engine cách nhau dấu phẩy). Lần đầu chạy `check --fix` trên máy chưa có engine nào, napp sẽ **hỏi**.
+
+- **`napp db engine list | add | remove | default | select`** — thêm, gỡ, xem engine nào đang được app nào dùng. `--db [engine]` trên `app create` / `service create`, `--engine` trên `db create|drop|list|backup` và `backup run`. Chỉ ghi `--db` trống: dùng engine mặc định, hoặc engine duy nhất đang có; máy có nhiều engine mà không chỉ định thì napp **dừng lại bắt chọn** chứ không đoán — tạo nhầm engine là app kết nối sai mà không báo gì cho tới lúc chạy.
+
+- **`.env` có thêm `DATABASE_URL`** (Prisma, Drizzle, TypeORM, Knex, Mongoose đều đọc thẳng). Các biến `DB_*` cũ vẫn giữ; `DB_CONNECTION` là `mysql` / `pgsql` / `mongodb`.
+
+- **MariaDB và MySQL bị chặn không cho cài cùng nhau**: gói apt xung đột, cùng cổng 3306, cùng `/var/lib/mysql` — cài cái sau là apt gỡ cái trước, kèm nguy cơ mất dữ liệu.
+
+- **Sửa lỗi ngầm: RAM dành cho database bị giữ chỗ kể cả khi máy KHÔNG có database.** `nodeHeapPlan` luôn trừ 25–50% RAM cho DB, nên máy không cài MariaDB vẫn bị bóp heap V8 vô cớ (máy 4GB: web app 524 MB thay vì 1179 MB). Nay phần đó theo đúng số engine đang chạy — **0 engine = 0%** — và là **TỔNG** cho mọi engine (hai engine chia đôi) chứ không cộng dồn, không thì hai engine đã nuốt gần hết RAM. Chạy `sudo napp tune apply` để áp.
+
+- **Gỡ engine an toàn theo mặc định:** từ chối khi còn app/service dùng nó; còn database không gắn với app nào thì cần `--force` và napp **dump toàn bộ** trước khi gỡ (dump lỗi = không gỡ); `apt remove` giữ nguyên dữ liệu; chỉ `--purge` mới xoá thư mục dữ liệu, và phải gõ tên engine để xác nhận. Engine đã gỡ **không bị `check --fix` cài lại**.
+
+- **PostgreSQL** từ kho Ubuntu (không thêm PGDG — bản vá đi theo `apt upgrade` và `napp doctor` đọc được). Quản trị qua peer auth (`sudo -u postgres`), không lưu mật khẩu superuser ở đâu. Mỗi app một role sở hữu database của mình, `REVOKE CONNECT` khỏi PUBLIC. Tuning ghi vào `conf.d/` của cluster.
+
+- **MongoDB 8.0** từ kho chính thức. Ba cái bẫy được chặn sẵn: CPU không có **AVX** (mongod chết ngay bằng `Illegal instruction` — napp kiểm tra trước khi cài); **xác thực tắt theo mặc định** (napp bật ngay, cả khi nhận quản lý một MongoDB đã cài tay); **cache WiredTiger mặc định 50% RAM − 1GB** bóp chết các app Node (napp đặt theo ngân sách). Mật khẩu quản trị không bao giờ nằm trong argv — script mongosh và cấu hình mongodump đều đi qua file `0600`.
+
+- **Kiểm tra trước khi cài engine:** cổng mặc định đã bị chiếm (hay gặp nhất: container Docker publish 5432/3306, hoặc một database cài tay) thì napp **dừng lại và nêu tên tiến trình** — thay vì để apt cài xong rồi service không khởi động được, lý do thật chôn trong `journalctl`. Thiếu đĩa cũng dừng trước khi apt chạy: hết đĩa giữa chừng để dpkg ở trạng thái hỏng.
+
+- **Chờ apt thay vì chết:** VPS mới khởi động có unattended-upgrades giữ khoá dpkg vài phút — mọi `apt-get install` lúc đó lỗi `Could not get lock` ngay, và đó là thứ người dùng gặp **đầu tiên** khi thử napp trên máy mới. Mọi lệnh apt của napp (kể cả `check --fix`, `doctor upgrade`) nay đợi tối đa 5 phút và nói rõ đang đợi tiến trình nào.
+
+- **`napp check` / `napp doctor` cảnh báo database lắng nghe ra ngoài 127.0.0.1** (kể cả engine napp không quản lý, và cổng X Protocol 33060 của MySQL) — chỉ ra đúng dòng cấu hình cần sửa. Cố ý không có `--fix`: có thể người dùng mở có chủ đích, sửa sai là cắt kết nối của thứ gì đó ngoài máy.
+
+- **Backup tách thư mục theo engine** (`/var/backups/napp/db/<engine>/`); một engine lỗi không chặn backup của engine khác. Bản backup phẳng từ bản cũ vẫn hết hạn theo cùng chính sách. **Sửa lỗi:** dump dùng `set -o pipefail` — trước đây `mysqldump` thất bại vẫn để lại một file `.sql.gz` rỗng và báo thành công.
+
 ## 1.26.0
 
 - **`napp mem`: phát hiện rò rỉ bộ nhớ *trước* khi app chết** — và chụp heap để tìm thủ phạm. Không sửa một dòng code nào của app.

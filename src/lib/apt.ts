@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { execCapture, commandExists } from "./exec";
+import { execCapture, commandExists, runCmd, state as execState, type RunResult } from "./exec";
+import { info, warn } from "./log";
 
 // --------------------------------------------------------------------------
 // Đọc trạng thái BẢN VÁ của hệ thống qua apt (Ubuntu/Debian).
@@ -23,7 +24,7 @@ export interface PendingUpdate {
 // Internet (nginx/openssh), xử lý dữ liệu không tin cậy (openssl/zlib/curl),
 // hoặc chạy mã ứng dụng (nodejs). Bản vá cho nhóm này cần ưu tiên cao hơn.
 const CRITICAL_PKG_RE =
-  /^(nginx|nginx-\w+|openssl|libssl[0-9.]*|libcrypto\S*|openssh-\S+|libc6|libc-bin|zlib1g|libcurl\S*|curl|nodejs|npm|mariadb-\S+|mysql-\S+|libmariadb\S*|redis\S*|certbot|python3-certbot\S*|sudo|systemd|libsystemd\S*|libexpat\S*|libxml2|libpcre\S*|git)$/;
+  /^(nginx|nginx-\w+|openssl|libssl[0-9.]*|libcrypto\S*|openssh-\S+|libc6|libc-bin|zlib1g|libcurl\S*|curl|nodejs|npm|mariadb-\S+|mysql-\S+|libmariadb\S*|postgresql\S*|libpq\S*|mongodb-\S+|redis\S*|certbot|python3-certbot\S*|sudo|systemd|libsystemd\S*|libexpat\S*|libxml2|libpcre\S*|git)$/;
 
 export function hasApt(): boolean {
   return commandExists("apt-get");
@@ -112,4 +113,52 @@ export function unitStaleLibraries(unit: string): string[] | undefined {
     stale.add(path);
   }
   return [...stale];
+}
+
+// --------------------------------------------------------------------------
+// Chờ khoá apt/dpkg.
+//
+// Cái bẫy gặp NGAY lần đầu trên VPS mới: unattended-upgrades chạy trong vài
+// phút đầu sau khi máy khởi động và giữ khoá dpkg — mọi 'apt-get install' lúc
+// đó chết ngay với "Could not get lock /var/lib/dpkg/lock-frontend". Người dùng
+// tưởng napp hỏng, trong khi chỉ cần đợi.
+//
+// Hai lớp: (1) tự đợi tới khi không còn tiến trình nào giữ khoá (bao cả khoá
+// danh sách gói mà 'apt-get update' cần), (2) DPkg::Lock::Timeout để apt tự
+// đợi thêm nếu có tiến trình giành khoá ngay giữa hai lệnh.
+// --------------------------------------------------------------------------
+
+export const APT_LOCK_TIMEOUT_S = 300;
+const APT_LOCKS = ["/var/lib/dpkg/lock-frontend", "/var/lib/dpkg/lock", "/var/lib/apt/lists/lock", "/var/cache/apt/archives/lock"];
+
+function aptLockHolders(): string[] {
+  // fuser (gói psmisc, có sẵn trên Ubuntu/Debian): mã 0 = có tiến trình đang giữ.
+  const res = execCapture("fuser", APT_LOCKS);
+  if (res.code !== 0) return [];
+  // fuser in PID ra stdout, đường dẫn file ra stderr — chỉ đọc stdout.
+  const pids = res.stdout.match(/[0-9]+/g) ?? [];
+  return [...new Set(pids)].map((pid) => {
+    const name = execCapture("ps", ["-o", "comm=", "-p", pid]).stdout.trim();
+    return name ? `${name} (pid ${pid})` : `pid ${pid}`;
+  });
+}
+
+export function waitForAptLocks(timeoutS = APT_LOCK_TIMEOUT_S): void {
+  if (execState.dryRun || !commandExists("fuser")) return;
+  let holders = aptLockHolders();
+  if (holders.length === 0) return;
+  info(`apt đang bận (${holders.join(", ")} — thường là unattended-upgrades trên máy mới khởi động). Đang chờ tối đa ${Math.round(timeoutS / 60)} phút...`);
+  const deadline = Date.now() + timeoutS * 1000;
+  while (holders.length > 0 && Date.now() < deadline) {
+    execCapture("sleep", ["3"]);
+    holders = aptLockHolders();
+  }
+  if (holders.length > 0) warn(`apt vẫn bận sau ${Math.round(timeoutS / 60)} phút (${holders.join(", ")}) — vẫn thử chạy tiếp.`);
+  else info("apt đã rảnh — tiếp tục.");
+}
+
+/** 'apt-get' đợi khoá thay vì chết ngay khi apt đang bận. Mọi lệnh apt thay đổi hệ thống nên đi qua đây. */
+export function aptGet(args: string[], opts: { silentFail?: boolean } = {}): RunResult {
+  waitForAptLocks();
+  return runCmd("apt-get", ["-o", `DPkg::Lock::Timeout=${APT_LOCK_TIMEOUT_S}`, ...args], opts);
 }

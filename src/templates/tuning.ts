@@ -1,13 +1,17 @@
 import type { HardwareProfile } from "../lib/hardware";
 
-export const MARIADB_TUNING_PATH = "/etc/mysql/conf.d/napp-tuning.cnf";
 export const REDIS_TUNING_PATH = "/etc/redis/conf.d/napp-tuning.conf";
 export const SYSCTL_TUNING_PATH = "/etc/sysctl.d/99-napp-tuning.conf";
 
 // Bảng tỷ lệ phân bổ RAM theo tier — vì server còn chạy Node apps + Redis +
-// nginx + OS song song với MariaDB, KHÔNG dành 70-80% RAM cho DB như một máy
+// nginx + OS song song với database, KHÔNG dành 70-80% RAM cho DB như một máy
 // chủ DB chuyên dụng. Tỷ lệ dưới đây thận trọng hơn, để lại chỗ cho các dịch
 // vụ khác. Người dùng có thể ghi đè bằng --db-ram-percent khi chạy tune apply.
+//
+// Đây là phần RAM cho TẤT CẢ database engine cộng lại, KHÔNG phải cho mỗi
+// engine: máy chạy MariaDB + PostgreSQL chia đôi con số này. Cộng dồn theo
+// từng engine thì hai engine đã nuốt 70-100% RAM. Không có engine nào -> 0%,
+// phần đó về tay heap của các app Node.
 const DB_RAM_PERCENT: Record<HardwareProfile["tier"], number> = {
   micro: 25, // máy rất nhỏ: ưu tiên OS + 1-2 app node sống sót trước
   small: 35,
@@ -25,7 +29,7 @@ const REDIS_RAM_PERCENT: Record<HardwareProfile["tier"], number> = {
 };
 
 // Heap V8 (--max-old-space-size) cho app node được CHIA SẺ theo số đơn vị đang
-// chạy: lấy "ngân sách RAM cho app" = RAM tổng − phần dành cho MariaDB/Redis/OS,
+// chạy: lấy "ngân sách RAM cho app" = RAM tổng − phần dành cho database/Redis/OS,
 // rồi chia theo TRỌNG SỐ, kẹp trong [sàn, trần theo tier]. Đây là GIỚI HẠN mỗi
 // đơn vị (V8 gom rác trước khi chạm), KHÔNG phải RAM đặt trước. Nhờ chia theo số
 // đơn vị, thêm/bớt app sẽ co giãn heap để tổng vừa với RAM (quan trọng trên máy nhỏ).
@@ -124,6 +128,8 @@ export interface NodeHeapPlan {
 
 export interface NodeHeapOptions {
   dbRamPercent?: number;
+  /** Số database engine đang được napp quản lý (đã chọn + đã cài). Bỏ trống = 1. */
+  dbEngines?: number;
   /** Trọng số heap của service so với web app (kẹp trong [0.1, 1]). */
   serviceWeight?: number;
 }
@@ -146,7 +152,7 @@ export interface NodeHeapOptions {
  */
 export function nodeHeapPlan(hw: HardwareProfile, mix: UnitMix, opts: NodeHeapOptions = {}): NodeHeapPlan {
   const serviceWeight = Math.min(1, Math.max(0.1, opts.serviceWeight ?? SERVICE_WEIGHT_DEFAULT));
-  const dbPercent = opts.dbRamPercent ?? DB_RAM_PERCENT[hw.tier];
+  const dbPercent = dbRamPercentFor(hw, opts.dbEngines ?? 1, opts.dbRamPercent);
   const budgetPercent = Math.max(15, 100 - dbPercent - REDIS_RAM_PERCENT[hw.tier] - NODE_OS_RESERVE_PERCENT[hw.tier]);
   const budgetMB = (hw.totalMemMB * budgetPercent) / 100;
 
@@ -163,67 +169,42 @@ export function nodeHeapPlan(hw: HardwareProfile, mix: UnitMix, opts: NodeHeapOp
   };
 }
 
+/** % RAM dành cho database (tổng mọi engine). 0 engine -> 0%. */
+export function dbRamPercentFor(hw: HardwareProfile, engineCount: number, override?: number): number {
+  if (engineCount <= 0) return 0;
+  return override ?? DB_RAM_PERCENT[hw.tier];
+}
+
 export interface TuningPlan {
-  innodbBufferPoolMB: number;
-  maxConnections: number;
-  tmpTableMB: number;
-  tableOpenCache: number;
+  dbRamPercent: number; // tổng % RAM cho mọi database engine
+  dbEngines: number;
+  dbBudgetPerEngineMB: number; // ngân sách RAM của MỖI engine
   redisMaxMemoryMB: number;
   workerConnections: number;
   heap: NodeHeapPlan;
 }
 
-export function computeTuningPlan(hw: HardwareProfile, dbRamPercentOverride?: number, mix: UnitMix = { webApps: 1, services: 0 }, serviceWeight?: number): TuningPlan {
-  const dbPercent = dbRamPercentOverride ?? DB_RAM_PERCENT[hw.tier];
+export function computeTuningPlan(
+  hw: HardwareProfile,
+  dbRamPercentOverride?: number,
+  mix: UnitMix = { webApps: 1, services: 0 },
+  serviceWeight?: number,
+  dbEngines = 1
+): TuningPlan {
+  const dbPercent = dbRamPercentFor(hw, dbEngines, dbRamPercentOverride);
   const redisPercent = REDIS_RAM_PERCENT[hw.tier];
-  const innodbBufferPoolMB = Math.round((hw.totalMemMB * dbPercent) / 100);
+  const dbBudgetPerEngineMB = dbEngines > 0 ? Math.round((hw.totalMemMB * dbPercent) / 100 / dbEngines) : 0;
   const redisMaxMemoryMB = Math.round((hw.totalMemMB * redisPercent) / 100);
-
-  const maxConnections = hw.tier === "micro" ? 50 : hw.tier === "small" ? 100 : hw.tier === "medium" ? 150 : hw.tier === "large" ? 250 : 400;
-  const tmpTableMB = hw.tier === "micro" ? 16 : hw.tier === "small" ? 32 : 64;
-  const tableOpenCache = hw.tier === "micro" ? 200 : hw.tier === "small" ? 400 : 800;
   const workerConnections = hw.tier === "micro" ? 1024 : hw.tier === "small" ? 2048 : 4096;
 
   return {
-    innodbBufferPoolMB,
-    maxConnections,
-    tmpTableMB,
-    tableOpenCache,
+    dbRamPercent: dbPercent,
+    dbEngines,
+    dbBudgetPerEngineMB,
     redisMaxMemoryMB,
     workerConnections,
-    heap: nodeHeapPlan(hw, mix, { dbRamPercent: dbRamPercentOverride, serviceWeight }),
+    heap: nodeHeapPlan(hw, mix, { dbRamPercent: dbRamPercentOverride, serviceWeight, dbEngines }),
   };
-}
-
-export function renderMariadbTuning(hw: HardwareProfile, plan: TuningPlan): string {
-  return `# Managed by napp — TỰ ĐỘNG SINH RA bởi \`napp tune apply\`
-# Phần cứng phát hiện: ${hw.cpuCores} lõi CPU, ${(hw.totalMemMB / 1024).toFixed(1)} GB RAM, tier=${hw.tier}
-# Tỷ lệ RAM dành cho InnoDB buffer pool được tính TOÁN THẬN TRỌNG vì server
-# còn chạy song song Node.js apps + Redis + nginx.
-[mysqld]
-innodb_buffer_pool_size = ${mb(plan.innodbBufferPoolMB)}
-innodb_buffer_pool_instances = ${Math.max(1, Math.min(8, Math.floor(plan.innodbBufferPoolMB / 1024) || 1))}
-innodb_log_file_size = ${mb(Math.max(64, plan.innodbBufferPoolMB * 0.25))}
-innodb_flush_log_at_trx_commit = 2
-innodb_flush_method = O_DIRECT
-innodb_io_capacity = ${hw.tier === "micro" ? 100 : hw.tier === "small" ? 200 : 400}
-
-max_connections = ${plan.maxConnections}
-wait_timeout = 300
-interactive_timeout = 300
-
-tmp_table_size = ${mb(plan.tmpTableMB)}
-max_heap_table_size = ${mb(plan.tmpTableMB)}
-
-table_open_cache = ${plan.tableOpenCache}
-table_definition_cache = ${plan.tableOpenCache}
-
-thread_cache_size = ${Math.max(8, hw.cpuCores * 4)}
-
-slow_query_log = 1
-slow_query_log_file = /var/log/mysql/slow.log
-long_query_time = 2
-`;
 }
 
 export function renderRedisTuning(hw: HardwareProfile, plan: TuningPlan): string {

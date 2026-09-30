@@ -26,7 +26,7 @@ import {
   loadState,
 } from "../lib/state";
 import { acquireLock } from "../lib/lock";
-import { createDatabase, dropDatabase } from "../lib/mysql";
+import { resolveEngine, driverFor, unitEngine, activeEngines, type DbEngine } from "../lib/db";
 import { mergeEnvFile } from "../lib/envfile";
 import { renderAppNginxConf, appLocationsPath } from "../templates/nginx";
 import { writeAppLocationsConf, hintCustomLocations, injectLocationsInclude } from "../lib/locationsfile";
@@ -51,6 +51,7 @@ export interface CreateAppOptions {
   buildCmd?: string;
   startCmd?: string;
   db: boolean;
+  dbEngine?: string; // engine cho --db (bỏ trống = engine mặc định / engine duy nhất đang có)
   redis: boolean;
   redisDb?: number; // index cụ thể (dùng chung keyspace với đơn vị khác)
   shareRedisWith?: string; // domain/name của đơn vị muốn dùng chung Redis DB
@@ -218,7 +219,7 @@ export function unitMix(delta: Partial<UnitMix> = {}): UnitMix {
  */
 export function currentHeapPlan(delta: Partial<UnitMix> = {}): NodeHeapPlan {
   const mix = unitMix(delta);
-  return nodeHeapPlan(detectHardware(), mix, { serviceWeight: loadState().serviceHeapWeight });
+  return nodeHeapPlan(detectHardware(), mix, { serviceWeight: loadState().serviceHeapWeight, dbEngines: activeEngines().length });
 }
 
 /** Directive ưu tiên tài nguyên cho một unit, theo loại. MemoryHigh chỉ cho service. */
@@ -274,7 +275,11 @@ export function applyNodeHeaps(opts: { restart: boolean; skipRestartFor?: string
   const s = loadState();
   const apps = Object.values(s.apps);
   const services = Object.values(s.services);
-  const plan = nodeHeapPlan(detectHardware(), { webApps: apps.length, services: services.length }, { serviceWeight: s.serviceHeapWeight });
+  const plan = nodeHeapPlan(
+    detectHardware(),
+    { webApps: apps.length, services: services.length },
+    { serviceWeight: s.serviceHeapWeight, dbEngines: activeEngines().length }
+  );
   const heapChanged: string[] = [];
   const priorityChanged: string[] = [];
   if (apps.length + services.length === 0) return { ...plan, heapChanged, priorityChanged };
@@ -324,7 +329,11 @@ export function syncAllUnits(opts: { restart: boolean }): NodeHeapPlan {
   const s = loadState();
   const apps = Object.values(s.apps);
   const services = Object.values(s.services);
-  const plan = nodeHeapPlan(detectHardware(), { webApps: apps.length, services: services.length }, { serviceWeight: s.serviceHeapWeight });
+  const plan = nodeHeapPlan(
+    detectHardware(),
+    { webApps: apps.length, services: services.length },
+    { serviceWeight: s.serviceHeapWeight, dbEngines: activeEngines().length }
+  );
   if (apps.length + services.length === 0) return plan;
   for (const app of apps) writeAppUnit(app, plan.webMB);
   for (const svc of services) writeServiceUnit(svc, plan.serviceMB);
@@ -399,6 +408,9 @@ export async function cmdAppCreate(domain: string, opts: CreateAppOptions): Prom
   // không phải tạo rồi rollback.
   ensurePackageManager(pm);
   if (!commandExists("nginx")) die("nginx chưa được cài. Chạy 'napp check --fix' trước.");
+  // Chọn engine TRƯỚC khi tạo tài nguyên: nhiều engine mà không chỉ định thì
+  // dừng ở đây, không phải tạo nửa chừng rồi rollback.
+  const dbEngine: DbEngine | undefined = opts.db ? resolveEngine(opts.dbEngine) : undefined;
 
   const release = acquireLock(domain);
   let rollbackActive = true;
@@ -419,9 +431,9 @@ export async function cmdAppCreate(domain: string, opts: CreateAppOptions): Prom
       }
       if (dbCreatedName) {
         try {
-          dropDatabase(dbCreatedName, dbCreatedName);
+          driverFor(dbEngine!).drop(dbCreatedName, dbCreatedName);
         } catch {
-          /* đã cảnh báo bên trong dropDatabase/runCmd nếu có lỗi; không chặn phần rollback còn lại */
+          /* đã cảnh báo bên trong drop()/runCmd nếu có lỗi; không chặn phần rollback còn lại */
         }
       }
       warn(`Đã hoàn tác. Hệ thống trở lại trạng thái trước khi tạo '${domain}'.`);
@@ -521,10 +533,10 @@ EOF`,
 
     // --- database (tuỳ chọn) ---
     let dbInfo: { name: string; user: string; password: string } | undefined;
-    if (opts.db) {
-      dbInfo = createDatabase(user, user);
+    if (dbEngine) {
+      dbInfo = driverFor(dbEngine).create(user, user);
       dbCreatedName = dbInfo.name;
-      ok(`Đã tạo database '${dbInfo.name}' + user CSDL '${dbInfo.user}'@'localhost'`);
+      ok(`Đã tạo database ${driverFor(dbEngine).label} '${dbInfo.name}' + user CSDL '${dbInfo.user}'`);
     }
 
     // --- redis (tuỳ chọn) ---
@@ -597,14 +609,7 @@ EOF`,
       // một proxy mà nginx không khôi phục real-IP giúp.
       envUpdates.XFF_DEPTH = "1";
     }
-    if (dbInfo) {
-      envUpdates.DB_CONNECTION = "mysql";
-      envUpdates.DB_HOST = "127.0.0.1";
-      envUpdates.DB_PORT = "3306";
-      envUpdates.DB_DATABASE = dbInfo.name;
-      envUpdates.DB_USERNAME = dbInfo.user;
-      envUpdates.DB_PASSWORD = dbInfo.password;
-    }
+    if (dbInfo && dbEngine) Object.assign(envUpdates, driverFor(dbEngine).envFor(dbInfo));
     if (redisDbIndex !== undefined) {
       envUpdates.REDIS_HOST = "127.0.0.1";
       envUpdates.REDIS_PORT = "6379";
@@ -732,6 +737,7 @@ EOF`,
       branch: opts.branch,
       dbName: dbInfo?.name,
       dbUser: dbInfo?.user,
+      dbEngine: dbInfo ? dbEngine : undefined,
       redisDbIndex,
       appDir: opts.appDir,
       maxBodySize: opts.maxBody,
@@ -811,8 +817,8 @@ EOF`,
     console.log(`  Chạy bằng    : ${user} (systemd: ${serviceName})`);
     console.log(`  Runtime      : ${opts.runtime} · quản lý gói: ${pm}`);
     console.log(`  Cổng nội bộ  : 127.0.0.1:${port} (không public — chỉ nginx proxy vào)`);
-    if (dbInfo) {
-      console.log(`  Database     : ${dbInfo.name}  (user: ${dbInfo.user}@localhost, mật khẩu trong .env)`);
+    if (dbInfo && dbEngine) {
+      console.log(`  Database     : ${driverFor(dbEngine).label} '${dbInfo.name}'  (user: ${dbInfo.user}, mật khẩu + DATABASE_URL trong .env)`);
     }
     if (redisDbIndex !== undefined) console.log(`  Redis DB     : #${redisDbIndex}`);
     console.log();
@@ -916,7 +922,7 @@ export async function cmdAppRemove(domain: string, opts: AppRemoveOptions): Prom
   if (opts.source && !opts.database && app.dbName) {
     warn(
       `Bạn chọn xoá mã nguồn nhưng giữ database '${app.dbName}' — mật khẩu DB chỉ lưu trong .env (nằm trong mã nguồn), xoá đi là MẤT. ` +
-        `Database và dữ liệu vẫn còn, nhưng muốn dùng lại phải đặt mật khẩu mới: ALTER USER '${app.dbUser ?? app.dbName}'@'localhost' IDENTIFIED BY '<mật khẩu mới>'. ` +
+        `Database và dữ liệu vẫn còn, nhưng muốn dùng lại phải đặt mật khẩu mới cho user CSDL '${app.dbUser ?? app.dbName}' (${driverFor(unitEngine(app)).label}). ` +
         `Hãy sao chép .env (hoặc dòng DB_PASSWORD) ra nơi khác trước nếu cần.`
     );
   }
@@ -1006,19 +1012,19 @@ export async function cmdAppRemove(domain: string, opts: AppRemoveOptions): Prom
     if (opts.database) {
       if (app.dbName) {
         try {
-          dropDatabase(app.dbName, app.dbUser);
+          driverFor(unitEngine(app)).drop(app.dbName, app.dbUser);
           ok(`Đã xoá database '${app.dbName}'.`);
         } catch (e) {
           warn(
             `Không xoá được database '${app.dbName}' (${(e as Error).message}). ` +
-              `Các tài nguyên khác đã xử lý xong — hãy tự xoá database này sau bằng 'napp db drop ${app.dbName} --yes --user ${app.dbUser ?? app.dbName}'.`
+              `Các tài nguyên khác đã xử lý xong — hãy tự xoá database này sau bằng 'napp db drop ${app.dbName} --engine ${unitEngine(app)} --yes --user ${app.dbUser ?? app.dbName}'.`
           );
         }
       } else {
         info("App không có database riêng — bỏ qua.");
       }
     } else if (app.dbName) {
-      info(`Giữ lại database '${app.dbName}'. Muốn xoá sau: napp db drop ${app.dbName} --yes --user ${app.dbUser ?? app.dbName}`);
+      info(`Giữ lại database '${app.dbName}'. Muốn xoá sau: napp db drop ${app.dbName} --engine ${unitEngine(app)} --yes --user ${app.dbUser ?? app.dbName}`);
     }
 
     removeAppFromState(domain);
@@ -1062,7 +1068,7 @@ export function cmdAppList(): void {
     const running = execCapture("systemctl", ["is-active", "--quiet", serviceNameFor(app.domain)]).code === 0;
     console.log(
       `  ${running ? "●" : "○"} ${app.domain.padEnd(30)} port=${String(app.port).padEnd(6)} ${`${app.nodeRuntime}/${app.packageManager ?? "npm"}`.padEnd(10)} user=${app.user.padEnd(18)} ${
-        app.dbName ? `db=${app.dbName} ` : ""
+        app.dbName ? `db=${unitEngine(app)}:${app.dbName} ` : ""
       }${app.redisDbIndex !== undefined ? `redis=${app.redisDbIndex} ` : ""}${running ? "đang chạy" : "ĐÃ DỪNG"}`
     );
   }

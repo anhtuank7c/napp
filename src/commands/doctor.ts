@@ -2,10 +2,11 @@ import { existsSync, readFileSync } from "node:fs";
 import { gunzipSync } from "node:zlib";
 import { execCapture, runCmd, commandExists, requireRoot, isServiceActive } from "../lib/exec";
 import { info, ok, warn, danger, colorText, section, step, die, type LogColor } from "../lib/log";
-import { hasApt, pendingUpdates, rebootRequired, unitStaleLibraries, isCriticalPackage, aptIndexAgeSeconds, type PendingUpdate } from "../lib/apt";
+import { hasApt, aptGet, waitForAptLocks, APT_LOCK_TIMEOUT_S, pendingUpdates, rebootRequired, unitStaleLibraries, isCriticalPackage, aptIndexAgeSeconds, type PendingUpdate } from "../lib/apt";
 import { assessNginxCves, nodeLifecycle } from "../lib/cve";
 import { scanProject, checkFreshReleases, SEVERITY_ORDER, type ProjectTarget, type ProjectScanResult, type Severity } from "../lib/deps";
 import { loadState, svcSystemdName, serviceNameFor, type PackageManager } from "../lib/state";
+import { exposedEngines, exposureMessage } from "../lib/db";
 
 // --------------------------------------------------------------------------
 // 'napp doctor' — soi RỦI RO BẢO MẬT của máy chủ và của mã nguồn đang chạy:
@@ -59,7 +60,7 @@ async function confirm(question: string, autoYes: boolean): Promise<boolean> {
 function managedUnits(): string[] {
   const st = loadState();
   return [
-    ...["nginx", "mariadb", "mysql", "redis-server", "ssh", "sshd", "fail2ban"].filter((u) => isServiceActive(u)),
+    ...["nginx", "mariadb", "mysql", "postgresql", "mongod", "redis-server", "ssh", "sshd", "fail2ban"].filter((u) => isServiceActive(u)),
     ...Object.values(st.apps).map((a) => `${serviceNameFor(a.domain)}.service`),
     ...Object.values(st.services).map((s) => `${svcSystemdName(s.name)}.service`),
   ];
@@ -131,7 +132,7 @@ export function collectSystemReport(opts: DoctorSystemOptions): SystemReport {
       warn("Bỏ qua làm mới chỉ mục apt (cần quyền root) — kết quả dựa trên chỉ mục đã có sẵn, có thể cũ.");
     } else {
       info("Đang làm mới chỉ mục gói (apt-get update)...");
-      runCmd("apt-get", ["update", "-qq"], { silentFail: true });
+      aptGet(["update", "-qq"], { silentFail: true });
     }
   }
 
@@ -201,6 +202,15 @@ export function cmdDoctorSystem(opts: DoctorSystemOptions): SystemReport | undef
     ok("Không có dịch vụ nào còn nạp thư viện cũ (bản vá đã cài đều đã có hiệu lực).");
   } else {
     info("Bỏ qua kiểm tra 'dịch vụ còn nạp thư viện cũ' — cần chạy bằng sudo để đọc được /proc của tiến trình khác.");
+  }
+
+  // --- database lộ ra mạng ---
+  const exposed = exposedEngines();
+  if (exposed.length > 0) {
+    console.log();
+    for (const x of exposed) danger(exposureMessage(x));
+  } else if (process.getuid && process.getuid() === 0) {
+    ok("Không database nào lắng nghe ngoài 127.0.0.1.");
   }
 
   // --- cần khởi động lại máy ---
@@ -443,7 +453,7 @@ export async function cmdDoctorUpgrade(opts: DoctorUpgradeOptions): Promise<void
 
   section("Cài bản vá cho hệ thống");
   info("Đang làm mới chỉ mục gói (apt-get update)...");
-  runCmd("apt-get", ["update", "-qq"]);
+  aptGet(["update", "-qq"]);
 
   const pending = pendingUpdates();
   if (pending.length === 0) {
@@ -491,6 +501,8 @@ export async function cmdDoctorUpgrade(opts: DoctorUpgradeOptions): Promise<void
   const aptArgs = [
     "-y",
     "-o",
+    `DPkg::Lock::Timeout=${APT_LOCK_TIMEOUT_S}`,
+    "-o",
     "Dpkg::Options::=--force-confold",
     "-o",
     "Dpkg::Options::=--force-confdef",
@@ -498,6 +510,7 @@ export async function cmdDoctorUpgrade(opts: DoctorUpgradeOptions): Promise<void
     "--only-upgrade",
     ...selected.map((p) => p.pkg),
   ];
+  waitForAptLocks();
   runCmd("env", ["DEBIAN_FRONTEND=noninteractive", "apt-get", ...aptArgs]);
   ok(`Đã cài ${selected.length} gói.`);
 

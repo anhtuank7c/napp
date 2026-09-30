@@ -24,7 +24,7 @@ import {
   loadState,
 } from "../lib/state";
 import { acquireLock } from "../lib/lock";
-import { createDatabase, dropDatabase } from "../lib/mysql";
+import { resolveEngine, driverFor, unitEngine, type DbEngine } from "../lib/db";
 import { mergeEnvFile } from "../lib/envfile";
 import { unitWorkDir } from "../templates/systemd";
 import { detectHardware } from "../lib/hardware";
@@ -43,6 +43,7 @@ export interface CreateServiceOptions {
   buildCmd?: string;
   startCmd?: string;
   db: boolean;
+  dbEngine?: string; // engine cho --db (bỏ trống = engine mặc định / engine duy nhất đang có)
   redis: boolean;
   redisDb?: number; // index cụ thể — dùng CHUNG keyspace với web app của cùng sản phẩm
   shareRedisWith?: string; // domain/name của đơn vị muốn dùng chung Redis DB
@@ -156,6 +157,7 @@ export async function cmdServiceCreate(name: string, opts: CreateServiceOptions)
   ensureRuntime(opts.runtime);
   // Trình quản lý gói phải dùng được Ở MỨC HỆ THỐNG (user service + systemd đều thấy).
   ensurePackageManager(pm);
+  const dbEngine: DbEngine | undefined = opts.db ? resolveEngine(opts.dbEngine) : undefined;
 
   const release = acquireLock(name);
   let rollbackActive = true;
@@ -176,7 +178,7 @@ export async function cmdServiceCreate(name: string, opts: CreateServiceOptions)
       }
       if (dbCreatedName) {
         try {
-          dropDatabase(dbCreatedName, dbCreatedName);
+          driverFor(dbEngine!).drop(dbCreatedName, dbCreatedName);
         } catch {
           /* đã cảnh báo bên trong; không chặn phần rollback còn lại */
         }
@@ -269,10 +271,10 @@ EOF`,
 
     // --- database (tuỳ chọn) ---
     let dbInfo: { name: string; user: string; password: string } | undefined;
-    if (opts.db) {
-      dbInfo = createDatabase(user, user);
+    if (dbEngine) {
+      dbInfo = driverFor(dbEngine).create(user, user);
       dbCreatedName = dbInfo.name;
-      ok(`Đã tạo database '${dbInfo.name}' + user CSDL '${dbInfo.user}'@'localhost'`);
+      ok(`Đã tạo database ${driverFor(dbEngine).label} '${dbInfo.name}' + user CSDL '${dbInfo.user}'`);
     }
 
     // --- redis (tuỳ chọn) ---
@@ -305,14 +307,7 @@ EOF`,
     // Chỉ ghi NODE_ENV, PORT (nếu có), thông tin DB/Redis, và biến người dùng thêm.
     const envUpdates: Record<string, string> = { NODE_ENV: "production" };
     if (port !== undefined) envUpdates.PORT = String(port);
-    if (dbInfo) {
-      envUpdates.DB_CONNECTION = "mysql";
-      envUpdates.DB_HOST = "127.0.0.1";
-      envUpdates.DB_PORT = "3306";
-      envUpdates.DB_DATABASE = dbInfo.name;
-      envUpdates.DB_USERNAME = dbInfo.user;
-      envUpdates.DB_PASSWORD = dbInfo.password;
-    }
+    if (dbInfo && dbEngine) Object.assign(envUpdates, driverFor(dbEngine).envFor(dbInfo));
     if (redisDbIndex !== undefined) {
       envUpdates.REDIS_HOST = "127.0.0.1";
       envUpdates.REDIS_PORT = "6379";
@@ -356,6 +351,7 @@ EOF`,
       branch: opts.branch,
       dbName: dbInfo?.name,
       dbUser: dbInfo?.user,
+      dbEngine: dbInfo ? dbEngine : undefined,
       redisDbIndex,
       appDir: opts.appDir,
       runAsUnit: borrowed?.id,
@@ -407,7 +403,7 @@ EOF`,
     console.log(`  Runtime      : ${opts.runtime} · quản lý gói: ${pm}`);
     if (port !== undefined) console.log(`  Cổng nội bộ  : 127.0.0.1:${port} (service tự bind — KHÔNG public qua nginx)`);
     else console.log(`  Cổng         : không cấp (worker chạy ngầm, không listen)`);
-    if (dbInfo) console.log(`  Database     : ${dbInfo.name}  (user: ${dbInfo.user}@localhost, mật khẩu trong .env)`);
+    if (dbInfo && dbEngine) console.log(`  Database     : ${driverFor(dbEngine).label} '${dbInfo.name}'  (user: ${dbInfo.user}, mật khẩu + DATABASE_URL trong .env)`);
     if (redisDbIndex !== undefined) console.log(`  Redis DB     : #${redisDbIndex}`);
     console.log();
     console.log("  Các bước tiếp theo:");
@@ -648,16 +644,16 @@ export async function cmdServiceRemove(name: string, opts: ServiceRemoveOptions)
     if (opts.database) {
       if (svc.dbName) {
         try {
-          dropDatabase(svc.dbName, svc.dbUser);
+          driverFor(unitEngine(svc)).drop(svc.dbName, svc.dbUser);
           ok(`Đã xoá database '${svc.dbName}'.`);
         } catch (e) {
-          warn(`Không xoá được database '${svc.dbName}' (${(e as Error).message}). Hãy tự xoá sau bằng 'napp db drop ${svc.dbName} --yes --user ${svc.dbUser ?? svc.dbName}'.`);
+          warn(`Không xoá được database '${svc.dbName}' (${(e as Error).message}). Hãy tự xoá sau bằng 'napp db drop ${svc.dbName} --engine ${unitEngine(svc)} --yes --user ${svc.dbUser ?? svc.dbName}'.`);
         }
       } else {
         info("Service không có database riêng — bỏ qua.");
       }
     } else if (svc.dbName) {
-      info(`Giữ lại database '${svc.dbName}'. Muốn xoá sau: napp db drop ${svc.dbName} --yes --user ${svc.dbUser ?? svc.dbName}`);
+      info(`Giữ lại database '${svc.dbName}'. Muốn xoá sau: napp db drop ${svc.dbName} --engine ${unitEngine(svc)} --yes --user ${svc.dbUser ?? svc.dbName}`);
     }
 
     removeServiceFromState(name);
@@ -700,7 +696,7 @@ export function cmdServiceList(): void {
     console.log(
       `  ${running ? "●" : "○"} ${svc.name.padEnd(30)} ${svc.port !== undefined ? `port=${String(svc.port).padEnd(6)}` : "no-port".padEnd(11)} ${`${svc.nodeRuntime}/${svc.packageManager ?? "npm"}`.padEnd(10)} user=${svc.user.padEnd(18)} ${
         svc.runAsUnit ? `run-as=${svc.runAsUnit} ` : ""
-      }${svc.dbName ? `db=${svc.dbName} ` : ""}${svc.redisDbIndex !== undefined ? `redis=${svc.redisDbIndex} ` : ""}${running ? "đang chạy" : "ĐÃ DỪNG"}`
+      }${svc.dbName ? `db=${unitEngine(svc)}:${svc.dbName} ` : ""}${svc.redisDbIndex !== undefined ? `redis=${svc.redisDbIndex} ` : ""}${running ? "đang chạy" : "ĐÃ DỪNG"}`
     );
   }
 }
