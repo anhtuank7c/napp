@@ -20,7 +20,7 @@
 //      HTTP/2, thêm resolver...) thì phải quét lại.
 // --------------------------------------------------------------------------
 
-export type CveSeverity = "critical" | "high" | "medium";
+export type CveSeverity = "critical" | "high" | "medium" | "low";
 
 export interface CveEntry {
   id: string;
@@ -210,19 +210,252 @@ export function assessNginxCves(version: string, ev: NginxEvidence): CveAssessme
   });
 }
 
-// --- Vòng đời Node.js ------------------------------------------------------
-// Bản đã hết hạn hỗ trợ (EOL) KHÔNG còn nhận bản vá bảo mật nào nữa — đây là
-// rủi ro lớn hơn nhiều so với một CVE lẻ, vì nó vĩnh viễn không được vá.
-// Nguồn: lịch LTS của Node.js (nodejs.org/en/about/previous-releases).
-const NODE_EOL: Record<number, string> = {
+// --- Node.js: dữ liệu lỗ hổng ---------------------------------------------
+// Bảng tĩnh trong binary có một điểm chết: lỗi công bố HÔM NAY chỉ tới được
+// server sau khi phát hành napp mới VÀ server chạy 'napp update' — với lỗi RCE
+// như CVE-2026-111497 thì quá chậm. Vì vậy dữ liệu Node lấy TRỰC TUYẾN từ ba
+// nguồn chính thức (tải + cache ở lib/nodefeed.ts), bảng tĩnh chỉ còn là dự
+// phòng khi máy không ra được mạng:
+//   1. nodejs/security-wg  vuln/core/index.json — CVE có tên + dải semver
+//      dính/đã vá. Đầy đủ nhưng CHẬM: đợt vá 10/2026 tới 24/10 vẫn chưa có.
+//   2. nodejs.org/dist/index.json — mỗi bản phát hành có cờ 'security'. Có
+//      ngay khi phát hành, không kèm mã CVE -> tín hiệu NHANH NHẤT: "nhánh của
+//      bạn đã có bản vá bảo mật mới hơn bản đang chạy".
+//   3. nodejs/Release schedule.json — ngày EOL của từng nhánh.
+// Nguyên tắc: thiếu nguồn nào thì kết luận dựa trên phần còn lại + bảng tĩnh,
+// KHÔNG BAO GIỜ coi "không tải được" là "an toàn".
+
+export interface NodeAdvisory {
+  id: string;
+  cveIds: string[];
+  severity: CveSeverity;
+  vulnerable: string; // dải semver kiểu security-wg: "22.x || 24.x"
+  patched: string; // "^22.23.4 || ^24.22.1"
+  summary: string;
+  condition?: string;
+  ref?: string;
+}
+
+export interface NodeSecurityRelease {
+  version: string; // "v24.22.1"
+  date: string;
+}
+
+export interface NodeFeed {
+  advisories: NodeAdvisory[];
+  securityReleases?: NodeSecurityRelease[]; // undefined = không có dữ liệu (đừng suy ra "không có bản vá")
+  eol?: Record<number, string>; // major -> ngày hết hỗ trợ
+  source: string; // mô tả nguồn để in cho người dùng
+}
+
+// Dự phòng offline. Ghi theo cùng định dạng security-wg để đi chung một đường.
+// Bản EOL (20.x, 23.x, 25.x) cố ý nằm trong 'vulnerable': Node.js tuyên bố
+// "End-of-Life versions are always affected when a security release occurs".
+export const NODE_ADVISORIES_BUILTIN: NodeAdvisory[] = [
+  {
+    id: "CVE-2026-111497",
+    cveIds: ["CVE-2026-111497"],
+    severity: "critical",
+    vulnerable: "<26.12.1",
+    patched: "^22.23.4 || ^24.22.1 || ^26.12.1",
+    summary:
+      "Ghi ngoài vùng nhớ trong bộ giải nén Brotli (node:zlib) — dữ liệu nén Brotli do kẻ tấn công gửi tới có thể " +
+      "dẫn tới THỰC THI MÃ TỪ XA hoặc lộ bộ nhớ (CVSS 9.8).",
+    condition:
+      "Dính khi app giải nén Brotli từ nguồn không tin cậy: body request 'Content-Encoding: br' (body-parser 2 / " +
+      "Express 5 tự giải nén), fetch()/undici gọi ra ngoài (tự giải nén phản hồi br), zlib.brotliDecompress*. " +
+      "Rất khó tự loại trừ cho mọi dependency — coi như dính.",
+    ref: "https://nodejs.org/en/blog/vulnerability/october-2026-security-releases",
+  },
+  {
+    id: "CVE-2026-105482/105483/106069",
+    cveIds: ["CVE-2026-105482", "CVE-2026-105483", "CVE-2026-106069"],
+    severity: "high",
+    vulnerable: "<26.12.1",
+    patched: "^22.23.4 || ^24.22.1 || ^26.12.1",
+    summary:
+      "dns.resolve*() cắt tên miền tại byte NUL, TLS nhận nhầm địa chỉ IP viết kiểu lạ (chữ số toàn chiều rộng, " +
+      "số 0 ở đầu) — có thể kết nối/xác thực chứng chỉ nhầm đích.",
+    condition: "Dính khi app kết nối tới host/URL do người dùng cung cấp (webhook, proxy, crawler...).",
+    ref: "https://nodejs.org/en/blog/vulnerability/october-2026-security-releases",
+  },
+];
+
+// Bổ sung lời giải thích "khi nào thực sự dính" cho CVE nổi bật — dữ liệu
+// security-wg chỉ có mô tả kỹ thuật tiếng Anh.
+const NODE_NOTES: Record<string, Pick<NodeAdvisory, "summary" | "condition">> = Object.fromEntries(
+  NODE_ADVISORIES_BUILTIN.flatMap((a) => a.cveIds.map((id) => [id, { summary: a.summary, condition: a.condition }]))
+);
+
+// Ngày EOL dự phòng (nguồn: nodejs.org/en/about/previous-releases).
+const NODE_EOL_BUILTIN: Record<number, string> = {
   14: "2023-04-30",
   16: "2023-09-11",
   18: "2025-04-30",
   20: "2026-04-30",
   22: "2027-04-30",
   24: "2028-04-30",
+  26: "2029-04-30",
 };
 
+export const NODE_FEED_BUILTIN: NodeFeed = {
+  advisories: NODE_ADVISORIES_BUILTIN,
+  eol: NODE_EOL_BUILTIN,
+  source: "bảng có sẵn trong napp (offline)",
+};
+
+// --- semver tối giản ---------------------------------------------------------
+// Đủ cho cú pháp security-wg THỰC SỰ dùng (đã đối chiếu toàn bộ 194 mục):
+// "N.x", "N.N.x", "N", "N.N.N", "^N.N.N", ">=N.N.N", "<N.N.N", "<=", ">", "<=N" — có
+// thể có khoảng trắng sau toán tử (">= 24.1.0"), khoảng trắng = AND, "||" = OR.
+// Gặp cú pháp lạ thì NÉM LỖI để mục đó bị bỏ qua có báo, thay vì đoán bừa.
+type Ver = [number, number, number];
+
+function parseVer(s: string): Ver {
+  const m = s.replace(/^v/, "").match(/^(\d+)\.(\d+)\.(\d+)$/);
+  if (!m) throw new Error(`phiên bản không hợp lệ: ${s}`);
+  return [+m[1]!, +m[2]!, +m[3]!];
+}
+
+function cmp(a: Ver, b: Ver): number {
+  for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i]! < b[i]! ? -1 : 1;
+  return 0;
+}
+
+function comparatorMatches(v: Ver, tok: string): boolean {
+  if (tok === "*" || tok === "x") return true;
+  let m = tok.match(/^(\d+)(?:\.x(?:\.x)?)?$/);
+  if (m) return v[0] === +m[1]!;
+  m = tok.match(/^(\d+)\.(\d+)(?:\.x)?$/);
+  if (m) return v[0] === +m[1]! && v[1] === +m[2]!;
+  m = tok.match(/^\^(\d+\.\d+\.\d+)$/);
+  if (m) {
+    const lo = parseVer(m[1]!);
+    return cmp(v, lo) >= 0 && v[0] === lo[0];
+  }
+  // Phiên bản viết thiếu kèm toán tử ("<= 10", ">=10.9") — security-wg có dùng.
+  // Theo semver: "<=10" = "<11.0.0", ">10" = ">=11.0.0", ">=10" = ">=10.0.0".
+  m = tok.match(/^(>=|<=|>|<)(\d+)(?:\.(\d+))?$/);
+  if (m) {
+    const [maj, min] = [+m[2]!, m[3] === undefined ? undefined : +m[3]];
+    const lo: Ver = [maj, min ?? 0, 0];
+    const next: Ver = min === undefined ? [maj + 1, 0, 0] : [maj, min + 1, 0];
+    switch (m[1]) {
+      case ">=": return cmp(v, lo) >= 0;
+      case ">": return cmp(v, next) >= 0;
+      case "<=": return cmp(v, next) < 0;
+      default: return cmp(v, lo) < 0;
+    }
+  }
+  m = tok.match(/^(>=|<=|>|<|=)?(\d+\.\d+\.\d+)$/);
+  if (m) {
+    const c = cmp(v, parseVer(m[2]!));
+    switch (m[1]) {
+      case ">=": return c >= 0;
+      case "<=": return c <= 0;
+      case ">": return c > 0;
+      case "<": return c < 0;
+      default: return c === 0;
+    }
+  }
+  throw new Error(`cú pháp dải phiên bản không hỗ trợ: ${tok}`);
+}
+
+export function satisfies(version: string, range: string): boolean {
+  const v = parseVer(version);
+  return range.split("||").some((alt) => {
+    const toks = alt.trim().replace(/(>=|<=|>|<|=)\s+/g, "$1").split(/\s+/).filter(Boolean);
+    if (toks.length === 0) throw new Error(`dải phiên bản rỗng: "${range}"`);
+    return toks.every((t) => comparatorMatches(v, t));
+  });
+}
+
+// Bản vá nhỏ nhất CÙNG MAJOR theo dải 'patched' ("^24.22.1" hoặc ">=24.22.1").
+function patchedFloorFor(major: number, patched: string): string | undefined {
+  for (const alt of patched.split("||")) {
+    const m = alt.trim().match(/^(?:\^|>=\s*)(\d+)\.(\d+)\.(\d+)$/);
+    if (m && +m[1]! === major) return `${m[1]}.${m[2]}.${m[3]}`;
+  }
+  return undefined;
+}
+
+// --- kiểm dữ liệu tải về ----------------------------------------------------
+// Dữ liệu từ mạng là DỮ LIỆU, không phải mã: kiểm chặt từng trường. Một mục
+// lệch định dạng thì bỏ mục đó; cả tệp lệch (trang lỗi HTML, JSON lạ) thì ném
+// lỗi để lớp trên lùi về cache/bảng tĩnh.
+const CVE_ID = /^CVE-\d{4}-\d{4,}$/;
+const SEVERITIES: Record<string, CveSeverity> = { critical: "critical", high: "high", medium: "medium", low: "low", unknown: "medium" };
+
+export function parseSecurityWg(json: unknown): { advisories: NodeAdvisory[]; skipped: number } {
+  if (!json || typeof json !== "object" || Array.isArray(json)) throw new Error("security-wg: không phải object");
+  const advisories: NodeAdvisory[] = [];
+  let skipped = 0;
+  for (const [key, raw] of Object.entries(json as Record<string, unknown>)) {
+    const e = raw as Record<string, unknown>;
+    try {
+      if (!e || typeof e !== "object") throw new Error("mục không phải object");
+      const cve = Array.isArray(e.cve) ? e.cve.filter((x): x is string => typeof x === "string" && CVE_ID.test(x)) : [];
+      if (typeof e.vulnerable !== "string" || typeof e.patched !== "string") throw new Error("thiếu dải phiên bản");
+      // Kiểm cú pháp NGAY (với một phiên bản bất kỳ) để mục lỗi bị loại ở đây,
+      // không làm hỏng lúc đánh giá.
+      satisfies("0.0.0", e.vulnerable);
+      satisfies("0.0.0", e.patched);
+      const envs = Array.isArray(e.affectedEnvironments) ? e.affectedEnvironments : ["all"];
+      if (!envs.includes("all") && !envs.includes("linux")) continue; // napp chỉ chạy Linux
+      const note = cve.map((id) => NODE_NOTES[id]).find(Boolean);
+      const desc = typeof e.description === "string" ? e.description.slice(0, 300) : "";
+      advisories.push({
+        id: cve.length ? cve.join("/") : `nodejs-sec-${key}`,
+        cveIds: cve,
+        severity: SEVERITIES[typeof e.severity === "string" ? e.severity : "unknown"] ?? "medium",
+        vulnerable: e.vulnerable,
+        patched: e.patched,
+        summary: note?.summary ?? (desc || "(không có mô tả)"),
+        condition: note?.condition,
+        ref: typeof e.ref === "string" && /^https:\/\//.test(e.ref) ? e.ref : undefined,
+      });
+    } catch {
+      skipped++;
+    }
+  }
+  if (advisories.length === 0) throw new Error("security-wg: không có mục hợp lệ nào");
+  return { advisories, skipped };
+}
+
+export function parseDistIndex(json: unknown): NodeSecurityRelease[] {
+  if (!Array.isArray(json) || json.length === 0) throw new Error("dist/index.json: không phải mảng");
+  const out: NodeSecurityRelease[] = [];
+  for (const r of json as Record<string, unknown>[]) {
+    if (r && r.security === true && typeof r.version === "string" && /^v\d+\.\d+\.\d+$/.test(r.version)) {
+      out.push({ version: r.version, date: typeof r.date === "string" ? r.date.slice(0, 10) : "" });
+    }
+  }
+  if (out.length === 0) throw new Error("dist/index.json: không có bản phát hành bảo mật nào — dữ liệu đáng ngờ");
+  return out;
+}
+
+export function parseSchedule(json: unknown): Record<number, string> {
+  if (!json || typeof json !== "object") throw new Error("schedule.json: không phải object");
+  const out: Record<number, string> = {};
+  for (const [k, v] of Object.entries(json as Record<string, { end?: unknown }>)) {
+    const m = k.match(/^v(\d+)$/);
+    if (m && v && typeof v.end === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v.end)) out[+m[1]!] = v.end;
+  }
+  if (Object.keys(out).length === 0) throw new Error("schedule.json: không có nhánh nào");
+  return out;
+}
+
+// Gộp nguồn trực tuyến với bảng tĩnh: cùng mã CVE thì lấy bản trực tuyến
+// (mới hơn); mục tĩnh mà nguồn trực tuyến CHƯA có thì giữ lại — chính là
+// trường hợp security-wg chậm chân so với thông báo vá.
+export function mergeAdvisories(online: NodeAdvisory[], builtin: NodeAdvisory[] = NODE_ADVISORIES_BUILTIN): NodeAdvisory[] {
+  const known = new Set(online.flatMap((a) => a.cveIds));
+  return [...online, ...builtin.filter((b) => !b.cveIds.some((id) => known.has(id)))];
+}
+
+// --- Vòng đời Node.js ------------------------------------------------------
+// Bản đã hết hạn hỗ trợ (EOL) KHÔNG còn nhận bản vá bảo mật nào nữa — đây là
+// rủi ro lớn hơn nhiều so với một CVE lẻ, vì nó vĩnh viễn không được vá.
 export interface NodeLifecycle {
   major: number;
   lts: boolean;
@@ -230,12 +463,101 @@ export interface NodeLifecycle {
   eol: boolean;
 }
 
-export function nodeLifecycle(version: string, now = new Date()): NodeLifecycle {
-  const major = parseInt(version.replace(/^v/, "").split(".")[0] ?? "0", 10);
+export function nodeLifecycle(version: string, now = new Date(), eolTable: Record<number, string> = NODE_EOL_BUILTIN): NodeLifecycle {
+  const major = nodeMajorOf(version);
   const lts = major % 2 === 0; // Node chỉ đưa bản CHẴN lên LTS
-  const eolDate = NODE_EOL[major];
+  const eolDate = eolTable[major] ?? NODE_EOL_BUILTIN[major];
   // Bản lẻ (19/21/23/...) không bao giờ là LTS: hết hỗ trợ ~6 tháng sau khi ra,
   // coi như EOL trên máy chủ production dù không có trong bảng.
   const eol = eolDate ? new Date(eolDate).getTime() < now.getTime() : !lts;
   return { major, lts, eolDate, eol };
+}
+
+function nodeMajorOf(version: string): number {
+  return parseInt(version.replace(/^v/, "").split(".")[0] ?? "0", 10);
+}
+
+// --- Đánh giá -----------------------------------------------------------------
+export interface NodeAssessment {
+  advisory: NodeAdvisory;
+  verdict: "patched" | "affected";
+  reason: string;
+  fixedIn?: string; // bản vá cùng major; undefined = nhánh không có bản vá
+}
+
+export interface NodeAssessOptions {
+  // changelog.Debian của gói nodejs — CHỈ truyền khi node đang chạy đúng là
+  // binary của gói đó, nếu không sẽ kết luận "đã vá" nhầm cho một node khác.
+  changelog?: string;
+  // Gói của bản phân phối (vá ngược GIỮ NGUYÊN số): khi đó "nhánh đã có bản
+  // phát hành bảo mật mới hơn" KHÔNG chứng minh được là dính -> bỏ tín hiệu đó,
+  // để kho '-security' của apt lo.
+  distroBackport?: boolean;
+}
+
+export function assessNode(version: string, feed: NodeFeed, opts: NodeAssessOptions = {}): NodeAssessment[] {
+  const v = version.replace(/^v/, "");
+  const major = nodeMajorOf(v);
+  const out: NodeAssessment[] = [];
+  for (const adv of feed.advisories) {
+    if (!satisfies(v, adv.vulnerable) || satisfies(v, adv.patched)) continue;
+    const hit = opts.changelog ? adv.cveIds.find((id) => opts.changelog!.includes(id)) : undefined;
+    const fixedIn = patchedFloorFor(major, adv.patched);
+    out.push(
+      hit
+        ? { advisory: adv, verdict: "patched", reason: `changelog của gói nodejs có ghi ${hit} (bản vá backport)`, fixedIn }
+        : {
+            advisory: adv,
+            verdict: "affected",
+            reason: fixedIn ? `Node ${v} cũ hơn bản vá ${fixedIn} của nhánh ${major}.x` : `nhánh ${major}.x không có bản vá (đã hết hỗ trợ)`,
+            fixedIn,
+          }
+    );
+  }
+
+  // Tín hiệu nhanh: nhánh này đã có bản phát hành BẢO MẬT mới hơn bản đang
+  // chạy, mà bản vá đó cao hơn mọi bản vá CVE có tên ở trên -> có lỗ hổng mà
+  // dữ liệu CVE chưa kịp ghi. Chỉ thêm khi nó nói được điều MỚI.
+  if (feed.securityReleases && !opts.distroBackport) {
+    const newer = feed.securityReleases
+      .filter((r) => nodeMajorOf(r.version) === major && cmp(parseVer(r.version), parseVer(v)) > 0)
+      .sort((a, b) => cmp(parseVer(b.version), parseVer(a.version)));
+    const latest = newer[0];
+    const knownFix = out
+      .filter((a) => a.verdict === "affected" && a.fixedIn)
+      .reduce<string | undefined>((m, a) => (!m || compareVersions(a.fixedIn!, m) > 0 ? a.fixedIn : m), undefined);
+    if (latest && (!knownFix || compareVersions(latest.version.slice(1), knownFix) > 0)) {
+      out.push({
+        advisory: {
+          id: `Node.js ${latest.version}`,
+          cveIds: [],
+          severity: "high",
+          vulnerable: "*",
+          patched: `>=${latest.version.slice(1)}`,
+          summary:
+            `Nhánh ${major}.x đã phát hành bản vá BẢO MẬT ${latest.version}${latest.date ? ` (${latest.date})` : ""} ` +
+            `mới hơn bản đang chạy${newer.length > 1 ? ` (${newer.length} bản bảo mật kể từ bản của bạn)` : ""} — ` +
+            `chi tiết CVE có thể chưa được ghi vào dữ liệu lỗ hổng.`,
+          ref: "https://nodejs.org/en/blog/vulnerability",
+        },
+        verdict: "affected",
+        reason: `Node ${v} < ${latest.version.slice(1)}`,
+        fixedIn: latest.version.slice(1),
+      });
+    }
+  }
+
+  const rank: Record<CveSeverity, number> = { critical: 0, high: 1, medium: 2, low: 3 };
+  return out.sort((a, b) => rank[a.advisory.severity] - rank[b.advisory.severity]);
+}
+
+// Bản cùng major cần lên để hết MỌI lỗ hổng đang dính; undefined = có lỗ hổng
+// mà nhánh này không có bản vá -> chỉ còn cách lên major khác.
+export function nodeFixedVersion(assessments: NodeAssessment[]): string | undefined {
+  let need: string | undefined;
+  for (const a of assessments.filter((x) => x.verdict === "affected")) {
+    if (!a.fixedIn) return undefined;
+    if (!need || compareVersions(a.fixedIn, need) > 0) need = a.fixedIn;
+  }
+  return need;
 }

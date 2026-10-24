@@ -485,44 +485,50 @@ export function scanProject(target: ProjectTarget, opts: { audit: boolean } = { 
     }
   }
 
-  // 6. audit của package manager (cần mạng).
-  if (opts.audit) {
-    const audit = runAudit(target);
-    if (audit.error) {
-      findings.push({
-        severity: "info",
-        title: "Không chạy được audit lỗ hổng",
-        detail: audit.error,
-        fix: `Chạy tay để xem chi tiết: sudo -u ${target.user} bash -lc 'cd ${target.dir} && ${target.pm} audit'`,
-      });
-    } else {
-      const bad = audit.top.filter((v) => v.severity === "critical" || v.severity === "high");
-      const total = Object.values(audit.counts).reduce((a, b) => a + b, 0);
-      if (bad.length > 0) {
-        findings.push({
-          severity: bad.some((v) => v.severity === "critical") ? "critical" : "high",
-          title: `${bad.length} lỗ hổng nghiêm trọng/cao trong dependencies (tổng ${total})`,
-          detail: bad
-            .slice(0, 8)
-            .map((v) => `${v.name} [${v.severity}] ${v.title}${v.fixAvailable ? " — CÓ bản vá" : " — chưa có bản vá"}`)
-            .join("\n    "),
-          fix:
-            `Trên máy dev: '${target.pm} audit' để xem chi tiết, '${target.pm === "npm" ? "npm audit fix" : `${target.pm} update`}' để nâng cấp, commit lockfile mới rồi deploy lại.\n` +
-            "    Package chưa có bản vá: cân nhắc thay thư viện khác hoặc khoá đường đi tới đoạn mã bị ảnh hưởng.",
-        });
-      } else if (total > 0) {
-        findings.push({
-          severity: "low",
-          title: `${total} lỗ hổng mức thấp/trung bình trong dependencies`,
-          detail: audit.top.slice(0, 5).map((v) => `${v.name} [${v.severity}] ${v.title}`).join("\n    "),
-          fix: `Nâng cấp khi tiện: '${target.pm} audit' trên máy dev, commit lockfile mới rồi deploy.`,
-        });
-      }
-    }
-  }
+  // 6. audit của package manager (cần mạng) — khi caller không dùng OSV.
+  if (opts.audit) findings.push(...auditFindings(target));
 
   findings.sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);
   return { target, findings, packageCount: installed.length };
+}
+
+// Lỗ hổng đã công bố theo audit của CHÍNH package manager. Là đường dự phòng
+// khi không dùng được OSV (lib/osv.ts): không có node_modules, OSV không với tới.
+export function auditFindings(target: ProjectTarget): DepFinding[] {
+  const findings: DepFinding[] = [];
+  const audit = runAudit(target);
+  if (audit.error) {
+    findings.push({
+      severity: "info",
+      title: "Không chạy được audit lỗ hổng",
+      detail: audit.error,
+      fix: `Chạy tay để xem chi tiết: sudo -u ${target.user} bash -lc 'cd ${target.dir} && ${target.pm} audit'`,
+    });
+  } else {
+    const bad = audit.top.filter((v) => v.severity === "critical" || v.severity === "high");
+    const total = Object.values(audit.counts).reduce((a, b) => a + b, 0);
+    if (bad.length > 0) {
+      findings.push({
+        severity: bad.some((v) => v.severity === "critical") ? "critical" : "high",
+        title: `${bad.length} lỗ hổng nghiêm trọng/cao trong dependencies (tổng ${total})`,
+        detail: bad
+          .slice(0, 8)
+          .map((v) => `${v.name} [${v.severity}] ${v.title}${v.fixAvailable ? " — CÓ bản vá" : " — chưa có bản vá"}`)
+          .join("\n    "),
+        fix:
+          `Trên máy dev: '${target.pm} audit' để xem chi tiết, '${target.pm === "npm" ? "npm audit fix" : `${target.pm} update`}' để nâng cấp, commit lockfile mới rồi deploy lại.\n` +
+          "    Package chưa có bản vá: cân nhắc thay thư viện khác hoặc khoá đường đi tới đoạn mã bị ảnh hưởng.",
+      });
+    } else if (total > 0) {
+      findings.push({
+        severity: "low",
+        title: `${total} lỗ hổng mức thấp/trung bình trong dependencies`,
+        detail: audit.top.slice(0, 5).map((v) => `${v.name} [${v.severity}] ${v.title}`).join("\n    "),
+        fix: `Nâng cấp khi tiện: '${target.pm} audit' trên máy dev, commit lockfile mới rồi deploy.`,
+      });
+    }
+  }
+  return findings;
 }
 
 // --- kiểm tra sâu: tuổi của bản phát hành (cần mạng) -----------------------

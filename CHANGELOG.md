@@ -2,6 +2,29 @@
 
 Tất cả thay đổi đáng chú ý của `napp` được ghi lại ở đây.
 
+## 1.32.0
+
+Vá lỗ hổng **CVE-2026-111497** của Node.js (CVSS 9.8, cảnh báo CSA AL-2026-154): ghi ngoài vùng nhớ trong bộ giải nén Brotli — app giải nén dữ liệu Brotli do kẻ tấn công gửi tới (body `Content-Encoding: br` qua body-parser 2/Express 5, `fetch()` gọi ra ngoài...) có thể bị **thực thi mã từ xa**. Bản vá: 22.23.4 · 24.22.1 · 26.12.1; nhánh 20.x đã EOL, không có bản vá.
+
+- **`napp doctor` soi lỗ hổng của Node.js đang chạy, bằng dữ liệu TRỰC TUYẾN.** Trước đây muốn napp biết về một lỗi mới thì phải phát hành napp mới rồi chờ mọi server `napp update`. Nay mỗi lần quét napp tải từ ba nguồn chính thức:
+  - `nodejs/security-wg` — danh sách CVE có tên kèm dải phiên bản dính/đã vá;
+  - `nodejs.org/dist/index.json` — cờ "bản phát hành bảo mật". Đây là tín hiệu **nhanh nhất**: đợt vá 10/2026 có ở đây từ 21/10, trong khi tới 24/10 security-wg vẫn chưa ghi CVE nào của đợt này. Nhánh của bạn có bản bảo mật mới hơn bản đang chạy là napp báo, kể cả khi chưa có mã CVE;
+  - `nodejs/Release` `schedule.json` — ngày hết hỗ trợ (EOL) của từng nhánh.
+
+  Dữ liệu tải về được kiểm định dạng chặt, mục lạ thì bỏ. Lần tải thành công được cache ở `/var/cache/napp/node-feed.json`. Mạng lỗi hoặc dùng `--no-refresh` thì napp dùng cache, rồi tới bảng có sẵn trong binary — **không bao giờ coi "không tải được" là "an toàn"**. Bảng có sẵn luôn được gộp vào, để lấp khoảng trễ của security-wg. Node từ gói Ubuntu/Debian (vá ngược giữ nguyên số) được kết luận bằng changelog của gói, chỉ khi node đang chạy đúng là binary của gói đó. Node cũ dính hàng chục lỗ hổng thì napp in chi tiết 8 mục nặng nhất, phần còn lại gộp một dòng.
+- **`napp doctor upgrade` tự vá Node.js.** Gói `nodejs` của NodeSource không nằm trong kho `-security`, nên chế độ "chỉ bản vá bảo mật" trước đây **bỏ sót** nó. Nay khi Node đang dính CVE, `nodejs` được coi là bản vá bảo mật: cài bản mới cùng nhánh rồi khởi động lại mọi app/service còn chạy node cũ.
+- **`napp doctor upgrade --node-major <22|24|26>`** (và mục menu tương ứng): chuyển Node sang nhánh LTS khác qua NodeSource khi nhánh đang dùng đã EOL hoặc kho của bản phân phối chưa kịp vá. Nhắc deploy lại app để build lại native module.
+- **Phát hiện "đã vá nhưng chưa restart" cho cả tiến trình con.** Trước đây chỉ soi `MainPID`; app chạy bằng `npm start` có node thật là tiến trình con, nên sau khi vá vẫn báo "đã có hiệu lực" trong khi server chạy `/usr/bin/node` cũ. Nay soi mọi tiến trình trong cgroup của unit.
+- **Quét bảo mật hằng ngày + thông báo Telegram.** `sudo napp notify telegram` cấu hình bot: token nhập ẩn (không hiện khi gõ, không vào lịch sử shell), gửi thử **trước khi lưu**. Token/chat sai thì napp từ chối lưu; Telegram tạm lỗi thì vẫn lưu và cảnh báo. Cấu hình nằm ở `/etc/napp/notify.json`, quyền 0600. `sudo napp doctor watch enable --at 07:00` bật timer quét bản vá hệ thống, dịch vụ chưa restart, CVE Node.js và nginx. Chống spam: chỉ gửi khi có vấn đề **mới**, nhắc lại mỗi ngày nếu chưa xử lý, báo "đã sạch" một lần rồi im. Gửi hỏng thì lần sau gửi lại. Lệnh mới: `notify show|test|remove`, `doctor watch show|enable|disable|run`, cùng mục menu "Quét hằng ngày & thông báo Telegram".
+- **Việc gửi thông báo được cách ly hoàn toàn.** Mỗi lần gửi chạy trong một **tiến trình con riêng**, heap giới hạn 64 MB. Tiến trình cha chỉ chờ tối đa 60 giây rồi `SIGKILL`, và không bao giờ ném lỗi. Đã thử: token sai (Telegram trả 401, dừng ngay, không thử lại), tiến trình con crash, hết bộ nhớ, treo vĩnh viễn (bị giết đúng 60 giây). Trường hợp nào tiến trình quét cũng sống, ghi lỗi vào journal và `notify show`. Token không đi qua argv/biến môi trường (`ps` đọc được) mà qua file 0600 hoặc stdin, và được che khỏi mọi thông báo lỗi. Job quét chạy với `CPUQuota=50%`, `MemoryMax=768M`, `TimeoutStartSec=20min`, `Nice=15`, I/O idle, nên dù gặp sự cố tệ nhất cũng không làm chậm app.
+- **Dependencies: lỗ hổng + MÃ ĐỘC đã biết, tra trên OSV.dev.** `napp doctor deps` (và lần quét hằng ngày) tra đúng các phiên bản **đang nằm trong `node_modules`**, theo lô 1 000 gói mỗi request. Kết quả gồm cơ sở dữ liệu gói độc của OpenSSF (`MAL-…`) và advisory mã độc của GitHub (CWE-506): gói bị chiếm tài khoản hoặc typosquat đã bị gỡ khỏi registry nhưng vẫn nằm trên server, thứ mà `npm audit` thường không báo. Không còn phải chạy package manager của app (vốn đọc `.npmrc`/`.pnpmfile.cjs` của repo).
+  - **Chỉ báo lỗ hổng của dependency production:** napp đi từ `dependencies` của `package.json` theo đúng thuật toán resolve của Node, chạy được cả npm/yarn/bun (cây hoisted) lẫn pnpm (`.pnpm/`). Lỗ hổng của jest/eslint/typescript không còn làm nhiễu báo cáo. **Riêng mã độc thì soi cả dev dependency**, vì script cài đặt của chúng đã chạy.
+  - **Gộp theo gói, khuyên đúng bản cần lên:** bản vá cao nhất trong mọi lỗ hổng của gói (lodash 4.17.15 cần lên 4.18.0, không phải 4.17.21). Gói gián tiếp thì chỉ rõ gói nào kéo vào và cách ép phiên bản (`overrides` / `pnpm.overrides` / `resolutions`).
+  - Gặp mã độc thì hướng dẫn xử lý như máy đã bị xâm nhập ở mức user của app: gỡ gói, xoay vòng bí mật, rà tiến trình/crontab.
+  - Chi tiết lỗ hổng được cache ở `/var/cache/napp/osv-vulns.json` theo trường `modified`, nên lần quét hằng ngày hầu như chỉ tốn một request. OSV lỗi hoặc không có `node_modules` thì lùi về audit của package manager như trước.
+  - Thông báo Telegram có thêm lỗ hổng nghiêm trọng/cao và mã độc của từng app.
+- `napp check` cài Node.js 24.x LTS thay vì 22.x (khớp `install.sh`).
+
 ## 1.31.0
 
 Rà bảo mật theo OWASP Top 10 (napp chạy bằng root và quản lý nhiều app trên một máy, nên lỗ nào cũng là lỗ của cả server) + rà rò rỉ bộ nhớ.

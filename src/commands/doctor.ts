@@ -4,8 +4,10 @@ import { gunzipSync } from "node:zlib";
 import { execCapture, runCmd, commandExists, requireRoot, isServiceActive } from "../lib/exec";
 import { info, ok, warn, danger, colorText, section, step, die, type LogColor } from "../lib/log";
 import { hasApt, aptGet, waitForAptLocks, APT_LOCK_TIMEOUT_S, pendingUpdates, rebootRequired, unitStaleLibraries, isCriticalPackage, aptIndexAgeSeconds, type PendingUpdate } from "../lib/apt";
-import { assessNginxCves, nodeLifecycle } from "../lib/cve";
-import { scanProject, checkFreshReleases, SEVERITY_ORDER, type ProjectTarget, type ProjectScanResult, type Severity } from "../lib/deps";
+import { assessNginxCves, assessNode, nodeFixedVersion, nodeLifecycle, type NodeAssessment, type NodeFeed } from "../lib/cve";
+import { loadNodeFeed } from "../lib/nodefeed";
+import { scanProject, auditFindings, checkFreshReleases, SEVERITY_ORDER, type DepFinding, type ProjectTarget, type ProjectScanResult, type Severity } from "../lib/deps";
+import { resolveInstalledPackages, osvScan, osvDepFindings, type OsvScanResult } from "../lib/osv";
 import { loadState, svcSystemdName, serviceNameFor, type PackageManager } from "../lib/state";
 import { exposedEngines, exposureMessage } from "../lib/db";
 
@@ -105,6 +107,46 @@ function nginxChangelog(): { text: string; path: string } | undefined {
   return undefined;
 }
 
+// --- Node.js: phiên bản đang chạy + bằng chứng vá -------------------------
+export interface NodeStatus {
+  version: string; // vd "v24.10.0"
+  execPath: string; // binary thật (đã giải symlink)
+  pkgVersion?: string; // phiên bản gói nodejs của dpkg, nếu node này đến từ gói
+  nodesource: boolean; // gói từ NodeSource (mang số upstream thật, không backport)
+  assessments: NodeAssessment[];
+  affected: NodeAssessment[];
+  fixedVersion?: string; // bản vá cùng major; undefined = major EOL, phải lên major khác
+  feed: NodeFeed;
+}
+
+export function nodeStatus(feed: NodeFeed): NodeStatus | undefined {
+  if (!commandExists("node")) return undefined;
+  const res = execCapture("node", ["-p", "process.version + ' ' + require('fs').realpathSync(process.execPath)"]);
+  const [version, execPath] = res.stdout.trim().split(" ");
+  if (res.code !== 0 || !version || !execPath) return undefined;
+  // Chỉ tin gói dpkg/changelog khi node đang chạy ĐÚNG là binary của gói đó —
+  // /usr/local/bin/node cài tay mà lấy changelog của gói nodejs sẽ báo "đã vá" nhầm.
+  const fromPkg = /^nodejs:/m.test(execCapture("dpkg-query", ["-S", execPath]).stdout);
+  const pkgVersion = fromPkg ? execCapture("dpkg-query", ["-W", "-f=${Version}", "nodejs"]).stdout.trim() || undefined : undefined;
+  let changelog: string | undefined;
+  if (fromPkg) {
+    for (const path of ["/usr/share/doc/nodejs/changelog.Debian.gz", "/usr/share/doc/nodejs/changelog.Debian"]) {
+      if (!existsSync(path)) continue;
+      try {
+        const raw = readFileSync(path);
+        changelog = path.endsWith(".gz") ? gunzipSync(raw).toString("utf8") : raw.toString("utf8");
+        break;
+      } catch {
+        /* file hỏng/không đọc được -> thử ứng viên kế tiếp */
+      }
+    }
+  }
+  const nodesource = /nodesource/i.test(pkgVersion ?? "");
+  const assessments = assessNode(version, feed, { changelog, distroBackport: Boolean(pkgVersion) && !nodesource });
+  const affected = assessments.filter((a) => a.verdict === "affected");
+  return { version, execPath, pkgVersion, nodesource, assessments, affected, fixedVersion: nodeFixedVersion(assessments), feed };
+}
+
 // Cấu hình ĐANG CHẠY, gộp mọi include ('nginx -T'). Cần root; không có root
 // thì trả undefined để phần đánh giá biết là "chưa đối chiếu được" thay vì
 // kết luận nhầm là "không bật".
@@ -113,6 +155,17 @@ function nginxRunningConfig(): string | undefined {
   const res = execCapture("nginx", ["-T"]);
   if (res.code !== 0 || !res.stdout.trim()) return undefined;
   return res.stdout;
+}
+
+// Đối chiếu CVE nginx bằng bằng chứng trên máy — dùng chung cho 'doctor
+// system' (in chi tiết) và lần quét định kỳ (gửi thông báo).
+export function nginxCveReport() {
+  const version = nginxUpstreamVersion();
+  if (!version) return undefined;
+  const changelog = nginxChangelog();
+  const config = nginxRunningConfig();
+  const buildFlags = `${execCapture("nginx", ["-V"]).stderr}${execCapture("nginx", ["-V"]).stdout}`;
+  return { version, changelog, config, assessments: assessNginxCves(version, { changelog: changelog?.text, buildFlags, config }) };
 }
 
 export interface DoctorSystemOptions {
@@ -124,9 +177,10 @@ export interface SystemReport {
   other: PendingUpdate[];
   staleUnits: { unit: string; libs: string[] }[];
   reboot: { required: boolean; packages: string[] };
+  node?: NodeStatus;
 }
 
-export function collectSystemReport(opts: DoctorSystemOptions): SystemReport {
+export async function collectSystemReport(opts: DoctorSystemOptions): Promise<SystemReport> {
   if (opts.refresh) {
     if (process.getuid && process.getuid() !== 0) {
       warn("Bỏ qua làm mới chỉ mục apt (cần quyền root) — kết quả dựa trên chỉ mục đã có sẵn, có thể cũ.");
@@ -146,10 +200,15 @@ export function collectSystemReport(opts: DoctorSystemOptions): SystemReport {
     if (libs && libs.length > 0) staleUnits.push({ unit, libs });
   }
 
-  return { security, other, staleUnits, reboot: rebootRequired() };
+  // Dữ liệu lỗ hổng Node: tải mới cùng lúc với 'apt-get update' (refresh), còn
+  // --no-refresh thì dùng cache + bảng có sẵn, không ra mạng.
+  const { feed, warnings } = await loadNodeFeed({ online: opts.refresh });
+  for (const w of warnings) warn(w);
+
+  return { security, other, staleUnits, reboot: rebootRequired(), node: nodeStatus(feed) };
 }
 
-export function cmdDoctorSystem(opts: DoctorSystemOptions): SystemReport | undefined {
+export async function cmdDoctorSystem(opts: DoctorSystemOptions): Promise<SystemReport | undefined> {
   section("Kiểm tra bản vá bảo mật của hệ thống");
 
   if (!hasApt()) {
@@ -157,7 +216,7 @@ export function cmdDoctorSystem(opts: DoctorSystemOptions): SystemReport | undef
     return undefined;
   }
 
-  const report = collectSystemReport(opts);
+  const report = await collectSystemReport(opts);
 
   // --- chỉ mục apt có mới không: quyết định độ tin cậy của cả phần này ---
   const age = aptIndexAgeSeconds();
@@ -225,15 +284,13 @@ export function cmdDoctorSystem(opts: DoctorSystemOptions): SystemReport | undef
 
   // --- nginx: CVE nổi bật theo phiên bản upstream ---
   console.log();
-  const nginxVersion = nginxUpstreamVersion();
-  if (!nginxVersion) {
+  const nginx = nginxCveReport();
+  if (!nginx) {
     info("Không đọc được phiên bản nginx (chưa cài?) — bỏ qua đối chiếu CVE.");
   } else {
+    const { version: nginxVersion, changelog, config, assessments } = nginx;
     const nginxPatch = report.security.find((p) => /^nginx/.test(p.pkg));
     const pkgInfo = nginxPackageInfo();
-    const changelog = nginxChangelog();
-    const config = nginxRunningConfig();
-    const buildFlags = `${execCapture("nginx", ["-V"]).stderr}${execCapture("nginx", ["-V"]).stdout}`;
 
     if (nginxPatch) {
       danger(
@@ -250,7 +307,6 @@ export function cmdDoctorSystem(opts: DoctorSystemOptions): SystemReport | undef
     // Đối chiếu từng CVE bằng BẰNG CHỨNG trên máy (changelog gói, cờ biên dịch,
     // cấu hình đang chạy) thay vì chỉ so số phiên bản upstream — vì bản phân
     // phối vá ngược mà giữ nguyên số, so số sẽ báo động mãi không tắt.
-    const assessments = assessNginxCves(nginxVersion, { changelog: changelog?.text, buildFlags, config });
     if (assessments.length > 0) {
       console.log();
       const patched = assessments.filter((a) => a.verdict === "patched");
@@ -294,36 +350,102 @@ export function cmdDoctorSystem(opts: DoctorSystemOptions): SystemReport | undef
 
   // --- Node.js: bản EOL không còn nhận bản vá nào nữa ---
   console.log();
-  if (commandExists("node")) {
-    const v = execCapture("node", ["--version"]).stdout.trim();
-    const life = nodeLifecycle(v);
+  const node = report.node;
+  if (node) {
+    const v = node.version;
+    const life = nodeLifecycle(v, new Date(), node.feed.eol);
     if (life.eol) {
       danger(
         `Node.js ${v} đã HẾT HẠN HỖ TRỢ${life.eolDate ? ` (EOL ${life.eolDate})` : " (bản lẻ, không phải LTS)"} — ` +
           `sẽ KHÔNG còn nhận bản vá bảo mật nào nữa, kể cả lỗi nghiêm trọng.`
       );
-      info(
-        "Nâng cấp lên LTS còn hỗ trợ:\n" +
-          "         curl -fsSL https://deb.nodesource.com/setup_24.x | sudo bash - && sudo apt-get install -y nodejs\n" +
-          "       Sau đó chạy lại 'napp app deploy <domain>' / 'napp service deploy <name>' để build lại native module."
-      );
     } else {
       ok(`Node.js ${v}${life.eolDate ? ` — còn hỗ trợ tới ${life.eolDate}` : ""}`);
+    }
+
+    // --- Node.js: CVE đã biết của phiên bản đang chạy ---
+    info(colorText("dim", `Dữ liệu lỗ hổng Node.js: ${node.feed.source}`));
+    for (const a of node.assessments.filter((x) => x.verdict === "patched")) {
+      console.log(`  ${colorText("green", "[ĐÃ VÁ]".padEnd(SEVERITY_TAG_WIDTH))} ${a.advisory.id} — ${a.reason}`);
+    }
+    // Node cũ có thể dính hàng chục mục — in chi tiết những mục nặng nhất (đã
+    // xếp theo mức độ), phần còn lại gộp một dòng cho khỏi trôi màn hình.
+    const SHOW = 8;
+    for (const a of node.affected.slice(0, SHOW)) {
+      printSeverity(a.advisory.severity, `${a.advisory.id} — ${a.advisory.summary}`);
+      step(`Vì sao còn nằm đây: ${a.reason}`);
+      if (a.advisory.condition) step(a.advisory.condition);
+      if (a.advisory.ref) step(colorText("dim", a.advisory.ref));
+    }
+    if (node.affected.length > SHOW) {
+      const rest = node.affected.slice(SHOW);
+      console.log(`    ${colorText("dim", `... và ${rest.length} lỗ hổng nữa (${rest.map((a) => a.advisory.severity).filter((x, i, arr) => arr.indexOf(x) === i).join("/")}) — cùng được vá khi nâng cấp`)}`);
+    }
+    if (node.affected.length > 0) {
+      console.log();
+      printNodeFixHint(node);
+    } else if (life.eol) {
+      info(
+        "Nâng cấp lên LTS còn hỗ trợ:  sudo napp doctor upgrade --node-major 24\n" +
+          "       Sau đó chạy lại 'napp app deploy <domain>' / 'napp service deploy <name>' để build lại native module."
+      );
     }
   }
 
   return report;
 }
 
+// Hướng dẫn vá Node theo đúng hoàn cảnh: cùng major có bản vá thì chỉ cần
+// nâng gói; major đã EOL thì bắt buộc lên major khác (có rủi ro tương thích).
+function nodeAffectedLabel(affected: NodeAssessment[]): string {
+  const ids = affected.slice(0, 3).map((a) => a.advisory.id).join(", ");
+  return affected.length > 3 ? `${ids} (+${affected.length - 3} lỗ hổng khác)` : ids;
+}
+
+function printNodeFixHint(node: NodeStatus): void {
+  const ids = nodeAffectedLabel(node.affected);
+  if (!node.fixedVersion) {
+    danger(`Nhánh Node.js ${node.version} đã hết hỗ trợ — KHÔNG có bản vá cho ${ids}. Phải lên major còn hỗ trợ.`);
+    info(
+      "Lên Node.js 24 LTS:  sudo napp doctor upgrade --node-major 24\n" +
+        "       Sau đó chạy lại 'napp app deploy <domain>' / 'napp service deploy <name>' để build lại native module."
+    );
+  } else if (!node.pkgVersion) {
+    danger(`Node.js ${node.version} cần nâng lên >= ${node.fixedVersion} để vá ${ids}.`);
+    warn(
+      `${node.execPath} KHÔNG thuộc gói apt nào (cài tay/nvm/n) — napp không tự vá được. Cài lại bản >= ${node.fixedVersion} ` +
+        `bằng đúng công cụ đã dùng, hoặc chuyển sang node hệ thống:  sudo napp doctor upgrade --node-major ${parseInt(node.version.slice(1), 10)}`
+    );
+  } else {
+    danger(`Node.js ${node.version} cần nâng lên >= ${node.fixedVersion} để vá ${ids}.`);
+    info(
+      "Vá ngay (cùng nhánh, không đổi major — an toàn cho app):  sudo napp doctor upgrade\n" +
+        "       napp tự cài gói nodejs mới rồi khởi động lại MỌI app/service còn chạy node cũ."
+    );
+    if (!node.nodesource) {
+      info(
+        `Node đang lấy từ kho của bản phân phối (gói ${node.pkgVersion}) — nếu kho chưa phát hành bản vá,\n` +
+          `       chuyển sang NodeSource:  sudo napp doctor upgrade --node-major ${parseInt(node.version.slice(1), 10)}`
+      );
+    }
+  }
+  if (node.affected.some((a) => a.advisory.cveIds.includes("CVE-2026-111497"))) {
+    info(
+      "Chưa vá được ngay? Giảm thiểu CVE-2026-111497: không giải nén Brotli từ nguồn lạ — từ chối body request có\n" +
+        "       'Content-Encoding: br', gửi 'Accept-Encoding: gzip, deflate' khi fetch() ra ngoài. Vá vẫn là bắt buộc."
+    );
+  }
+}
+
 // ---------------------------------------------------------------- deps ---
 
 export interface DoctorDepsOptions {
   target?: string; // domain của app hoặc tên service; bỏ trống = quét tất cả
-  audit: boolean; // chạy audit của package manager (cần mạng)
+  audit: boolean; // tra lỗ hổng + mã độc đã biết: OSV.dev, dự phòng là audit của package manager (cần mạng)
   deep: boolean; // tra thêm tuổi bản phát hành trên registry (cần mạng)
 }
 
-function allTargets(): ProjectTarget[] {
+export function allTargets(): ProjectTarget[] {
   const st = loadState();
   const targets: ProjectTarget[] = [];
   for (const a of Object.values(st.apps)) {
@@ -343,6 +465,38 @@ function allTargets(): ProjectTarget[] {
     });
   }
   return targets;
+}
+
+export interface KnownVulnScan {
+  findings: DepFinding[];
+  osv?: OsvScanResult; // có khi quét bằng OSV thành công
+  source: string; // đã dùng nguồn nào, vì sao — in cho người dùng
+}
+
+// Lỗ hổng + mã độc ĐÃ BIẾT của một dự án. Ưu tiên OSV trên các gói đang nằm
+// trong node_modules (xem lib/osv.ts về lý do); không được thì lùi về audit
+// của package manager như trước — không bao giờ im lặng bỏ qua.
+export async function scanKnownVulns(t: ProjectTarget): Promise<KnownVulnScan> {
+  let pkgs: ReturnType<typeof resolveInstalledPackages>;
+  try {
+    pkgs = resolveInstalledPackages(t.dir);
+  } catch (e) {
+    pkgs = undefined;
+    warn(`Không đọc được node_modules của ${t.label}: ${(e as Error).message}`);
+  }
+  if (pkgs) {
+    try {
+      const r = await osvScan(pkgs);
+      return {
+        findings: osvDepFindings(t, r),
+        osv: r,
+        source: `OSV.dev: ${r.prodCount} package production được tra lỗ hổng, ${r.devCount} package dev/build chỉ soi mã độc`,
+      };
+    } catch (e) {
+      return { findings: auditFindings(t), source: `OSV.dev không dùng được (${(e as Error).message}) — dùng '${t.pm} audit'` };
+    }
+  }
+  return { findings: auditFindings(t), source: `không đọc được node_modules — dùng '${t.pm} audit'` };
 }
 
 function resolveTargets(name?: string): ProjectTarget[] {
@@ -365,12 +519,13 @@ export async function cmdDoctorDeps(opts: DoctorDepsOptions): Promise<ProjectSca
     info("Chưa có app/service nào được napp quản lý — không có gì để quét.");
     return [];
   }
-  // Audit phải chạy DƯỚI USER CỦA APP (để cache npm/pnpm không bị root tạo ra
-  // trong thư mục app) — việc đó cần sudo. Không có root thì bỏ hẳn phần audit
-  // thay vì để sudo thất bại ở từng dự án.
+  // Tra lỗ hổng cần root: đọc node_modules của app (thư mục 0750 của user app)
+  // cho OSV, hoặc chạy audit DƯỚI USER CỦA APP khi phải lùi về (để cache
+  // npm/pnpm không bị root tạo ra trong thư mục app). Không có root thì bỏ hẳn
+  // phần này thay vì thất bại ở từng dự án.
   let audit = opts.audit;
   if (audit && (process.getuid?.() ?? 0) !== 0) {
-    warn("Chưa chạy bằng sudo — BỎ QUA phần audit lỗ hổng (audit phải chạy dưới user của app). Dùng 'sudo napp doctor deps' để quét đầy đủ.");
+    warn("Chưa chạy bằng sudo — BỎ QUA phần tra lỗ hổng/mã độc (cần đọc node_modules của từng app). Dùng 'sudo napp doctor deps' để quét đầy đủ.");
     audit = false;
   }
 
@@ -378,13 +533,19 @@ export async function cmdDoctorDeps(opts: DoctorDepsOptions): Promise<ProjectSca
   for (const t of targets) {
     console.log();
     info(`${t.label}  (${t.dir}, ${t.pm})`);
-    const res = scanProject(t, { audit });
+    const res = scanProject(t, { audit: false });
     if (res.skipped) {
       step(`Bỏ qua: ${res.skipped}`);
       results.push(res);
       continue;
     }
     step(`Đã cài ${res.packageCount} package trong node_modules`);
+    if (audit) {
+      const known = await scanKnownVulns(t);
+      step(known.source);
+      res.findings.push(...known.findings);
+      res.findings.sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);
+    }
 
     if (opts.deep) {
       const fresh = await checkFreshReleases(t);
@@ -445,6 +606,38 @@ export interface DoctorUpgradeOptions {
   only: string[]; // chỉ nâng cấp các gói này (vd: nginx)
   yes: boolean;
   restart: boolean; // tự restart dịch vụ còn nạp thư viện cũ sau khi cài
+  nodeMajor?: number; // chuyển Node.js sang major này qua NodeSource (vd 24)
+}
+
+// Đổi major Node.js qua NodeSource: thêm kho node_<major>.x rồi cài gói. Dùng
+// khi major hiện tại đã EOL (không bao giờ có bản vá) hoặc node đang lấy từ
+// kho Ubuntu/Debian chưa kịp vá. Đổi major có thể làm hỏng native module đã
+// build — vì vậy hỏi xác nhận và nhắc deploy lại.
+async function switchNodeMajor(major: number, yes: boolean, feed: NodeFeed): Promise<boolean> {
+  if (![22, 24, 26].includes(major)) die(`--node-major chỉ nhận nhánh LTS còn hỗ trợ: 22, 24, 26 (nhận được: ${major}).`);
+  if (nodeLifecycle(`${major}.0.0`, new Date(), feed.eol).eol) die(`Node.js ${major}.x đã hết hỗ trợ — chọn nhánh LTS mới hơn.`);
+  const cur = nodeStatus(feed);
+  info(`Chuyển Node.js ${cur?.version ?? "(chưa cài)"} -> ${major}.x LTS qua NodeSource.`);
+  const majorChanges = cur !== undefined && parseInt(cur.version.slice(1), 10) !== major;
+  if (majorChanges) {
+    warn("Đổi MAJOR có thể làm hỏng native module (bcrypt, sharp, better-sqlite3...) đã build cho Node cũ — cần deploy lại app sau đó.");
+  }
+  if (!(await confirm(`Tiến hành cài Node.js ${major}.x?`, yes))) {
+    info("Đã huỷ. Không thay đổi gì.");
+    return false;
+  }
+  runCmd("bash", ["-c", `curl -fsSL https://deb.nodesource.com/setup_${major}.x | bash -`]);
+  waitForAptLocks();
+  runCmd("env", ["DEBIAN_FRONTEND=noninteractive", "apt-get", "-y", "-o", `DPkg::Lock::Timeout=${APT_LOCK_TIMEOUT_S}`, "install", "nodejs"]);
+  const after = nodeStatus(feed);
+  ok(`Node.js hiện tại: ${after?.version ?? "?"} (${after?.execPath ?? "?"})`);
+  if (after && after.affected.length > 0) {
+    danger(`Vẫn còn dính ${nodeAffectedLabel(after.affected)} — kho NodeSource có thể chưa phát hành bản vá, thử lại sau ít giờ.`);
+  }
+  if (majorChanges) {
+    warn("Đã đổi major Node.js: chạy lại 'napp app deploy <domain>' / 'napp service deploy <name>' để build lại native module.");
+  }
+  return true;
 }
 
 export async function cmdDoctorUpgrade(opts: DoctorUpgradeOptions): Promise<void> {
@@ -452,10 +645,30 @@ export async function cmdDoctorUpgrade(opts: DoctorUpgradeOptions): Promise<void
   if (!hasApt()) die("Không tìm thấy apt-get — lệnh này chỉ hỗ trợ Ubuntu/Debian.");
 
   section("Cài bản vá cho hệ thống");
+
+  const { feed, warnings } = await loadNodeFeed({ online: true });
+  for (const w of warnings) warn(w);
+
+  if (opts.nodeMajor !== undefined) {
+    if (await switchNodeMajor(opts.nodeMajor, opts.yes, feed)) await restartStaleUnits(opts);
+    return;
+  }
+
   info("Đang làm mới chỉ mục gói (apt-get update)...");
   aptGet(["update", "-qq"]);
 
-  const pending = pendingUpdates();
+  // Gói nodejs của NodeSource KHÔNG nằm trong kho '-security' nên bộ lọc "chỉ
+  // bản vá bảo mật" sẽ bỏ sót nó — đúng gói cần vá nhất. Coi nó là bản vá bảo
+  // mật khi Node đang chạy dính CVE đã biết.
+  const node = nodeStatus(feed);
+  const nodeVulnerable = Boolean(node && node.affected.length > 0 && node.pkgVersion);
+  const pending = pendingUpdates().map((p) => (p.pkg === "nodejs" && nodeVulnerable ? { ...p, security: true } : p));
+  if (node && node.affected.length > 0 && !pending.some((p) => p.pkg === "nodejs")) {
+    console.log();
+    danger(`Node.js ${node.version} dính ${nodeAffectedLabel(node.affected)} nhưng kho apt KHÔNG có bản nodejs mới hơn.`);
+    printNodeFixHint(node);
+    console.log();
+  }
   if (pending.length === 0) {
     ok("Hệ thống đã ở bản mới nhất — không có gì để cài.");
     return;
@@ -525,7 +738,18 @@ export async function cmdDoctorUpgrade(opts: DoctorUpgradeOptions): Promise<void
     ok("Cấu hình nginx hợp lệ (nginx -t).");
   }
 
-  // --- restart các dịch vụ còn nạp thư viện cũ ---
+  if (selected.some((p) => p.pkg === "nodejs")) {
+    const after = nodeStatus(feed);
+    if (after && after.affected.length === 0) ok(`Node.js đã lên ${after.version} — hết các lỗ hổng đã biết.`);
+    else if (after) danger(`Node.js ${after.version} vẫn dính ${nodeAffectedLabel(after.affected)}.`);
+  }
+
+  await restartStaleUnits(opts);
+}
+
+// Restart các unit còn nạp thư viện/binary cũ (kể cả /usr/bin/node sau khi vá
+// nodejs — app vẫn chạy node CŨ trong RAM tới khi restart), rồi nhắc reboot.
+async function restartStaleUnits(opts: DoctorUpgradeOptions): Promise<void> {
   const stale = managedUnits()
     .map((unit) => ({ unit, libs: unitStaleLibraries(unit) ?? [] }))
     .filter((s) => s.libs.length > 0);
@@ -568,17 +792,19 @@ export interface DoctorAllOptions extends DoctorSystemOptions {
 }
 
 export async function cmdDoctor(opts: DoctorAllOptions): Promise<void> {
-  const report = cmdDoctorSystem({ refresh: opts.refresh });
+  const report = await cmdDoctorSystem({ refresh: opts.refresh });
   const deps = await cmdDoctorDeps({ audit: opts.audit, deep: opts.deep });
 
   section("Tóm tắt");
   const secCount = report?.security.length ?? 0;
+  const nodeCves = report?.node?.affected ?? [];
   const depCritical = deps.reduce((n, r) => n + r.findings.filter((f) => f.severity === "critical" || f.severity === "high").length, 0);
 
-  if (secCount === 0 && depCritical === 0) {
+  if (secCount === 0 && depCritical === 0 && nodeCves.length === 0) {
     ok("Không phát hiện rủi ro bảo mật nào cần xử lý ngay.");
   } else {
     if (secCount > 0) danger(`${secCount} gói hệ thống có bản vá bảo mật đang chờ  ->  sudo napp doctor upgrade`);
+    if (nodeCves.length > 0) danger(`Node.js ${report!.node!.version} dính ${nodeAffectedLabel(nodeCves)}  ->  sudo napp doctor upgrade`);
     if (depCritical > 0) danger(`${depCritical} rủi ro mức CAO/NGHIÊM TRỌNG trong dependencies  ->  xem phần hướng dẫn xử lý ở trên`);
   }
   console.log();

@@ -67,8 +67,8 @@ async function confirm(question: string, autoYes: boolean): Promise<boolean> {
 }
 
 function installNodejs(): void {
-  info("Đang cài đặt Node.js 22.x LTS qua NodeSource...");
-  runCmd("bash", ["-lc", "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -"]);
+  info("Đang cài đặt Node.js 24.x LTS qua NodeSource...");
+  runCmd("bash", ["-lc", "curl -fsSL https://deb.nodesource.com/setup_24.x | bash -"]);
   aptGet(["install", "-y", "nodejs"]);
   runCmd("bash", ["-lc", "corepack enable || true"]);
   ok("Đã cài Node.js");

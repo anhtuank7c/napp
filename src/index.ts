@@ -9,6 +9,17 @@ import { NAPP_VERSION } from "./version";
 import { cmdCheck } from "./commands/check";
 import { cmdDoctor, cmdDoctorSystem, cmdDoctorDeps, cmdDoctorUpgrade } from "./commands/doctor";
 import {
+  cmdNotifyTelegram,
+  cmdNotifyTest,
+  cmdNotifyShow,
+  cmdNotifyRemove,
+  cmdDoctorWatchEnable,
+  cmdDoctorWatchDisable,
+  cmdDoctorWatchShow,
+  cmdDoctorWatchRun,
+} from "./commands/notify";
+import { cmdNotifyDeliver } from "./lib/notify";
+import {
   cmdAppCreate,
   cmdAppDeploy,
   cmdAppRemove,
@@ -192,24 +203,24 @@ program
 // cung ứng trong dependencies của từng app/service.
 const doctor = program
   .command("doctor")
-  .description("soi rủi ro bảo mật: bản vá hệ thống đang chờ + rủi ro chuỗi cung ứng của dependencies")
+  .description("soi rủi ro bảo mật: bản vá hệ thống đang chờ, CVE Node.js/nginx, lỗ hổng + mã độc trong dependencies")
   .option("--no-refresh", "không chạy 'apt-get update' trước khi kiểm tra")
-  .option("--no-audit", "bỏ qua audit lỗ hổng của package manager (không cần mạng)")
+  .option("--no-audit", "bỏ qua tra lỗ hổng + mã độc đã biết (OSV.dev / audit của package manager) — không cần mạng")
   .option("--deep", "tra thêm tuổi bản phát hành của dependency trực tiếp trên registry npm (cần mạng)")
   .action(async (opts) => cmdDoctor({ refresh: opts.refresh !== false, audit: opts.audit !== false, deep: Boolean(opts.deep) }));
 
 doctor
   .command("system")
-  .description("kiểm tra bản vá bảo mật đang chờ, dịch vụ còn nạp thư viện cũ, database lộ ra mạng, CVE nginx, vòng đời Node.js")
+  .description("kiểm tra bản vá bảo mật đang chờ, dịch vụ còn nạp thư viện cũ, database lộ ra mạng, CVE nginx, CVE + vòng đời Node.js")
   .option("--no-refresh", "không chạy 'apt-get update' trước khi kiểm tra")
   .action(async (opts) => {
-    cmdDoctorSystem({ refresh: opts.refresh !== false });
+    await cmdDoctorSystem({ refresh: opts.refresh !== false });
   });
 
 doctor
   .command("deps [target]")
   .description("quét rủi ro chuỗi cung ứng trong dependencies (bỏ trống target = quét mọi app + service)")
-  .option("--no-audit", "bỏ qua audit lỗ hổng của package manager (không cần mạng)")
+  .option("--no-audit", "bỏ qua tra lỗ hổng + mã độc đã biết (OSV.dev / audit của package manager) — không cần mạng")
   .option("--deep", "tra thêm tuổi bản phát hành của dependency trực tiếp trên registry npm (cần mạng)")
   .action(async (target, opts) => {
     await cmdDoctorDeps({ target, audit: opts.audit !== false, deep: Boolean(opts.deep) });
@@ -217,9 +228,10 @@ doctor
 
 doctor
   .command("upgrade")
-  .description("cài bản vá (mặc định CHỈ bản vá bảo mật) rồi khởi động lại dịch vụ để bản vá có hiệu lực")
+  .description("cài bản vá (mặc định CHỈ bản vá bảo mật, gồm cả nodejs khi đang dính CVE) rồi khởi động lại dịch vụ để bản vá có hiệu lực")
   .option("--all", "cài mọi bản cập nhật đang chờ, không chỉ bản vá bảo mật")
   .option("--only <pkg...>", "chỉ nâng cấp các gói này (vd: --only nginx)")
+  .option("--node-major <major>", "chuyển Node.js sang nhánh LTS này qua NodeSource (22 | 24 | 26) — khi nhánh đang dùng đã hết hỗ trợ")
   .option("--no-restart", "không tự khởi động lại dịch vụ sau khi cài (chỉ in hướng dẫn)")
   .option("-y, --yes", "không hỏi xác nhận")
   .action(async (opts) =>
@@ -228,8 +240,35 @@ doctor
       only: opts.only ?? [],
       yes: Boolean(opts.yes),
       restart: opts.restart !== false,
+      nodeMajor: opts.nodeMajor !== undefined ? parseInt(opts.nodeMajor, 10) : undefined,
     })
   );
+
+const doctorWatch = doctor.command("watch").description("quét bảo mật hằng ngày (systemd timer) + gửi thông báo Telegram khi có vấn đề");
+doctorWatch.command("show").description("lịch quét, kênh thông báo, kết quả gửi gần nhất").action(() => cmdDoctorWatchShow());
+doctorWatch
+  .command("enable")
+  .description("bật (hoặc đổi giờ) quét hằng ngày")
+  .option("--at <HH:MM>", "giờ quét mỗi ngày (giờ của server)", "07:00")
+  .action((opts) => cmdDoctorWatchEnable({ at: opts.at }));
+doctorWatch.command("disable").description("tắt quét định kỳ").action(() => cmdDoctorWatchDisable());
+// Lệnh mà timer chạy — tên KHÔNG đổi (unit trên server gọi đúng tên này).
+doctorWatch.command("run").description("quét ngay rồi gửi thông báo nếu có vấn đề mới (lệnh mà timer chạy)").action(async () => cmdDoctorWatchRun());
+
+// ----------------------------------------------------------------- notify ---
+const notify = program.command("notify").description("kênh nhận thông báo bảo mật (Telegram)");
+notify.command("show").description("cấu hình hiện tại (token đã che) + kết quả gửi gần nhất").action(() => cmdNotifyShow());
+notify
+  .command("telegram")
+  .description("cấu hình bot Telegram (bỏ trống --token để nhập ẩn, không lưu vào lịch sử shell)")
+  .option("--token <token>", "bot token từ @BotFather")
+  .option("--chat <id>", "chat ID nhận tin (group/channel là số âm, hoặc @tên_kênh)")
+  .option("--no-verify", "lưu luôn, không gửi tin thử trước")
+  .action(async (opts) => cmdNotifyTelegram({ token: opts.token, chat: opts.chat, verify: opts.verify !== false }));
+notify.command("test").description("gửi một tin thử").action(async () => cmdNotifyTest());
+notify.command("remove").description("xoá cấu hình Telegram").action(() => cmdNotifyRemove());
+// Tiến trình con cách ly việc gửi (lib/notify.ts) — không dành cho người dùng.
+notify.command("deliver", { hidden: true }).action(async () => cmdNotifyDeliver());
 
 // Cờ dùng chung ------------------------------------------------------------
 const repeat = <T,>(parse: (v: string) => T) => (v: string, prev: T[]) => [...prev, parse(v)];

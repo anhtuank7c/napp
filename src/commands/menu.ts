@@ -4,6 +4,8 @@ import { ask as promptAsk, askBlock, select, checkbox, interactive, PromptCancel
 import { execCapture } from "../lib/exec";
 import { cmdCheck } from "./check";
 import { cmdDoctor, cmdDoctorSystem, cmdDoctorDeps, cmdDoctorUpgrade } from "./doctor";
+import { cmdNotifyTelegram, cmdNotifyTest, cmdNotifyShow, cmdDoctorWatchEnable, cmdDoctorWatchDisable, cmdDoctorWatchRun } from "./notify";
+import { loadNotifyConfig } from "../lib/notify";
 import {
   cmdAppCreate,
   cmdAppDeploy,
@@ -1310,7 +1312,7 @@ async function menuDoctor(): Promise<void> {
           await cmdDoctor({ refresh: true, audit: true, deep });
         },
       },
-      { label: "Chỉ bản vá bảo mật của hệ thống", run: () => (cli("doctor system"), void cmdDoctorSystem({ refresh: true })) },
+      { label: "Chỉ bản vá bảo mật của hệ thống", run: async () => (cli("doctor system"), void (await cmdDoctorSystem({ refresh: true }))) },
       { label: "Dependencies của MỌI app/service", run: async () => (cli("doctor deps"), void (await cmdDoctorDeps({ audit: true, deep: false }))) },
       {
         label: "Dependencies của MỘT app/service",
@@ -1323,8 +1325,45 @@ async function menuDoctor(): Promise<void> {
       },
       { label: "Cài bản vá BẢO MẬT ngay (apt + restart dịch vụ)", run: () => (cli("doctor upgrade"), cmdDoctorUpgrade({ all: false, only: [], yes: false, restart: true })) },
       { label: "Cài TẤT CẢ bản cập nhật đang chờ", run: () => (cli("doctor upgrade --all"), cmdDoctorUpgrade({ all: true, only: [], yes: false, restart: true })) },
+      { label: "Quét hằng ngày & thông báo Telegram", run: menuDoctorWatch, open: true },
+      {
+        label: "Chuyển Node.js sang nhánh LTS khác (khi nhánh đang dùng hết hỗ trợ)",
+        run: async () => {
+          const major = await askChoice("Nhánh Node.js LTS", ["24", "26", "22"], "24");
+          cli(`doctor upgrade --node-major ${major}`);
+          await cmdDoctorUpgrade({ all: false, only: [], yes: false, restart: true, nodeMajor: parseInt(major, 10) });
+        },
+      },
     ],
   }));
+}
+
+async function menuDoctorWatch(): Promise<void> {
+  await menuLoop(() => {
+    const watch = timerState("napp-doctor-watch");
+    const tg = Boolean(loadNotifyConfig().telegram);
+    return {
+      title: "Quét hằng ngày & thông báo",
+      items: [
+        { label: `Cấu hình bot Telegram ${state(tg)}`, run: async () => (cli("notify telegram"), await cmdNotifyTelegram({ verify: true })) },
+        ...(tg ? [{ label: "Gửi tin thử", run: async () => (cli("notify test"), await cmdNotifyTest()) }] : []),
+        {
+          label: `Quét bảo mật hằng ngày ${state(watch.enabled)}${watch.schedule ? colorText("dim", ` (${watch.schedule})`) : ""}`,
+          run: async () => {
+            if (watch.enabled && !(await askYesNo("Đang bật. Đổi giờ quét? (Không = tắt hẳn)", true))) {
+              cli("doctor watch disable");
+              return cmdDoctorWatchDisable();
+            }
+            const at = (await promptAsk("Giờ quét mỗi ngày HH:MM [07:00]: ")).trim() || "07:00";
+            cli(`doctor watch enable --at ${at}`);
+            cmdDoctorWatchEnable({ at });
+          },
+        },
+        { label: "Quét + gửi thông báo ngay", run: async () => (cli("doctor watch run"), await cmdDoctorWatchRun()) },
+        { label: "Xem trạng thái", run: () => (cli("notify show"), cmdNotifyShow()) },
+      ],
+    };
+  });
 }
 
 // ------------------------------------------------------ 10. Hiệu năng & nginx

@@ -16,6 +16,31 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.32.0
+- Vá CVE-2026-111497 của Node.js (Brotli, RCE, CVSS 9.8): napp doctor soi CVE
+  của Node đang chạy; napp doctor upgrade coi gói nodejs (NodeSource, vốn
+  không nằm trong kho -security) là bản vá bảo mật khi Node dính CVE, cài bản
+  vá cùng nhánh (22.23.4 / 24.22.1 / 26.12.1) rồi restart app.
+- Dữ liệu lỗ hổng Node lấy TRỰC TUYẾN mỗi lần quét: nodejs/security-wg (CVE),
+  nodejs.org/dist/index.json (cờ bản phát hành bảo mật — biết ngay khi Node
+  phát hành bản vá, trước cả khi có mã CVE), lịch EOL. Cache ở
+  /var/cache/napp/node-feed.json; offline thì dùng cache rồi bảng có sẵn.
+- napp doctor upgrade --node-major <22|24|26>: chuyển nhánh Node qua NodeSource
+  khi nhánh đang dùng đã EOL (20.x không có bản vá).
+- "Đã vá nhưng chưa restart" nay soi mọi tiến trình trong cgroup của unit, không
+  chỉ MainPID (app 'npm start' có node thật là tiến trình con).
+- Quét bảo mật hằng ngày + thông báo Telegram: sudo napp notify telegram (token
+  nhập ẩn, gửi thử trước khi lưu), sudo napp doctor watch enable --at 07:00.
+  Chỉ báo vấn đề MỚI, nhắc lại mỗi ngày nếu chưa xử lý, báo "đã sạch" một lần.
+- Gửi thông báo trong tiến trình con riêng (heap 64 MB, SIGKILL sau 60s):
+  Telegram sập / token sai / treo / crash đều không ảnh hưởng lần quét. Job
+  quét giới hạn CPUQuota 50%, MemoryMax 768M, tối đa 20 phút.
+- Dependencies tra trên OSV.dev: lỗ hổng + MÃ ĐỘC đã biết (OpenSSF MAL-, GHSA
+  CWE-506) theo đúng phiên bản trong node_modules. Lỗ hổng chỉ báo cho
+  dependency PRODUCTION (resolve như Node, chạy cả npm lẫn pnpm); mã độc soi cả
+  dev. Gộp theo gói, khuyên bản cần lên để sạch hẳn. OSV lỗi -> audit như cũ.
+- napp check cài Node.js 24.x thay vì 22.x.
+
 ## 1.31.0
 - Bảo mật (OWASP): napp update + install.sh chỉ cài bản có chữ ký Ed25519, từ
   chối hạ phiên bản (--allow-downgrade để cố ý hạ).

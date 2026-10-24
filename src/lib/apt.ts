@@ -92,27 +92,52 @@ export function rebootRequired(): { required: boolean; packages: string[] } {
 // "(deleted)" — chính là cách needrestart làm, không cần cài thêm gói nào.
 // Trả về undefined khi không đọc được (không phải root / unit không chạy).
 export function unitStaleLibraries(unit: string): string[] | undefined {
-  const pidOut = execCapture("systemctl", ["show", "-p", "MainPID", "--value", unit]).stdout.trim();
-  const pid = parseInt(pidOut, 10);
-  if (!Number.isInteger(pid) || pid <= 0) return undefined;
-  let maps: string;
-  try {
-    maps = readFileSync(`/proc/${pid}/maps`, "utf8");
-  } catch {
-    return undefined; // cần quyền root để đọc maps của tiến trình khác
-  }
+  const pids = unitPids(unit);
+  if (pids.length === 0) return undefined;
   const stale = new Set<string>();
-  for (const line of maps.split("\n")) {
-    const m = line.match(/\s(\/\S.*?)\s+\(deleted\)$/);
-    if (!m) continue;
-    const path = m[1]!;
-    // Bỏ qua các map ẢO bị đánh dấu deleted trong đời sống bình thường của
-    // tiến trình (memfd, shm, dev) — chúng không liên quan tới việc vá gói.
-    if (/^\/(memfd:|dev\/|SYSV|drm|anon_|\[)/.test(path)) continue;
-    if (!/\.so($|\.)|^\/usr\/(s?bin|lib|libexec)\//.test(path)) continue;
-    stale.add(path);
+  let readAny = false;
+  for (const pid of pids) {
+    let maps: string;
+    try {
+      maps = readFileSync(`/proc/${pid}/maps`, "utf8");
+    } catch {
+      continue; // cần quyền root để đọc maps của tiến trình khác / pid vừa thoát
+    }
+    readAny = true;
+    for (const line of maps.split("\n")) {
+      const m = line.match(/\s(\/\S.*?)\s+\(deleted\)$/);
+      if (!m) continue;
+      const path = m[1]!;
+      // Bỏ qua các map ẢO bị đánh dấu deleted trong đời sống bình thường của
+      // tiến trình (memfd, shm, dev) — chúng không liên quan tới việc vá gói.
+      if (/^\/(memfd:|dev\/|SYSV|drm|anon_|\[)/.test(path)) continue;
+      if (!/\.so($|\.)|^\/usr\/(s?bin|lib|libexec)\//.test(path)) continue;
+      stale.add(path);
+    }
   }
-  return [...stale];
+  return readAny ? [...stale] : undefined;
+}
+
+// MỌI tiến trình của unit, không chỉ MainPID. App napp chạy qua 'bash -lc
+// "npm start"': MainPID là npm, còn node thật chạy server là tiến trình CON —
+// chỉ soi MainPID thì sau khi vá nodejs sẽ báo "đã có hiệu lực" trong khi
+// server vẫn chạy /usr/bin/node cũ (deleted). Đọc cgroup.procs (cgroup v2,
+// mặc định từ Ubuntu 22.04); không đọc được thì lùi về MainPID.
+function unitPids(unit: string): number[] {
+  const cg = execCapture("systemctl", ["show", "-p", "ControlGroup", "--value", unit]).stdout.trim();
+  if (cg) {
+    try {
+      const pids = readFileSync(`/sys/fs/cgroup${cg}/cgroup.procs`, "utf8")
+        .split("\n")
+        .map((x) => parseInt(x, 10))
+        .filter((x) => Number.isInteger(x) && x > 0);
+      if (pids.length > 0) return pids;
+    } catch {
+      /* cgroup v1 / unit không chạy -> thử MainPID */
+    }
+  }
+  const pid = parseInt(execCapture("systemctl", ["show", "-p", "MainPID", "--value", unit]).stdout.trim(), 10);
+  return Number.isInteger(pid) && pid > 0 ? [pid] : [];
 }
 
 // --------------------------------------------------------------------------

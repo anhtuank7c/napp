@@ -1,4 +1,5 @@
 import * as readline from "node:readline";
+import { Writable } from "node:stream";
 
 // --------------------------------------------------------------------------
 // MỌI câu hỏi tương tác của napp đi qua đây (menu lẫn lời xác nhận bên trong
@@ -103,6 +104,40 @@ function readLines(question: string, more: (lines: string[]) => boolean): Promis
 /** Hỏi một dòng. Ném PromptCancelled khi Ctrl+C / Ctrl+D. */
 export async function ask(question: string): Promise<string> {
   return (await readLines(question, () => false))[0] ?? "";
+}
+
+/**
+ * Hỏi một bí mật (token, mật khẩu): KHÔNG hiện ký tự khi gõ, không vào lịch sử
+ * shell như khi truyền bằng cờ dòng lệnh. Không phải terminal thì đọc một dòng
+ * từ stdin (vd 'echo "$TOKEN" | napp ...') để tự động hoá được.
+ */
+export async function askSecret(question: string): Promise<string> {
+  if (!process.stdin.isTTY) return ask(question);
+  process.stdout.write(question);
+  // Đưa readline một output "câm": phần echo ký tự đi vào đây và biến mất.
+  const muted = new Writable({ write: (_c, _e, cb) => cb() });
+  return new Promise((resolve, reject) => {
+    const rl = readline.createInterface({ input: process.stdin, output: muted, terminal: true });
+    let settled = false;
+    rl.on("SIGINT", () => {
+      settled = true;
+      rl.close();
+      process.stdout.write("^C\n");
+      reject(new PromptCancelled("sigint"));
+    });
+    rl.on("close", () => {
+      if (settled) return;
+      settled = true;
+      process.stdout.write("\n");
+      reject(new PromptCancelled("eof"));
+    });
+    rl.on("line", (l) => {
+      settled = true;
+      rl.close();
+      process.stdout.write("\n");
+      resolve(l.replace(/\r$/, ""));
+    });
+  });
 }
 
 /** Hỏi có/không. Enter trống = def. */

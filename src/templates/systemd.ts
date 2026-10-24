@@ -262,6 +262,47 @@ WantedBy=timers.target
 `;
 }
 
+// --- systemd timer cho quét bảo mật định kỳ + gửi thông báo --------------
+// Chạy bằng root (cần 'apt-get update', đọc /proc của app), nên phải có rào
+// cứng: dù napp, apt hay mạng gặp sự cố tệ nhất, job này cũng KHÔNG được làm
+// chậm hay chiếm hết máy đang phục vụ app.
+//   MemoryMax       : vượt là kernel giết RIÊNG job này (OOM trong cgroup của nó)
+//   CPUQuota        : tối đa nửa nhân CPU
+//   TimeoutStartSec : treo (DNS, apt kẹt khoá...) quá 20 phút là systemd dừng hẳn
+export function renderDoctorWatchService(binPath: string): string {
+  return `# Managed by napp — quét bảo mật định kỳ, gửi thông báo khi có vấn đề
+[Unit]
+Description=napp scheduled security scan + notification
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=${binPath} doctor watch run
+Nice=15
+IOSchedulingClass=idle
+CPUQuota=50%
+MemoryMax=768M
+TimeoutStartSec=20min
+`;
+}
+
+export function renderDoctorWatchTimer(onCalendar: string): string {
+  return `# Managed by napp — lịch quét bảo mật
+[Unit]
+Description=napp scheduled security scan timer
+
+[Timer]
+OnCalendar=${onCalendar}
+Persistent=true
+# Lệch ngẫu nhiên: nhiều server cùng cấu hình không cùng gọi apt/Telegram một lúc.
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target
+`;
+}
+
 // --- systemd timer cho đồng bộ dải IP Cloudflare vào nginx (real-IP) -----
 // CHỈ cập nhật danh sách IP Cloudflare trong nginx để khôi phục IP client
 // thật. KHÔNG đụng tới tường lửa — UFW mở 80/443 công khai, không phụ thuộc

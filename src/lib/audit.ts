@@ -16,7 +16,7 @@ export const AUDIT_LOG = "/var/log/napp/audit.log";
 const O_NOFOLLOW = (constants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
 
 // Lệnh chỉ đọc: không ghi nhật ký (chỉ làm nhiễu).
-const READ_ONLY_VERBS = new Set(["list", "show", "logs", "help", "version", "changelog", "sample"]);
+const READ_ONLY_VERBS = new Set(["list", "show", "logs", "help", "version", "changelog", "sample", "deliver"]);
 // Cờ mang bí mật ở tham số KẾ TIẾP (hoặc dạng --cờ=giá-trị).
 const SECRET_FLAGS = ["--token", "--ssh-key", "--password", "--email"];
 
