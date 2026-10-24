@@ -16,6 +16,21 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.33.0
+- Chạy nhiều instance: napp app scale <domain> <số> [--sticky], napp service
+  scale <name> <số>. Unit template kiểu nexus@.service: web app tên instance =
+  cổng (napp-shop@3001), worker @1..N. NAPP_INSTANCE cho mỗi instance,
+  NAPP_PRIMARY=1 cho instance đầu (để cron chỉ chạy một nơi).
+- nginx chia tải qua /etc/nginx/napp-upstreams/<domain>.conf (least_conn /
+  ip_hash), vhost chỉ còn một dòng include — scale không đụng khối SSL certbot.
+- Opt-in, không downtime: lần scale đầu bật instance mới trước, đổi nginx, rồi
+  mới thay unit cũ (giữ cổng cũ). Lỗi giữa chừng -> hoàn tác về nguyên trạng.
+- Deploy/restart cuốn chiếu: từng instance, chờ đúng tiến trình của unit nghe
+  cổng rồi mới tới cái kế. Đo trên Ubuntu 24.04 + nginx thật: 0 request lỗi.
+- Sửa: EnvironmentFile luôn thắng Environment (.env ghi đè được PORT) — biến
+  theo instance ép qua ExecStart=/usr/bin/env; mem guard restart nhầm tên unit;
+  doctor upgrade restart mọi instance cùng lúc.
+
 ## 1.32.0
 - Vá CVE-2026-111497 của Node.js (Brotli, RCE, CVSS 9.8): napp doctor soi CVE
   của Node đang chạy; napp doctor upgrade coi gói nodejs (NodeSource, vốn

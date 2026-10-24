@@ -1,4 +1,4 @@
-import type { AppRecord } from "../lib/state";
+import { appPorts, type AppRecord } from "../lib/state";
 import { assertSafeNginxInputs, validateMaxBody } from "../lib/validate";
 
 export const CLOUDFLARE_REALIP_CONF = "/etc/nginx/conf.d/cloudflare-realip.conf";
@@ -19,6 +19,45 @@ export const NGINX_PROXY_CONF = "/etc/nginx/conf.d/00-napp-proxy.conf";
 // trọn vẹn — không cần chạm vào vhost lần nào nữa, không có gì của certbot để
 // làm hỏng. Đây cũng là lý do `napp nginx apply` chỉ dám vá bằng thay chuỗi.
 export const NGINX_LOCATIONS_DIR = "/etc/nginx/napp-locations";
+
+// Upstream của app ĐÃ SCALE (nhiều instance) nằm ở file riêng, vhost chỉ còn
+// một dòng include. Lý do: certbot chèn khối SSL thẳng vào vhost nên napp không
+// bao giờ render lại vhost — tăng/giảm instance mà phải sửa vhost là mỗi lần
+// scale đều liều với HTTPS của site. File này thì napp sở hữu trọn vẹn.
+export const NGINX_UPSTREAMS_DIR = "/etc/nginx/napp-upstreams";
+
+export function appUpstreamPath(domain: string): string {
+  return `${NGINX_UPSTREAMS_DIR}/${domain}.conf`;
+}
+
+export function appUpstreamName(domain: string): string {
+  return `napp_${sanitizeUpstreamName(domain)}`;
+}
+
+/**
+ * Khối upstream chia request cho mọi instance của app.
+ *   least_conn     : vào instance đang ít kết nối nhất — hợp với Node (một
+ *                    request chậm không làm cả hàng đợi sau nó chờ theo).
+ *   ip_hash        : (--sticky) một IP luôn vào cùng instance, cho app giữ
+ *                    trạng thái trong RAM.
+ *   max_fails/fail_timeout : instance chết/đang restart bị bỏ qua 10s sau 3 lần
+ *                    lỗi. Kết hợp proxy_next_upstream mặc định của nginx (thử
+ *                    instance khác khi lỗi kết nối, CHỈ với request idempotent)
+ *                    là thứ làm cho deploy cuốn chiếu không rớt request.
+ */
+export function renderAppUpstream(app: AppRecord): string {
+  const servers = appPorts(app)
+    .map((p) => `    server 127.0.0.1:${p} max_fails=3 fail_timeout=10s;`)
+    .join("\n");
+  return `# Managed by napp — upstream của ${app.domain} (${appPorts(app).length} instance). TỰ SINH, đừng sửa tay.
+# Đổi số instance: napp app scale ${app.domain} <số>
+upstream ${appUpstreamName(app.domain)} {
+    ${app.sticky ? "ip_hash;" : "least_conn;"}
+${servers}
+    keepalive 32;
+}
+`;
+}
 
 export function appLocationsPath(domain: string): string {
   return `${NGINX_LOCATIONS_DIR}/${domain}.conf`;
@@ -545,10 +584,14 @@ export function renderAppNginxConf(app: AppRecord, opts: NginxAppOptions = {}): 
 
   return `# Managed by napp — site: ${app.domain}
 # Chỉ HTTP. Chạy 'napp cert create ${app.domain}' để thêm HTTPS (certbot tự sửa file này).
-upstream napp_${sanitizeUpstreamName(app.domain)} {
+${
+    app.instances
+      ? `include ${appUpstreamPath(app.domain)};`
+      : `upstream napp_${sanitizeUpstreamName(app.domain)} {
     server 127.0.0.1:${app.port};
     keepalive 32;
-}
+}`
+  }
 
 server {
     listen 80;${ipv6Line}

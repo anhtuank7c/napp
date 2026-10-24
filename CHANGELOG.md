@@ -2,6 +2,24 @@
 
 Tất cả thay đổi đáng chú ý của `napp` được ghi lại ở đây.
 
+## 1.33.0
+
+Chạy **nhiều instance** cho web app và worker, nginx chia tải, deploy không downtime.
+
+- **`napp app scale <domain> <số> [--sticky]`** và **`napp service scale <name> <số>`** (kèm mục menu "Số instance"). Bên dưới là unit template systemd kiểu `nexus@.service`: web app có **tên instance = cổng** (`napp-shop_example_com@3001` nghe `PORT=3001`), worker có instance `@1`, `@2`… Mỗi instance có `NAPP_INSTANCE`; instance đầu có thêm `NAPP_PRIMARY=1` để việc định kỳ (cron) chỉ chạy ở một nơi.
+- **nginx chia tải qua file upstream riêng** `/etc/nginx/napp-upstreams/<domain>.conf` (`least_conn`; `ip_hash` khi `--sticky`; `max_fails=3 fail_timeout=10s`). Vhost chỉ còn một dòng `include`, nên tăng/giảm instance không bao giờ đụng vào khối SSL certbot chèn trong vhost.
+- **Opt-in, không downtime:** app chưa scale giữ nguyên unit cũ. Lần scale đầu bật instance mới trước, đưa vào nginx, rồi mới thay unit cũ bằng instance chính trên **cùng cổng cũ**. Giảm instance thì rút khỏi nginx trước, dừng sau. Cổng cấp mới né cả cổng đang bị tiến trình ngoài napp chiếm.
+- **Deploy/restart cuốn chiếu:** `app deploy`, `app restart`, `service deploy|restart`, cân đối heap, `mem guard`, `doctor upgrade` đều restart **từng instance**, chờ instance đó thật sự nghe cổng (đúng PID trong cgroup của unit, không phải "có ai đó nghe cổng") rồi mới tới cái kế. Một instance không lên thì dừng, phần còn lại vẫn phục vụ bản cũ.
+- **Hoàn tác khi lỗi:** instance mới không lên, `nginx -t` hỏng, systemctl lỗi giữa chừng… đều đưa máy về nguyên trạng.
+- **Giữ phần sửa tay unit khi chuyển sang template:** directive bạn đã sửa trong `napp-<slug>.service` (`LimitNOFILE`, `MemoryMax`, `StandardOutput`…) được mang sang `napp-<slug>@.service` và khoá bằng `# napp-preserve`. napp nhận ra phần sửa tay bằng cách so file với **bản render của chính nó**, nên không giữ nhầm phần napp tự đổi. Nếu `ExecStart` đã bị sửa tay (thiếu `PORT=%i`), napp dừng trước khi bật instance nào và chỉ cách sửa.
+- **Tương thích ngược:** app/service chưa scale không bị đổi gì. Unit, vhost và file location do bản này render giống từng byte bản 1.32.0 (đã so 14 tổ hợp cấu hình). `state.json` chỉ thêm trường tuỳ chọn. Lưu ý: app **đã scale** thì không quay về napp ≤ 1.32 được, vì bản cũ không biết unit template.
+- **Heap chia theo tiến trình:** app 3 instance tính như 3 phần heap; `tune show/apply` đếm theo tiến trình.
+- Kiểm thử trên Ubuntu 24.04 + systemd + nginx thật, với tải liên tục qua nginx (curl mỗi 50ms): chuyển 1→3 instance, restart cuốn chiếu, 3→5, 5→2, **0 request lỗi** trên 539 request. Có thêm các kịch bản hoàn tác, cổng bị chiếm, worker, xoá app đã scale (gỡ sạch unit, drop-in, upstream, cổng).
+- **Sửa lỗi phát hiện trong lúc làm:**
+  - Comment trong napp nói `Environment=` đặt sau `EnvironmentFile=` thì `.env` không ghi đè được. Sai: systemd **luôn** cho `EnvironmentFile=` thắng (đã kiểm chứng bằng `systemd-run`). Biến theo instance nay được ép qua `ExecStart=/usr/bin/env PORT=%i …`. Hệ quả cho app đơn instance: sửa `PORT` trong `.env` vẫn đổi được cổng app nghe (khi đó nginx trả 502) — hành vi này không đổi ở bản này.
+  - `napp mem guard` restart nhầm tên unit (`napp-<domain nguyên gốc>` thay vì slug), thất bại im lặng, nên leak-guard chỉ có hiệu lực ở lần restart sau.
+  - `doctor upgrade` restart mọi unit còn chạy thư viện cũ liền một lượt; nay chờ từng instance sống lại.
+
 ## 1.32.0
 
 Vá lỗ hổng **CVE-2026-111497** của Node.js (CVSS 9.8, cảnh báo CSA AL-2026-154): ghi ngoài vùng nhớ trong bộ giải nén Brotli — app giải nén dữ liệu Brotli do kẻ tấn công gửi tới (body `Content-Encoding: br` qua body-parser 2/Express 5, `fetch()` gọi ra ngoài...) có thể bị **thực thi mã từ xa**. Bản vá: 22.23.4 · 24.22.1 · 26.12.1; nhánh 20.x đã EOL, không có bản vá.

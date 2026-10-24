@@ -15,7 +15,7 @@ import { appServePaths, grantNginxGroupAccess, nginxWorkerUser, pathReadableBy }
 import { unitWorkDir } from "../templates/systemd";
 import { unitHasPriority } from "../lib/unitfile";
 import { allUnits, readUnitMemory, readSamples, analyseTrend, strayHeapSnapshots } from "../lib/memwatch";
-import { SYSTEMD_DIR, serviceNameFor, svcSystemdName } from "../lib/state";
+import { SYSTEMD_DIR, appUnitFile, serviceUnitFile } from "../lib/state";
 import {
   DB_ENGINES,
   DEFAULT_DB_ENGINE,
@@ -226,11 +226,11 @@ function unitsRestarting(): { unit: string; restarts: number; result?: string }[
 function unitsMissingPriority(): string[] {
   const st = loadState();
   const out: string[] = [];
-  for (const domain of Object.keys(st.apps)) {
-    if (!unitHasPriority(`${SYSTEMD_DIR}/${serviceNameFor(domain)}.service`)) out.push(domain);
+  for (const app of Object.values(st.apps)) {
+    if (!unitHasPriority(appUnitFile(app))) out.push(app.domain);
   }
-  for (const name of Object.keys(st.services)) {
-    if (!unitHasPriority(`${SYSTEMD_DIR}/${svcSystemdName(name)}.service`)) out.push(name);
+  for (const svc of Object.values(st.services)) {
+    if (!unitHasPriority(serviceUnitFile(svc))) out.push(svc.name);
   }
   return out;
 }

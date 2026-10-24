@@ -1,7 +1,7 @@
 import { execCapture, runCmd, requireRoot, commandExists } from "../lib/exec";
 import { ask } from "../lib/prompt";
 import { info, ok, warn, die, section } from "../lib/log";
-import { loadState, saveState, findUnit, upsertApp, upsertService, releaseRedisDbIfUnused, serviceNameFor, svcSystemdName, REDIS_DB_MAX } from "../lib/state";
+import { loadState, saveState, findUnit, upsertApp, upsertService, releaseRedisDbIfUnused, appUnits, serviceUnits, REDIS_DB_MAX } from "../lib/state";
 import {
   instances,
   instanceRunning,
@@ -127,7 +127,7 @@ interface Member {
   id: string;
   user: string;
   envPath: string;
-  unit: string;
+  units: string[];
 }
 
 function legacyGroup(idx: number): Member[] {
@@ -135,10 +135,10 @@ function legacyGroup(idx: number): Member[] {
   return [
     ...Object.values(s.apps)
       .filter((a) => a.redisDbIndex === idx)
-      .map((a) => ({ kind: "app" as const, id: a.domain, user: a.user, envPath: `${unitWorkDir(a.webRoot, a.appDir)}/.env`, unit: serviceNameFor(a.domain) })),
+      .map((a) => ({ kind: "app" as const, id: a.domain, user: a.user, envPath: `${unitWorkDir(a.webRoot, a.appDir)}/.env`, units: appUnits(a) })),
     ...Object.values(s.services)
       .filter((v) => v.redisDbIndex === idx)
-      .map((v) => ({ kind: "service" as const, id: v.name, user: v.user, envPath: `${unitWorkDir(v.workDir, v.appDir)}/.env`, unit: svcSystemdName(v.name) })),
+      .map((v) => ({ kind: "service" as const, id: v.name, user: v.user, envPath: `${unitWorkDir(v.workDir, v.appDir)}/.env`, units: serviceUnits(v) })),
   ];
 }
 
@@ -178,9 +178,9 @@ export async function cmdRedisMigrate(unitId: string, opts: { yes: boolean }): P
   for (const m of group) if (m.id !== owner.id) joinRedisInstance(id, m.id, m.user);
 
   const startAll = () => {
-    for (const m of group) runCmd("systemctl", ["start", m.unit], { silentFail: true });
+    for (const m of group) for (const u of m.units) runCmd("systemctl", ["start", u], { silentFail: true });
   };
-  for (const m of group) runCmd("systemctl", ["stop", m.unit], { silentFail: true });
+  for (const m of group) for (const u of m.units) runCmd("systemctl", ["stop", u], { silentFail: true });
 
   try {
     // Chép theo lô 200 key. Lệnh đi qua STDIN của redis-cli (mật khẩu không vào argv);

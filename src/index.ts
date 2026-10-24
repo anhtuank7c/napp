@@ -25,6 +25,7 @@ import {
   cmdAppRemove,
   cmdAppList,
   cmdAppRestart,
+  cmdAppScale,
   cmdAppStop,
   cmdAppStart,
   cmdAppLogs,
@@ -40,6 +41,7 @@ import {
   cmdServiceRemove,
   cmdServiceList,
   cmdServiceRestart,
+  cmdServiceScale,
   cmdServiceStop,
   cmdServiceStart,
   cmdServiceLogs,
@@ -446,7 +448,13 @@ legacy(app, "remove <domain>", "app delete <domain>", appDelete);
 app.command("deploy <domain>").description("git pull + cài dependencies + build + restart").action(async (domain) => cmdAppDeploy(domain));
 app.command("start <domain>").description("khởi động app").action((domain) => cmdAppStart(domain));
 app.command("stop <domain>").description("dừng app").action((domain) => cmdAppStop(domain));
-app.command("restart <domain>").description("khởi động lại app").action((domain) => cmdAppRestart(domain));
+app.command("restart <domain>").description("khởi động lại app (nhiều instance: cuốn chiếu, không downtime)").action((domain) => cmdAppRestart(domain));
+app
+  .command("scale <domain> <count>")
+  .description("đổi số instance chạy song song (unit napp-<slug>@<cổng>.service), nginx tự chia tải giữa các instance")
+  .option("--sticky", "ip_hash: một client luôn vào cùng instance (session/socket.io giữ trong RAM)")
+  .option("--no-sticky", "least_conn: vào instance đang ít kết nối nhất (mặc định)")
+  .action((domain, count, opts) => cmdAppScale(domain, Number(count), { sticky: opts.sticky }));
 app
   .command("logs <domain>")
   .description("xem log của app (qua journalctl)")
@@ -596,7 +604,11 @@ legacy(service, "remove <name>", "service delete <name>", serviceDelete);
 service.command("deploy <name>").description("git pull + cài dependencies + build + restart").action(async (name) => cmdServiceDeploy(name));
 service.command("start <name>").description("khởi động service").action((name) => cmdServiceStart(name));
 service.command("stop <name>").description("dừng service").action((name) => cmdServiceStop(name));
-service.command("restart <name>").description("khởi động lại service").action((name) => cmdServiceRestart(name));
+service.command("restart <name>").description("khởi động lại service (nhiều instance: cuốn chiếu)").action((name) => cmdServiceRestart(name));
+service
+  .command("scale <name> <count>")
+  .description("đổi số instance worker chạy song song (unit napp-svc-<slug>@<n>.service)")
+  .action((name, count) => cmdServiceScale(name, Number(count)));
 service
   .command("logs <name>")
   .description("xem log của service (qua journalctl)")

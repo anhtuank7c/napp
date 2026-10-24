@@ -16,8 +16,8 @@ import {
   SYSCTL_TUNING_PATH,
 } from "../templates/tuning";
 import { renderNginxTuningConf, NGINX_TUNING_CONF } from "../templates/nginx";
-import { loadState, saveState, serviceNameFor, svcSystemdName } from "../lib/state";
-import { applyNodeHeaps, syncAllUnits, reportBalance } from "./app";
+import { loadState, saveState, appUnits, serviceUnits } from "../lib/state";
+import { applyNodeHeaps, syncAllUnits, reportBalance, unitMix } from "./app";
 import { activeEngines, driverFor, unmanagedEngines } from "../lib/db";
 import type { HardwareProfile } from "../lib/hardware";
 import type { TuningPlan } from "../templates/tuning";
@@ -98,7 +98,7 @@ function printPriorityPlan(serviceHeapMB: number): void {
 export function cmdTuneShow(): void {
   const hw = detectHardware();
   const st = loadState();
-  const mix = { webApps: Object.keys(st.apps).length, services: Object.keys(st.services).length };
+  const mix = unitMix(); // đếm theo TIẾN TRÌNH: app 3 instance = 3 phần heap
   section("Phần cứng phát hiện được");
   console.log(formatHardware(hw));
   const plan = computeTuningPlan(hw, undefined, mix, st.serviceHeapWeight, activeEngines().length);
@@ -113,7 +113,7 @@ export function cmdTuneShow(): void {
     mix.webApps + mix.services === 0
       ? `  Node heap            : chưa có app/service nào — heap được chia lại mỗi lần tạo hoặc xoá đơn vị`
       : `  Node heap            : web app ${plan.heap.webMB} MB · background service ${plan.heap.serviceMB} MB ` +
-        `(${mix.webApps} app + ${mix.services} service, trọng số service ${plan.heap.serviceWeight}; chỉ runtime=node)`
+        `(${mix.webApps} tiến trình web + ${mix.services} tiến trình service, trọng số service ${plan.heap.serviceWeight}; chỉ runtime=node)`
   );
   console.log();
   printPriorityPlan(plan.heap.serviceMB);
@@ -170,8 +170,8 @@ function patchNginxMainConf(workerConnections: number): void {
  */
 function verifyEffectivePriority(st: ReturnType<typeof loadState>): void {
   const units = [
-    ...Object.keys(st.apps).map((d) => ({ unit: `${serviceNameFor(d)}.service`, want: CPU_WEIGHT_WEB })),
-    ...Object.keys(st.services).map((n) => ({ unit: `${svcSystemdName(n)}.service`, want: CPU_WEIGHT_SERVICE })),
+    ...Object.values(st.apps).flatMap((a) => appUnits(a).map((unit) => ({ unit, want: CPU_WEIGHT_WEB }))),
+    ...Object.values(st.services).flatMap((v) => serviceUnits(v).map((unit) => ({ unit, want: CPU_WEIGHT_SERVICE }))),
   ];
 
   const mismatched: string[] = [];
@@ -215,7 +215,7 @@ export async function cmdTuneApply(opts: TuneApplyOptions): Promise<void> {
   requireRoot();
   const hw = detectHardware();
   const st = loadState();
-  const mix = { webApps: Object.keys(st.apps).length, services: Object.keys(st.services).length };
+  const mix = unitMix(); // đếm theo TIẾN TRÌNH: app 3 instance = 3 phần heap
 
   // Trọng số mới được LƯU trước khi tính, để applyNodeHeaps (đọc registry) và
   // mọi lần tạo/xoá app về sau đều dùng đúng con số này. Chỉ là cờ của một lần
@@ -238,7 +238,7 @@ export async function cmdTuneApply(opts: TuneApplyOptions): Promise<void> {
   console.log(`  nginx worker_connections -> ${plan.workerConnections}`);
   console.log(
     `  Node heap          -> web app ${plan.heap.webMB} MB · background service ${plan.heap.serviceMB} MB ` +
-      `(${mix.webApps} app + ${mix.services} service, trọng số service ${plan.heap.serviceWeight})`
+      `(${mix.webApps} tiến trình web + ${mix.services} tiến trình service, trọng số service ${plan.heap.serviceWeight})`
   );
   console.log();
   printPriorityPlan(plan.heap.serviceMB);

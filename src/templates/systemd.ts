@@ -50,8 +50,10 @@ export function unitWorkDir(root: string, appDir?: string): string {
 // Renderer nền dùng chung. Thứ tự biến môi trường CÓ CHỦ ĐÍCH:
 //   - NODE_OPTIONS đặt TRƯỚC EnvironmentFile -> chỉ là MẶC ĐỊNH, .env ghi đè được
 //     (systemd: directive sau thắng directive trước).
-//   - forcedEnv (NODE_ENV/PORT...) đặt SAU EnvironmentFile -> napp ÉP, .env không
-//     ghi đè được (PORT do napp cấp phát, không cho tự đổi).
+//   - forcedEnv (NODE_ENV/PORT...) đặt SAU EnvironmentFile. LƯU Ý: thứ tự này
+//     KHÔNG giúp gì — systemd luôn cho EnvironmentFile thắng Environment, nên .env
+//     VẪN ghi đè được forcedEnv. Biến napp thật sự phải ép (PORT theo instance)
+//     đi qua ExecStart, xem instanceEnvExec().
 function renderUnit(spec: UnitSpec): string {
   // PHẢI bọc trong nháy kép. systemd tách 'Environment=' theo DẤU CÁCH, nên
   // 'Environment=NODE_OPTIONS=--a --b' được hiểu là HAI phép gán: NODE_OPTIONS=--a,
@@ -145,7 +147,7 @@ WantedBy=multi-user.target
 export function renderAppSystemdService(app: AppRecord, execStart: string, opts: AppSystemdOptions = {}): string {
   return renderUnit({
     headerComment: `# Managed by napp — site: ${app.domain}`,
-    description: `napp application - ${app.domain}`,
+    description: `napp application - ${app.domain}${app.instances ? " (instance %i)" : ""}`,
     user: app.user,
     // Monorepo: chạy TỪ thư mục con chứa ứng dụng. Quan trọng vì Node phân giải
     // import trần bằng cách đi ngược lên từ file gọi, mà pnpm chỉ symlink gói
@@ -154,15 +156,29 @@ export function renderAppSystemdService(app: AppRecord, execStart: string, opts:
     workDir: unitWorkDir(app.webRoot, app.appDir),
     rootDir: app.webRoot,
     logBase: `/var/log/napp/${app.domain}`,
-    execStart,
+    // Template 'napp-<slug>@.service': tên instance CHÍNH LÀ cổng (napp-shop@3001
+    // nghe 3001) — giống kiểu 'nexus@.service' quen thuộc, nhìn tên unit là biết
+    // instance nào giữ cổng nào. NAPP_INSTANCE để app phân biệt instance (vd chỉ
+    // chạy cron ở instance có NAPP_PRIMARY=1 — xem lib/instances.ts).
+    execStart: app.instances ? instanceEnvExec(["PORT=%i", "NAPP_INSTANCE=%i"], execStart) : execStart,
     nodeOptions: opts.nodeOptions,
     // Web app phục vụ traffic thật -> ưu tiên cao hơn background service.
     cpuWeight: CPU_WEIGHT_WEB,
     ioWeight: IO_WEIGHT_WEB,
     // KHÔNG đặt MemoryHigh cho web app: throttle đúng thứ đang phục vụ người
     // dùng là làm ngược lại mục đích của cả cơ chế này.
-    forcedEnv: [`NODE_ENV=production`, `PORT=${app.port}`],
+    forcedEnv: app.instances ? [`NODE_ENV=production`] : [`NODE_ENV=production`, `PORT=${app.port}`],
   });
+}
+
+// Biến THEO TỪNG INSTANCE phải gán bằng '/usr/bin/env' trong ExecStart, KHÔNG
+// được dùng Environment=: systemd luôn cho EnvironmentFile= THẮNG Environment=,
+// bất kể dòng nào đứng trước (đã kiểm chứng bằng systemd-run). .env của mọi app
+// napp tạo đều có sẵn 'PORT=<cổng gốc>' — dùng Environment=PORT=%i thì MỌI
+// instance cùng nghe cổng gốc và chết vì EADDRINUSE. 'env' gán biến SAU khi
+// systemd đã nạp .env, nên không gì ghi đè được.
+function instanceEnvExec(vars: string[], execStart: string): string {
+  return `/usr/bin/env ${vars.join(" ")} ${execStart}`;
 }
 
 // Unit systemd cho một BACKGROUND SERVICE (chạy ngầm, không domain/nginx). Giống
@@ -170,10 +186,14 @@ export function renderAppSystemdService(app: AppRecord, execStart: string, opts:
 // chỉ đặt khi service được tạo với --port (worker thuần không listen gì cả).
 export function renderServiceSystemdService(svc: ServiceRecord, execStart: string, opts: AppSystemdOptions = {}): string {
   const forcedEnv = [`NODE_ENV=production`];
-  if (svc.port !== undefined) forcedEnv.push(`PORT=${svc.port}`);
+  // Template 'napp-svc-<slug>@.service': instance là số thứ tự (worker thuần)
+  // hoặc là cổng (service có --port, mỗi instance nghe một cổng riêng). Biến
+  // theo instance đi qua ExecStart — lý do ở instanceEnvExec().
+  if (svc.instances) execStart = instanceEnvExec(svc.port !== undefined ? ["PORT=%i", "NAPP_INSTANCE=%i"] : ["NAPP_INSTANCE=%i"], execStart);
+  else if (svc.port !== undefined) forcedEnv.push(`PORT=${svc.port}`);
   return renderUnit({
     headerComment: `# Managed by napp — service: ${svc.name}${svc.runAsUnit ? ` (chạy bằng user của '${svc.runAsUnit}')` : ""}`,
-    description: `napp background service - ${svc.name}`,
+    description: `napp background service - ${svc.name}${svc.instances ? " (instance %i)" : ""}`,
     user: svc.user,
     workDir: unitWorkDir(svc.workDir, svc.appDir),
     rootDir: svc.workDir,
@@ -331,5 +351,16 @@ RandomizedDelaySec=300
 
 [Install]
 WantedBy=timers.target
+`;
+}
+
+// Drop-in cho instance CHÍNH (phần tử đầu của `instances`): NAPP_PRIMARY=1.
+// Lý do tồn tại: việc định kỳ viết trong app (node-cron, setInterval dọn dẹp,
+// gửi email tổng hợp) chạy ở MỌI instance — scale lên 3 là email gửi 3 lần.
+// App kiểm `process.env.NAPP_PRIMARY === "1"` để chỉ chạy ở một nơi.
+export function renderPrimaryDropIn(): string {
+  return `# Managed by napp — instance chính của nhóm (xem 'napp app scale')
+[Service]
+Environment=NAPP_PRIMARY=1
 `;
 }

@@ -8,7 +8,8 @@ import { assessNginxCves, assessNode, nodeFixedVersion, nodeLifecycle, type Node
 import { loadNodeFeed } from "../lib/nodefeed";
 import { scanProject, auditFindings, checkFreshReleases, SEVERITY_ORDER, type DepFinding, type ProjectTarget, type ProjectScanResult, type Severity } from "../lib/deps";
 import { resolveInstalledPackages, osvScan, osvDepFindings, type OsvScanResult } from "../lib/osv";
-import { loadState, svcSystemdName, serviceNameFor, type PackageManager } from "../lib/state";
+import { loadState, appUnits, serviceUnits, type PackageManager } from "../lib/state";
+import { allInstanceRefs, waitHealthy } from "../lib/instances";
 import { exposedEngines, exposureMessage } from "../lib/db";
 
 // --------------------------------------------------------------------------
@@ -61,8 +62,8 @@ function managedUnits(): string[] {
   const st = loadState();
   return [
     ...["nginx", "mariadb", "mysql", "postgresql", "mongod", "redis-server", "ssh", "sshd", "fail2ban"].filter((u) => isServiceActive(u)),
-    ...Object.values(st.apps).map((a) => `${serviceNameFor(a.domain)}.service`),
-    ...Object.values(st.services).map((s) => `${svcSystemdName(s.name)}.service`),
+    ...Object.values(st.apps).flatMap((a) => appUnits(a)),
+    ...Object.values(st.services).flatMap((s) => serviceUnits(s)),
     // Redis riêng: vá libssl/redis mà không restart thì chúng vẫn chạy mã cũ.
     ...Object.keys(st.redisInstances ?? {}).map((id) => `napp-redis-${id}.service`),
   ];
@@ -766,9 +767,15 @@ async function restartStaleUnits(opts: DoctorUpgradeOptions): Promise<void> {
     if (!doRestart) {
       info(`Bỏ qua. Khi nào tiện: sudo systemctl restart ${stale.map((s) => s.unit).join(" ")}`);
     } else {
+      // Instance của app/service: chờ từng cái sống lại rồi mới restart cái kế —
+      // vá nodejs làm MỌI instance cùng "cũ", restart một lượt là tắt cả nhóm.
+      const refByUnit = new Map(allInstanceRefs().map((r) => [r.unit, r]));
       for (const s of stale) {
         runCmd("systemctl", ["restart", s.unit], { silentFail: true });
-        ok(`Đã khởi động lại ${s.unit}`);
+        const ref = refByUnit.get(s.unit);
+        const err = ref ? waitHealthy(ref.unit, ref.port) : undefined;
+        if (err) warn(err);
+        else ok(`Đã khởi động lại ${s.unit}`);
       }
     }
   }

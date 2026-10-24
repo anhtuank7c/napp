@@ -16,6 +16,7 @@ import {
   cmdAppLogs,
   cmdAppSet,
   cmdAppShow,
+  cmdAppScale,
   cmdAppEnvList,
   cmdAppEnvSet,
   cmdAppEnvUnset,
@@ -30,6 +31,7 @@ import {
   cmdServiceStart,
   cmdServiceLogs,
   cmdServiceShow,
+  cmdServiceScale,
   cmdServiceSet,
   cmdServiceEnvList,
   cmdServiceEnvSet,
@@ -37,7 +39,8 @@ import {
   listServiceSummaries,
 } from "./service";
 import type { Runtime, PackageManager } from "../lib/state";
-import { getAcmeEmail, findUnit, getApp, getService, serviceNameFor, svcSystemdName, loadState } from "../lib/state";
+import { getAcmeEmail, findUnit, getApp, getService, loadState } from "../lib/state";
+import { anyActive, appInstanceRefs, serviceInstanceRefs, MAX_INSTANCES } from "../lib/instances";
 import { cmdDomainAdd, cmdDomainRemove, cmdDomainList } from "./domain";
 import { cmdCertIssue, cmdCertRenew, cmdCertList, cmdCertRevoke, cmdCertStatus } from "./cert";
 import { cmdDbCreate, cmdDbList, cmdDbBackup, cmdDbDrop } from "./db";
@@ -393,8 +396,15 @@ async function flip(what: string, on: boolean, enable: () => unknown, disable: (
   await (on ? disable() : enable());
 }
 
-function unitRunning(systemdName: string): boolean {
-  return execCapture("systemctl", ["is-active", "--quiet", systemdName]).code === 0;
+async function askInstanceCount(current: number): Promise<number | undefined> {
+  const raw = (await promptAsk(`Số instance (1-${MAX_INSTANCES}, hiện tại ${current}): `)).trim();
+  if (!raw) return undefined;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1 || n > MAX_INSTANCES) {
+    warn(`Cần một số nguyên từ 1 tới ${MAX_INSTANCES}.`);
+    return undefined;
+  }
+  return n;
 }
 
 /** Hỏi nhiều cặp KEY=VALUE, mỗi dòng một cặp (giá trị được phép có dấu cách). */
@@ -568,12 +578,13 @@ async function appContext(domain: string): Promise<void> {
   await menuLoop(() => {
     const app = getApp(domain);
     if (!app) return undefined; // vừa bị xoá
-    const up = unitRunning(serviceNameFor(domain));
+    const inst = anyActive(appInstanceRefs(app));
+    const up = inst.active > 0;
     const ssl = existsSync(`/etc/letsencrypt/live/${domain}`);
     return {
       title: `App ${domain}`,
       header: [
-        `${running(up)} · 127.0.0.1:${app.port} · ${app.nodeRuntime}/${app.packageManager ?? "npm"} · ` +
+        `${running(up)}${app.instances ? ` · ${inst.active}/${inst.total} instance (cổng ${app.instances.join(", ")})` : ` · 127.0.0.1:${app.port}`} · ${app.nodeRuntime}/${app.packageManager ?? "npm"} · ` +
           `SSL: ${ssl ? "có" : "chưa"} · DB: ${app.dbName ? `${unitEngine(app)} '${app.dbName}'` : "-"} · Redis: ${app.redisInstance ? "riêng" : app.redisDbIndex !== undefined ? `#${app.redisDbIndex} (chung)` : "-"}`,
       ],
       items: [
@@ -584,6 +595,16 @@ async function appContext(domain: string): Promise<void> {
           ? { label: "Dừng app", run: () => (cli(`app stop ${domain}`), cmdAppStop(domain)) }
           : { label: "Khởi động app", run: () => (cli(`app start ${domain}`), cmdAppStart(domain)) },
         { label: "Xem log (100 dòng)", run: () => (cli(`app logs ${domain} -n 100`), cmdAppLogs(domain, { follow: false, lines: 100 })) },
+        {
+          label: `Số instance: ${app.instances?.length ?? 1}${app.instances && app.instances.length > 1 ? colorText("dim", app.sticky ? " (sticky)" : " (least_conn)") : ""} — tăng/giảm, nginx tự chia tải`,
+          run: async () => {
+            const n = await askInstanceCount(app.instances?.length ?? 1);
+            if (n === undefined) return;
+            const sticky = n > 1 ? await askYesNo("Sticky (một client luôn vào cùng instance — cần khi session/socket.io giữ trong RAM)?", Boolean(app.sticky)) : undefined;
+            cli(`app scale ${domain} ${n}${sticky === undefined ? "" : sticky ? " --sticky" : " --no-sticky"}`);
+            cmdAppScale(domain, n, { sticky });
+          },
+        },
         { label: "Biến môi trường (.env)", run: () => envMenu("app", domain), open: true },
         ...(app.redisInstance || app.redisDbIndex !== undefined
           ? [
@@ -879,11 +900,12 @@ async function serviceContext(name: string): Promise<void> {
   await menuLoop(() => {
     const svc = getService(name);
     if (!svc) return undefined;
-    const up = unitRunning(svcSystemdName(name));
+    const inst = anyActive(serviceInstanceRefs(svc));
+    const up = inst.active > 0;
     return {
       title: `Service ${name}`,
       header: [
-        `${running(up)} · ${svc.nodeRuntime}/${svc.packageManager ?? "npm"} · user ${svc.user}${svc.runAsUnit ? ` (mượn của '${svc.runAsUnit}')` : ""} · ` +
+        `${running(up)}${svc.instances ? ` · ${inst.active}/${inst.total} instance` : ""} · ${svc.nodeRuntime}/${svc.packageManager ?? "npm"} · user ${svc.user}${svc.runAsUnit ? ` (mượn của '${svc.runAsUnit}')` : ""} · ` +
           `DB: ${svc.dbName ? `${unitEngine(svc)} '${svc.dbName}'` : "-"} · Redis: ${svc.redisInstance ? "riêng" : svc.redisDbIndex !== undefined ? `#${svc.redisDbIndex} (chung)` : "-"}`,
       ],
       items: [
@@ -894,6 +916,15 @@ async function serviceContext(name: string): Promise<void> {
           ? { label: "Dừng service", run: () => (cli(`service stop ${name}`), cmdServiceStop(name)) }
           : { label: "Khởi động service", run: () => (cli(`service start ${name}`), cmdServiceStart(name)) },
         { label: "Xem log (100 dòng)", run: () => (cli(`service logs ${name} -n 100`), cmdServiceLogs(name, { follow: false, lines: 100 })) },
+        {
+          label: `Số instance: ${svc.instances?.length ?? 1} — tăng/giảm số worker chạy song song`,
+          run: async () => {
+            const n = await askInstanceCount(svc.instances?.length ?? 1);
+            if (n === undefined) return;
+            cli(`service scale ${name} ${n}`);
+            cmdServiceScale(name, n);
+          },
+        },
         { label: "Biến môi trường (.env)", run: () => envMenu("service", name), open: true },
         ...(svc.redisInstance || svc.redisDbIndex !== undefined
           ? [

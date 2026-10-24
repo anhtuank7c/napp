@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { execCapture, writeFile, ensureDir } from "./exec";
-import { loadState, serviceNameFor, svcSystemdName, NAPP_ROOT } from "./state";
+import { loadState, appUnits, serviceUnits, NAPP_ROOT } from "./state";
 import { unitWorkDir } from "../templates/systemd";
 
 // ---------------------------------------------------------------------------
@@ -36,8 +36,14 @@ export interface UnitRef {
 export function allUnits(): UnitRef[] {
   const s = loadState();
   return [
-    ...Object.keys(s.apps).map((d) => ({ unit: serviceNameFor(d), id: d, kind: "web" as const })),
-    ...Object.keys(s.services).map((n) => ({ unit: svcSystemdName(n), id: n, kind: "service" as const })),
+    // Mỗi INSTANCE là một tiến trình riêng với bộ nhớ riêng — lấy mẫu từng cái
+    // (rò rỉ thường chỉ lộ ở một instance: instance nhận nhiều request nhất).
+    ...Object.values(s.apps).flatMap((a) =>
+      appUnits(a).map((u) => ({ unit: u.replace(/\.service$/, ""), id: a.domain, kind: "web" as const }))
+    ),
+    ...Object.values(s.services).flatMap((v) =>
+      serviceUnits(v).map((u) => ({ unit: u.replace(/\.service$/, ""), id: v.name, kind: "service" as const }))
+    ),
   ];
 }
 

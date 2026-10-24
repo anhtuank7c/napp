@@ -89,6 +89,17 @@ export interface AppRecord {
   // Cả hai đều được phép trong NODE_OPTIONS nên KHÔNG phải sửa code app hay
   // ExecStart. Chỉ có nghĩa với runtime node (bun dùng JSC, không hiểu cờ V8).
   leakGuard?: boolean;
+  // Chạy NHIỀU instance (`napp app scale`). Bỏ trống = kiểu một unit
+  // 'napp-<slug>.service' như mọi bản napp trước — app chưa từng scale KHÔNG bị
+  // đổi gì. Có giá trị = unit template 'napp-<slug>@.service', mỗi phần tử là
+  // tên một instance VÀ là cổng của nó ('napp-shop@3001' nghe PORT=3001), nginx
+  // chia request qua file upstream riêng. Phần tử đầu luôn là `port` (cổng cũ
+  // của app — thứ gì đang trỏ vào nó vẫn chạy) và là instance "chính".
+  instances?: string[];
+  // Upstream dùng ip_hash (một client luôn vào cùng instance) thay vì least_conn.
+  // Cần khi app giữ trạng thái trong RAM: session in-memory, socket.io dùng
+  // long-polling không có Redis adapter.
+  sticky?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -137,6 +148,11 @@ export interface ServiceRecord {
   // Cả hai đều được phép trong NODE_OPTIONS nên KHÔNG phải sửa code app hay
   // ExecStart. Chỉ có nghĩa với runtime node (bun dùng JSC, không hiểu cờ V8).
   leakGuard?: boolean;
+  // Chạy NHIỀU instance (`napp service scale`). Bỏ trống = một unit
+  // 'napp-svc-<slug>.service' như trước. Có giá trị = unit template
+  // 'napp-svc-<slug>@.service'; tên instance là số thứ tự ("1", "2", ...) với
+  // worker thuần, hoặc là CỔNG với service có --port (mỗi instance một cổng).
+  instances?: string[];
   createdAt: string;
   updatedAt: string;
 }
@@ -228,7 +244,7 @@ export function requireApp(domain: string): AppRecord {
 export function upsertApp(app: AppRecord): void {
   const s = loadState();
   s.apps[app.domain] = app;
-  if (!s.usedPorts.includes(app.port)) s.usedPorts.push(app.port);
+  for (const p of appPorts(app)) if (!s.usedPorts.includes(p)) s.usedPorts.push(p);
   if (app.redisDbIndex !== undefined && !s.usedRedisDb.includes(app.redisDbIndex)) {
     s.usedRedisDb.push(app.redisDbIndex);
   }
@@ -259,7 +275,8 @@ export function removeApp(domain: string): AppRecord | undefined {
   const app = s.apps[domain];
   if (!app) return undefined;
   delete s.apps[domain];
-  s.usedPorts = s.usedPorts.filter((p) => p !== app.port);
+  const ports = appPorts(app);
+  s.usedPorts = s.usedPorts.filter((p) => !ports.includes(p));
   releaseRedisDbIfUnused(s, app.redisDbIndex);
   saveState(s);
   return app;
@@ -277,6 +294,24 @@ export function allocatePort(preferred?: number): number {
     if (!s.usedPorts.includes(p)) return p;
   }
   die(`Đã hết cổng trống trong dải ${PORT_RANGE_START}-${PORT_RANGE_END}. Hãy chỉ định --port thủ công ngoài dải này.`);
+}
+
+/** Cấp `count` cổng trống MỘT LẦN (allocatePort gọi lặp sẽ trả cùng một cổng vì chưa ghi state). */
+export function allocatePorts(count: number, busy: (port: number) => boolean = () => false): number[] {
+  const used = new Set(loadState().usedPorts);
+  const out: number[] = [];
+  for (let p = PORT_RANGE_START; p <= PORT_RANGE_END && out.length < count; p++) {
+    if (!used.has(p) && !busy(p)) out.push(p);
+  }
+  if (out.length < count) die(`Không đủ ${count} cổng trống trong dải ${PORT_RANGE_START}-${PORT_RANGE_END}.`);
+  return out;
+}
+
+/** Trả cổng về danh sách trống (khi giảm instance). */
+export function releasePorts(ports: number[]): void {
+  const s = loadState();
+  s.usedPorts = s.usedPorts.filter((p) => !ports.includes(p));
+  saveState(s);
 }
 
 export function allocateRedisDb(): number | undefined {
@@ -394,6 +429,43 @@ export function svcSystemdName(name: string): string {
   return `napp-svc-${slugFor(name)}`;
 }
 
+// --- Instance (scale) ---------------------------------------------------------
+// MỌI chỗ cần "unit nào đang chạy app này" phải đi qua các hàm dưới đây, không
+// tự ghép serviceNameFor() + ".service": app đã scale thì tên đó KHÔNG tồn tại,
+// và systemctl restart một unit không tồn tại chỉ báo lỗi ở dòng log mà không
+// ai đọc — deploy "thành công" trong khi mọi instance vẫn chạy mã cũ.
+
+/** File unit trên đĩa: 'napp-x.service' (một unit) hoặc 'napp-x@.service' (template). */
+export function appUnitFile(app: AppRecord): string {
+  return `${SYSTEMD_DIR}/${serviceNameFor(app.domain)}${app.instances ? "@" : ""}.service`;
+}
+
+export function serviceUnitFile(svc: ServiceRecord): string {
+  return `${SYSTEMD_DIR}/${svcSystemdName(svc.name)}${svc.instances ? "@" : ""}.service`;
+}
+
+/** Tên unit đang chạy (kèm '.service'), instance chính đứng đầu. */
+export function appUnits(app: AppRecord): string[] {
+  const base = serviceNameFor(app.domain);
+  return app.instances ? app.instances.map((i) => `${base}@${i}.service`) : [`${base}.service`];
+}
+
+export function serviceUnits(svc: ServiceRecord): string[] {
+  const base = svcSystemdName(svc.name);
+  return svc.instances ? svc.instances.map((i) => `${base}@${i}.service`) : [`${base}.service`];
+}
+
+/** Cổng mà app chiếm (mỗi instance một cổng). */
+export function appPorts(app: AppRecord): number[] {
+  return app.instances ? app.instances.map(Number) : [app.port];
+}
+
+/** Cổng mà service chiếm — chỉ service tạo với --port mới có. */
+export function servicePorts(svc: ServiceRecord): number[] {
+  if (svc.port === undefined) return [];
+  return svc.instances ? svc.instances.map(Number) : [svc.port];
+}
+
 // Thư mục mã nguồn của background service: /var/www/<name>-service.
 // Chỉ dùng khi TẠO MỚI — các lệnh khác luôn đọc `workDir` đã lưu trong registry
 // nên service tạo bởi bản napp cũ (ở /srv/napp/<name>) vẫn chạy đúng chỗ cũ.
@@ -419,7 +491,7 @@ export function requireService(name: string): ServiceRecord {
 export function upsertService(svc: ServiceRecord): void {
   const s = loadState();
   s.services[svc.name] = svc;
-  if (svc.port !== undefined && !s.usedPorts.includes(svc.port)) s.usedPorts.push(svc.port);
+  for (const p of servicePorts(svc)) if (!s.usedPorts.includes(p)) s.usedPorts.push(p);
   if (svc.redisDbIndex !== undefined && !s.usedRedisDb.includes(svc.redisDbIndex)) {
     s.usedRedisDb.push(svc.redisDbIndex);
   }
@@ -431,7 +503,8 @@ export function removeService(name: string): ServiceRecord | undefined {
   const svc = s.services[name];
   if (!svc) return undefined;
   delete s.services[name];
-  if (svc.port !== undefined) s.usedPorts = s.usedPorts.filter((p) => p !== svc.port);
+  const ports = servicePorts(svc);
+  s.usedPorts = s.usedPorts.filter((p) => !ports.includes(p));
   releaseRedisDbIfUnused(s, svc.redisDbIndex);
   saveState(s);
   return svc;

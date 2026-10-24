@@ -16,6 +16,8 @@ import {
   allocatePort,
   serviceUserFor,
   svcSystemdName,
+  serviceUnitFile,
+  serviceUnits,
   serviceWorkDirFor,
   findUnit,
   servicesRunningAs,
@@ -27,12 +29,13 @@ import {
 import { acquireLock } from "../lib/lock";
 import { resolveEngine, driverFor, unitEngine, type DbEngine } from "../lib/db";
 import { mergeEnvFile, removeEnvKeys, printEnvFile } from "../lib/envfile";
-import { unitWorkDir } from "../templates/systemd";
+import { unitWorkDir, renderServiceSystemdService, execStartLine } from "../templates/systemd";
 import { detectHardware } from "../lib/hardware";
 import { serviceMemoryHighMB } from "../templates/tuning";
 import { GIT_NONINTERACTIVE_ENV, prepareRepoAuth, setupRepoAuth } from "../lib/repo";
 import { defaultPackageManager, defaultInstallCmd, defaultStartCmd, ensurePackageManager, ensureRuntime } from "../lib/provision";
-import { applyNodeHeaps, writeServiceUnit, currentHeapPlan, unitMix, reportBalance } from "./app";
+import { applyNodeHeaps, writeServiceUnit, currentHeapPlan, unitMix, reportBalance, nodeOptionsFor } from "./app";
+import { serviceInstanceRefs, rollingRestart, systemctlAll, anyActive, removeTemplateFiles, scaleService } from "../lib/instances";
 
 export interface CreateServiceOptions {
   port?: number; // KHÔNG cấp cổng trừ khi truyền — service thuần worker không listen gì
@@ -439,10 +442,10 @@ export async function cmdServiceDeploy(name: string): Promise<void> {
     runCmd("chown", ["-hR", `${svc.user}:${svc.user}`, svc.workDir]);
     chmodNoFollow(`${unitWorkDir(svc.workDir, svc.appDir)}/.env`, 0o600);
 
-    runCmd("systemctl", ["restart", svcSystemdName(name)]);
+    rollingRestart(serviceInstanceRefs(svc), name);
     svc.updatedAt = new Date().toISOString();
     upsertService(svc);
-    ok(`Deploy hoàn tất — đã khởi động lại ${svcSystemdName(name)}`);
+    ok(`Deploy hoàn tất — đã khởi động lại ${serviceUnits(svc).join(", ")}`);
   } finally {
     release();
   }
@@ -533,7 +536,7 @@ export async function cmdServiceSet(name: string, opts: ServiceSetOptions): Prom
     // đây là làm ngược lại ý họ. Các directive khác họ sửa vẫn được giữ nguyên.
     writeServiceUnit(svc, currentHeapPlan().serviceMB, ["User", "Group"]);
     runCmd("systemctl", ["daemon-reload"]);
-    runCmd("systemctl", ["restart", svcSystemdName(name)]);
+    rollingRestart(serviceInstanceRefs(svc), name);
 
     if (svc.runAsUnit) {
       ok(`Service '${name}' nay chạy bằng user '${svc.user}' của '${svc.runAsUnit}'.`);
@@ -600,10 +603,11 @@ export async function cmdServiceRemove(name: string, opts: ServiceRemoveOptions)
 
   const release = acquireLock(name);
   try {
-    const unitName = svcSystemdName(name);
-    runCmd("systemctl", ["stop", unitName], { silentFail: true });
-    runCmd("systemctl", ["disable", unitName], { silentFail: true });
-    runCmd("rm", ["-f", `${SYSTEMD_DIR}/${unitName}.service`], { silentFail: true });
+    const refs = serviceInstanceRefs(svc);
+    systemctlAll("stop", refs, true);
+    systemctlAll("disable", refs, true);
+    runCmd("rm", ["-f", serviceUnitFile(svc)], { silentFail: true });
+    if (svc.instances) removeTemplateFiles(svcSystemdName(name), svc.instances);
     runCmd("systemctl", ["daemon-reload"], { silentFail: true });
 
     if (opts.source) {
@@ -673,7 +677,7 @@ export function listServiceSummaries(): ServiceSummary[] {
     .map((s) => ({
       name: s.name,
       port: s.port,
-      running: execCapture("systemctl", ["is-active", "--quiet", svcSystemdName(s.name)]).code === 0,
+      running: anyActive(serviceInstanceRefs(s)).active > 0,
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -686,9 +690,11 @@ export function cmdServiceList(): void {
   }
   section(`Danh sách background service (${services.length})`);
   for (const svc of services) {
-    const running = execCapture("systemctl", ["is-active", "--quiet", svcSystemdName(svc.name)]).code === 0;
+    const st = anyActive(serviceInstanceRefs(svc));
+    const running = st.active > 0;
+    const scale = svc.instances ? ` ×${svc.instances.length}${st.active < st.total ? ` (${st.active} chạy)` : ""}` : "";
     console.log(
-      `  ${running ? "●" : "○"} ${svc.name.padEnd(30)} ${svc.port !== undefined ? `port=${String(svc.port).padEnd(6)}` : "no-port".padEnd(11)} ${`${svc.nodeRuntime}/${svc.packageManager ?? "npm"}`.padEnd(10)} user=${svc.user.padEnd(18)} ${
+      `  ${running ? "●" : "○"} ${(svc.name + scale).padEnd(30)} ${svc.port !== undefined ? `port=${String(svc.port).padEnd(6)}` : "no-port".padEnd(11)} ${`${svc.nodeRuntime}/${svc.packageManager ?? "npm"}`.padEnd(10)} user=${svc.user.padEnd(18)} ${
         svc.runAsUnit ? `run-as=${svc.runAsUnit} ` : ""
       }${svc.dbName ? `db=${unitEngine(svc)}:${svc.dbName} ` : ""}${svc.redisInstance ? "redis=riêng " : svc.redisDbIndex !== undefined ? `redis=#${svc.redisDbIndex}(chung) ` : ""}${running ? "đang chạy" : "ĐÃ DỪNG"}`
     );
@@ -698,31 +704,31 @@ export function cmdServiceList(): void {
 export function cmdServiceRestart(name: string): void {
   requireRoot();
   validateServiceName(name);
-  requireService(name);
-  runCmd("systemctl", ["restart", svcSystemdName(name)]);
-  ok(`Đã khởi động lại ${svcSystemdName(name)}`);
+  const svc = requireService(name);
+  rollingRestart(serviceInstanceRefs(svc), name);
+  ok(`Đã khởi động lại ${serviceUnits(svc).join(", ")}`);
 }
 
 export function cmdServiceStop(name: string): void {
   requireRoot();
   validateServiceName(name);
-  requireService(name);
-  runCmd("systemctl", ["stop", svcSystemdName(name)]);
-  ok(`Đã dừng ${svcSystemdName(name)}`);
+  const svc = requireService(name);
+  systemctlAll("stop", serviceInstanceRefs(svc));
+  ok(`Đã dừng ${serviceUnits(svc).join(", ")}`);
 }
 
 export function cmdServiceStart(name: string): void {
   requireRoot();
   validateServiceName(name);
-  requireService(name);
-  runCmd("systemctl", ["start", svcSystemdName(name)]);
-  ok(`Đã khởi động ${svcSystemdName(name)}`);
+  const svc = requireService(name);
+  systemctlAll("start", serviceInstanceRefs(svc));
+  ok(`Đã khởi động ${serviceUnits(svc).join(", ")}`);
 }
 
 export function cmdServiceLogs(name: string, opts: { follow: boolean; lines: number }): void {
   validateServiceName(name);
-  requireService(name);
-  const args = ["-u", svcSystemdName(name), "-n", String(opts.lines), "--no-pager"];
+  const svc = requireService(name);
+  const args = [...serviceUnits(svc).flatMap((u) => ["-u", u]), "-n", String(opts.lines), "--no-pager"];
   if (opts.follow) args.push("-f");
   runCmd("journalctl", args);
 }
@@ -770,16 +776,17 @@ export function cmdServiceEnvUnset(name: string, keys: string[]): void {
 export function cmdServiceShow(name: string): void {
   validateServiceName(name);
   const svc = requireService(name);
-  const unit = svcSystemdName(name);
-  const running = execCapture("systemctl", ["is-active", "--quiet", unit]).code === 0;
+  const unit = svc.instances ? `${svcSystemdName(name)}@{${svc.instances.join(",")}}` : svcSystemdName(name);
+  const st = anyActive(serviceInstanceRefs(svc));
   section(`Service ${name}`);
   const rows: [string, string | undefined][] = [
-    ["Trạng thái", running ? "đang chạy" : "ĐÃ DỪNG"],
+    ["Trạng thái", st.active === 0 ? "ĐÃ DỪNG" : st.active < st.total ? `${st.active}/${st.total} instance đang chạy` : "đang chạy"],
+    ["Instance", `${svc.instances?.length ?? 1} · đổi: napp service scale ${name} <số>`],
     ["Mã nguồn", svc.workDir + (svc.appDir ? ` (worker ở ${svc.appDir})` : "")],
     ["Repo", svc.repoUrl ? `${svc.repoUrl} @ ${svc.branch}` : "- (worker mẫu)"],
     ["Chạy bằng", `${svc.user}${svc.runAsUnit ? ` (mượn của '${svc.runAsUnit}')` : ""} · systemd ${unit}`],
     ["Ghi thêm vào", svc.writePaths?.length ? svc.writePaths.join(", ") : "-"],
-    ["Cổng nội bộ", svc.port !== undefined ? `127.0.0.1:${svc.port}` : "-"],
+    ["Cổng nội bộ", svc.port !== undefined ? (svc.instances ? `127.0.0.1:${svc.instances.join(", :")}` : `127.0.0.1:${svc.port}`) : "-"],
     ["Runtime", `${svc.nodeRuntime} · ${svc.packageManager ?? "npm"}`],
     ["Lệnh", `install: ${svc.installCmd} · build: ${svc.buildCmd || "-"} · start: ${svc.startCmd}`],
     ["Database", svc.dbName ? `${driverFor(unitEngine(svc)).label} '${svc.dbName}' (user ${svc.dbUser ?? svc.dbName})` : "-"],
@@ -788,4 +795,34 @@ export function cmdServiceShow(name: string): void {
     ["Tạo lúc", svc.createdAt],
   ];
   for (const [k, v] of rows) if (v !== undefined) console.log(`  ${k.padEnd(14)}: ${v}`);
+}
+
+// --- napp service scale ----------------------------------------------------------
+
+export function cmdServiceScale(name: string, count: number): void {
+  requireRoot();
+  validateServiceName(name);
+  const svc = requireService(name);
+  const release = acquireLock(name);
+  try {
+    section(`Scale ${name}: ${svc.instances?.length ?? 1} -> ${count} instance`);
+    const plan = currentHeapPlan({ services: count - (svc.instances?.length ?? 1) });
+    const next = scaleService(svc, count, {
+      writeUnit: (rec) => writeServiceUnit(rec, plan.serviceMB),
+      render: (rec) => renderServiceSystemdService(rec, execStartLine(rec.startCmd), { nodeOptions: nodeOptionsFor(rec, plan.serviceMB) }),
+    });
+    const mix = unitMix();
+    if ((next.instances?.length ?? 1) !== (svc.instances?.length ?? 1) && mix.webApps + mix.services > (next.instances?.length ?? 1)) {
+      reportBalance(applyNodeHeaps({ restart: true, skipRestartFor: name }));
+    }
+    if (next.instances && next.instances.length > 1) {
+      info(
+        "Mỗi instance có NAPP_INSTANCE riêng (" + next.instances.join(", ") + "); instance đầu có NAPP_PRIMARY=1.\n" +
+          "       Worker hàng đợi (BullMQ, bee-queue...) tự chia job giữa các instance. Việc định kỳ (cron) thì chỉ\n" +
+          "       nên chạy khi process.env.NAPP_PRIMARY === \"1\", nếu không sẽ chạy " + next.instances.length + " lần."
+      );
+    }
+  } finally {
+    release();
+  }
 }

@@ -18,6 +18,9 @@ import {
   userFor,
   serviceNameFor,
   svcSystemdName,
+  appUnitFile,
+  serviceUnitFile,
+  appUnits,
   slugFor,
   servicesRunningAs,
   WWW_ROOT,
@@ -29,7 +32,8 @@ import {
 import { acquireLock } from "../lib/lock";
 import { resolveEngine, driverFor, unitEngine, activeEngines, type DbEngine } from "../lib/db";
 import { mergeEnvFile, removeEnvKeys, printEnvFile } from "../lib/envfile";
-import { renderAppNginxConf, appLocationsPath } from "../templates/nginx";
+import { renderAppNginxConf, appLocationsPath, appUpstreamPath } from "../templates/nginx";
+import { appInstanceRefs, serviceInstanceRefs, rollingRestart, systemctlAll, anyActive, removeTemplateFiles, scaleApp, type InstanceRef } from "../lib/instances";
 import { writeAppLocationsConf, hintCustomLocations, injectLocationsInclude } from "../lib/locationsfile";
 import { ensureNappProxyConf } from "./nginx";
 import { renderAppSystemdService, renderServiceSystemdService, execStartLine, unitWorkDir } from "../templates/systemd";
@@ -169,14 +173,14 @@ export function nodeOptionsFor(rec: { nodeRuntime: AppRecord["nodeRuntime"]; lea
 
 export function writeAppUnit(app: AppRecord, heapMB: number, authoritative: string[] = []): void {
   const nodeOptions = nodeOptionsFor(app, heapMB);
-  const path = `${SYSTEMD_DIR}/${serviceNameFor(app.domain)}.service`;
+  const path = appUnitFile(app);
   reportUnitWrite(path, writeManagedUnit(path, renderAppSystemdService(app, execStartLine(app.startCmd), { nodeOptions }), { authoritative }));
 }
 
 /** Như writeAppUnit nhưng cho background service (kèm MemoryHigh — xem dưới). */
 export function writeServiceUnit(svc: ServiceRecord, heapMB: number, authoritative: string[] = []): void {
   const nodeOptions = nodeOptionsFor(svc, heapMB);
-  const path = `${SYSTEMD_DIR}/${svcSystemdName(svc.name)}.service`;
+  const path = serviceUnitFile(svc);
   // MemoryHigh CHỈ tồn tại ở cgroup v2. Ghi nó ra trên máy cgroup v1 (Ubuntu
   // 20.04) thì systemd nhận directive nhưng kernel bỏ qua — một dòng cấu hình
   // trông như đang bảo vệ cái gì đó mà thực ra không. Thà không ghi.
@@ -206,8 +210,10 @@ function reportUnitWrite(path: string, res: UnitWriteResult): void {
 export function unitMix(delta: Partial<UnitMix> = {}): UnitMix {
   const s = loadState();
   return {
-    webApps: Object.keys(s.apps).length + (delta.webApps ?? 0),
-    services: Object.keys(s.services).length + (delta.services ?? 0),
+    // Đếm theo TIẾN TRÌNH, không theo app: mỗi instance là một tiến trình node
+    // với heap riêng — app 3 instance ăn RAM như 3 app.
+    webApps: Object.values(s.apps).reduce((n, a) => n + (a.instances?.length ?? 1), 0) + (delta.webApps ?? 0),
+    services: Object.values(s.services).reduce((n, v) => n + (v.instances?.length ?? 1), 0) + (delta.services ?? 0),
   };
 }
 
@@ -277,26 +283,29 @@ export function applyNodeHeaps(opts: { restart: boolean; skipRestartFor?: string
   const s = loadState();
   const apps = Object.values(s.apps);
   const services = Object.values(s.services);
-  const plan = nodeHeapPlan(
-    detectHardware(),
-    { webApps: apps.length, services: services.length },
-    { serviceWeight: s.serviceHeapWeight, dbEngines: activeEngines().length }
-  );
+  const plan = nodeHeapPlan(detectHardware(), unitMix(), { serviceWeight: s.serviceHeapWeight, dbEngines: activeEngines().length });
   const heapChanged: string[] = [];
+  // Unit đổi heap -> các instance cần restart (cuốn chiếu nếu nhiều instance).
+  const toRestart: { label: string; refs: InstanceRef[] }[] = [];
   const priorityChanged: string[] = [];
   if (apps.length + services.length === 0) return { ...plan, heapChanged, priorityChanged };
 
-  const sync = (unit: string, id: string, kind: "web" | "service", heapMB: number, isNode: boolean, create: () => void) => {
-    const path = `${SYSTEMD_DIR}/${unit}.service`;
+  const sync = (path: string, refs: InstanceRef[], id: string, kind: "web" | "service", heapMB: number, isNode: boolean, create: () => void) => {
+    const unit = path.split("/").pop()!.replace(/\.service$/, "");
     const skip = id === opts.skipRestartFor;
+    let restart = false;
     // bun dùng JavaScriptCore, không hiểu cờ heap của V8 — không có gì để vá,
     // nhưng unit vẫn phải tồn tại và vẫn cần ưu tiên tài nguyên.
     if (isNode) {
-      if (patchHeapOrCreate(path, heapMB, create) && !skip) heapChanged.push(unit);
+      restart = patchHeapOrCreate(path, heapMB, create) && !skip;
     } else if (!existsSync(path)) {
       warn(`Không tìm thấy ${path} — dựng lại unit từ registry.`);
       create();
-      if (!skip) heapChanged.push(unit);
+      restart = !skip;
+    }
+    if (restart) {
+      heapChanged.push(unit);
+      toRestart.push({ label: id, refs });
     }
     const pr = patchUnitPriority(path, priorityDirectivesFor(kind, heapMB));
     if (pr.preserved.length > 0) info(`${path}: giữ nguyên ${pr.preserved.join(", ")} bạn đã khoá bằng '# napp-preserve:'.`);
@@ -304,10 +313,10 @@ export function applyNodeHeaps(opts: { restart: boolean; skipRestartFor?: string
   };
 
   for (const app of apps) {
-    sync(serviceNameFor(app.domain), app.domain, "web", plan.webMB, app.nodeRuntime === "node", () => writeAppUnit(app, plan.webMB));
+    sync(appUnitFile(app), appInstanceRefs(app), app.domain, "web", plan.webMB, app.nodeRuntime === "node", () => writeAppUnit(app, plan.webMB));
   }
   for (const svc of services) {
-    sync(svcSystemdName(svc.name), svc.name, "service", plan.serviceMB, svc.nodeRuntime === "node", () => writeServiceUnit(svc, plan.serviceMB));
+    sync(serviceUnitFile(svc), serviceInstanceRefs(svc), svc.name, "service", plan.serviceMB, svc.nodeRuntime === "node", () => writeServiceUnit(svc, plan.serviceMB));
   }
 
   if (heapChanged.length + priorityChanged.length === 0) return { ...plan, heapChanged, priorityChanged };
@@ -316,9 +325,7 @@ export function applyNodeHeaps(opts: { restart: boolean; skipRestartFor?: string
   // (systemd dựng lại thuộc tính cgroup khi nạp lại). Heap thì KHÔNG: NODE_OPTIONS
   // chỉ được đọc lúc tiến trình khởi động, nên đổi heap là phải restart thật.
   runCmd("systemctl", ["daemon-reload"]);
-  if (opts.restart) {
-    for (const unit of heapChanged) runCmd("systemctl", ["restart", unit], { silentFail: true });
-  }
+  if (opts.restart) restartGroups(toRestart);
   return { ...plan, heapChanged, priorityChanged };
 }
 
@@ -331,20 +338,30 @@ export function syncAllUnits(opts: { restart: boolean }): NodeHeapPlan {
   const s = loadState();
   const apps = Object.values(s.apps);
   const services = Object.values(s.services);
-  const plan = nodeHeapPlan(
-    detectHardware(),
-    { webApps: apps.length, services: services.length },
-    { serviceWeight: s.serviceHeapWeight, dbEngines: activeEngines().length }
-  );
+  const plan = nodeHeapPlan(detectHardware(), unitMix(), { serviceWeight: s.serviceHeapWeight, dbEngines: activeEngines().length });
   if (apps.length + services.length === 0) return plan;
   for (const app of apps) writeAppUnit(app, plan.webMB);
   for (const svc of services) writeServiceUnit(svc, plan.serviceMB);
   runCmd("systemctl", ["daemon-reload"]);
   if (opts.restart) {
-    for (const app of apps) runCmd("systemctl", ["restart", serviceNameFor(app.domain)], { silentFail: true });
-    for (const svc of services) runCmd("systemctl", ["restart", svcSystemdName(svc.name)], { silentFail: true });
+    restartGroups([
+      ...apps.map((a) => ({ label: a.domain, refs: appInstanceRefs(a) })),
+      ...services.map((v) => ({ label: v.name, refs: serviceInstanceRefs(v) })),
+    ]);
   }
   return plan;
+}
+
+// Restart nhiều nhóm instance: mỗi nhóm cuốn chiếu; một nhóm hỏng chỉ cảnh báo,
+// KHÔNG dừng các nhóm khác (đây là đường chạy ngầm sau tạo/xoá app, tune).
+function restartGroups(groups: { label: string; refs: InstanceRef[] }[]): void {
+  for (const g of groups) {
+    try {
+      rollingRestart(g.refs, g.label);
+    } catch (e) {
+      warn(`Restart ${g.label} không trọn vẹn: ${(e as Error).message}`);
+    }
+  }
 }
 
 // Vá heap cho MỘT unit. Unit không tồn tại (registry và hệ thống lệch nhau, ví
@@ -434,7 +451,7 @@ export async function cmdAppCreate(domain: string, opts: CreateAppOptions): Prom
     if (!rollbackActive) return;
     warn("Tạo app thất bại — đang hoàn tác các thay đổi đã thực hiện...");
     try {
-      runCmd("rm", ["-f", `${NGINX_ENABLED}/${domain}.conf`, `${NGINX_AVAILABLE}/${domain}.conf`, appLocationsPath(domain)], { silentFail: true });
+      runCmd("rm", ["-f", `${NGINX_ENABLED}/${domain}.conf`, `${NGINX_AVAILABLE}/${domain}.conf`, appLocationsPath(domain), appUpstreamPath(domain)], { silentFail: true });
       runCmd("bash", ["-lc", "nginx -t >/dev/null 2>&1 && systemctl reload nginx || true"], { silentFail: true });
       runCmd("systemctl", ["stop", serviceName], { silentFail: true });
       runCmd("systemctl", ["disable", serviceName], { silentFail: true });
@@ -871,10 +888,11 @@ export async function cmdAppDeploy(domain: string): Promise<void> {
     runCmd("chown", ["-hR", `${app.user}:${app.user}`, app.webRoot]);
     chmodNoFollow(`${unitWorkDir(app.webRoot, app.appDir)}/.env`, 0o600);
 
-    runCmd("systemctl", ["restart", serviceNameFor(domain)]);
+    // Nhiều instance: cuốn chiếu, chờ từng instance nghe cổng — không downtime.
+    rollingRestart(appInstanceRefs(app), domain);
     app.updatedAt = new Date().toISOString();
     upsertApp(app);
-    ok(`Deploy hoàn tất — đã khởi động lại ${serviceNameFor(domain)}`);
+    ok(`Deploy hoàn tất — đã khởi động lại ${appUnits(app).join(", ")}`);
   } finally {
     release();
   }
@@ -964,10 +982,11 @@ export async function cmdAppRemove(domain: string, opts: AppRemoveOptions): Prom
   const release = acquireLock(domain);
   try {
     // --- service systemd: LUÔN gỡ (app rời registry -> không quản lý được nữa) ---
-    const serviceName = serviceNameFor(domain);
-    runCmd("systemctl", ["stop", serviceName], { silentFail: true });
-    runCmd("systemctl", ["disable", serviceName], { silentFail: true });
-    runCmd("rm", ["-f", `${SYSTEMD_DIR}/${serviceName}.service`], { silentFail: true });
+    const refs = appInstanceRefs(app);
+    systemctlAll("stop", refs, true);
+    systemctlAll("disable", refs, true);
+    runCmd("rm", ["-f", appUnitFile(app)], { silentFail: true });
+    if (app.instances) removeTemplateFiles(serviceNameFor(domain), app.instances);
     runCmd("systemctl", ["daemon-reload"], { silentFail: true });
 
     // --- SSL: xoá cert TRƯỚC khi đụng nginx (nếu cùng xoá cả hai) ---
@@ -975,7 +994,7 @@ export async function cmdAppRemove(domain: string, opts: AppRemoveOptions): Prom
 
     // --- nginx vhost ---
     if (opts.nginx) {
-      runCmd("rm", ["-f", `${NGINX_ENABLED}/${domain}.conf`, `${NGINX_AVAILABLE}/${domain}.conf`, appLocationsPath(domain)], { silentFail: true });
+      runCmd("rm", ["-f", `${NGINX_ENABLED}/${domain}.conf`, `${NGINX_AVAILABLE}/${domain}.conf`, appLocationsPath(domain), appUpstreamPath(domain)], { silentFail: true });
       runCmd("bash", ["-lc", "nginx -t >/dev/null 2>&1 && systemctl reload nginx || true"], { silentFail: true });
       ok(`Đã xoá cấu hình nginx của '${domain}'.`);
     } else {
@@ -1058,7 +1077,7 @@ export function listAppSummaries(): AppSummary[] {
     .map((a) => ({
       domain: a.domain,
       port: a.port,
-      running: execCapture("systemctl", ["is-active", "--quiet", serviceNameFor(a.domain)]).code === 0,
+      running: anyActive(appInstanceRefs(a)).active > 0,
     }))
     .sort((a, b) => a.domain.localeCompare(b.domain));
 }
@@ -1072,9 +1091,11 @@ export function cmdAppList(): void {
   }
   section(`Danh sách app (${apps.length})`);
   for (const app of apps) {
-    const running = execCapture("systemctl", ["is-active", "--quiet", serviceNameFor(app.domain)]).code === 0;
+    const st = anyActive(appInstanceRefs(app));
+    const running = st.active > 0;
+    const scale = app.instances ? ` ×${app.instances.length}${st.active < st.total ? ` (${st.active} chạy)` : ""}` : "";
     console.log(
-      `  ${running ? "●" : "○"} ${app.domain.padEnd(30)} port=${String(app.port).padEnd(6)} ${`${app.nodeRuntime}/${app.packageManager ?? "npm"}`.padEnd(10)} user=${app.user.padEnd(18)} ${
+      `  ${running ? "●" : "○"} ${(app.domain + scale).padEnd(30)} port=${String(app.port).padEnd(6)} ${`${app.nodeRuntime}/${app.packageManager ?? "npm"}`.padEnd(10)} user=${app.user.padEnd(18)} ${
         app.dbName ? `db=${unitEngine(app)}:${app.dbName} ` : ""
       }${app.redisInstance ? "redis=riêng " : app.redisDbIndex !== undefined ? `redis=#${app.redisDbIndex}(chung) ` : ""}${running ? "đang chạy" : "ĐÃ DỪNG"}`
     );
@@ -1084,31 +1105,31 @@ export function cmdAppList(): void {
 export function cmdAppRestart(domain: string): void {
   requireRoot();
   validateDomain(domain);
-  requireApp(domain);
-  runCmd("systemctl", ["restart", serviceNameFor(domain)]);
-  ok(`Đã khởi động lại ${serviceNameFor(domain)}`);
+  const app = requireApp(domain);
+  rollingRestart(appInstanceRefs(app), domain);
+  ok(`Đã khởi động lại ${appUnits(app).join(", ")}`);
 }
 
 export function cmdAppStop(domain: string): void {
   requireRoot();
   validateDomain(domain);
-  requireApp(domain);
-  runCmd("systemctl", ["stop", serviceNameFor(domain)]);
-  ok(`Đã dừng ${serviceNameFor(domain)}`);
+  const app = requireApp(domain);
+  systemctlAll("stop", appInstanceRefs(app));
+  ok(`Đã dừng ${appUnits(app).join(", ")}`);
 }
 
 export function cmdAppStart(domain: string): void {
   requireRoot();
   validateDomain(domain);
-  requireApp(domain);
-  runCmd("systemctl", ["start", serviceNameFor(domain)]);
-  ok(`Đã khởi động ${serviceNameFor(domain)}`);
+  const app = requireApp(domain);
+  systemctlAll("start", appInstanceRefs(app));
+  ok(`Đã khởi động ${appUnits(app).join(", ")}`);
 }
 
 export function cmdAppLogs(domain: string, opts: { follow: boolean; lines: number }): void {
   validateDomain(domain);
-  requireApp(domain);
-  const args = ["-u", serviceNameFor(domain), "-n", String(opts.lines), "--no-pager"];
+  const app = requireApp(domain);
+  const args = [...appUnits(app).flatMap((u) => ["-u", u]), "-n", String(opts.lines), "--no-pager"];
   if (opts.follow) args.push("-f");
   runCmd("journalctl", args);
 }
@@ -1156,16 +1177,17 @@ export function cmdAppEnvUnset(domain: string, keys: string[]): void {
 export function cmdAppShow(domain: string): void {
   validateDomain(domain);
   const app = requireApp(domain);
-  const unit = serviceNameFor(domain);
-  const running = execCapture("systemctl", ["is-active", "--quiet", unit]).code === 0;
+  const unit = app.instances ? `${serviceNameFor(domain)}@{${app.instances.join(",")}}` : serviceNameFor(domain);
+  const st = anyActive(appInstanceRefs(app));
   section(`App ${domain}`);
   const rows: [string, string | undefined][] = [
-    ["Trạng thái", running ? "đang chạy" : "ĐÃ DỪNG"],
+    ["Trạng thái", st.active === 0 ? "ĐÃ DỪNG" : st.active < st.total ? `${st.active}/${st.total} instance đang chạy` : "đang chạy"],
+    ["Instance", app.instances ? `${app.instances.length} (cổng ${app.instances.join(", ")}) · ${app.sticky ? "ip_hash (sticky)" : "least_conn"} · đổi: napp app scale ${domain} <số>` : `1 · tăng: napp app scale ${domain} <số>`],
     ["Domain phụ", app.aliasDomains.length > 0 ? app.aliasDomains.join(", ") : "-"],
     ["Mã nguồn", app.webRoot + (app.appDir ? ` (app ở ${app.appDir})` : "")],
     ["Repo", app.repoUrl ? `${app.repoUrl} @ ${app.branch}` : "- (app mẫu)"],
     ["Chạy bằng", `${app.user} · systemd ${unit}`],
-    ["Cổng nội bộ", `127.0.0.1:${app.port}`],
+    ["Cổng nội bộ", app.instances ? `127.0.0.1:${app.instances.join(", :")}` : `127.0.0.1:${app.port}`],
     ["Runtime", `${app.nodeRuntime} · ${app.packageManager ?? "npm"}`],
     ["Lệnh", `install: ${app.installCmd} · build: ${app.buildCmd || "-"} · start: ${app.startCmd}`],
     ["Database", app.dbName ? `${driverFor(unitEngine(app)).label} '${app.dbName}' (user ${app.dbUser ?? app.dbName})` : "-"],
@@ -1382,4 +1404,37 @@ export function cmdAppSet(domain: string, opts: SetAppOptions): void {
     info(`• Chặn quét lỗ hổng đã BẬT lại cho ${domain} (danh sách mẫu dùng chung: napp nginx scan-block enable để bật/tắt toàn máy).`);
   }
   if (app.hotlinkProtect) reportHotlink(app);
+}
+
+// --- napp app scale -----------------------------------------------------------
+
+export function cmdAppScale(domain: string, count: number, opts: { sticky?: boolean } = {}): void {
+  requireRoot();
+  validateDomain(domain);
+  const app = requireApp(domain);
+  const release = acquireLock(domain);
+  try {
+    section(`Scale ${domain}: ${app.instances?.length ?? 1} -> ${count} instance`);
+    // Heap mỗi instance tính theo số tiến trình SAU khi scale.
+    const plan = currentHeapPlan({ webApps: count - (app.instances?.length ?? 1) });
+    const next = scaleApp(app, count, opts.sticky, {
+      writeUnit: (rec) => writeAppUnit(rec, plan.webMB),
+      render: (rec) => renderAppSystemdService(rec, execStartLine(rec.startCmd), { nodeOptions: nodeOptionsFor(rec, plan.webMB) }),
+    });
+    const mix = unitMix();
+    if ((next.instances?.length ?? 1) !== (app.instances?.length ?? 1) && mix.webApps + mix.services > (next.instances?.length ?? 1)) {
+      // Tổng số tiến trình đổi -> phần RAM của MỌI đơn vị khác đổi theo.
+      reportBalance(applyNodeHeaps({ restart: true, skipRestartFor: domain }));
+    }
+    if (next.instances && next.instances.length > 1) {
+      info(
+        "Lưu ý khi chạy nhiều instance:\n" +
+          "       • Việc định kỳ trong app (node-cron, setInterval) chạy ở MỌI instance — chỉ chạy khi process.env.NAPP_PRIMARY === \"1\".\n" +
+          "       • Session/cache trong RAM không dùng chung giữa các instance — đưa vào Redis, hoặc bật --sticky.\n" +
+          "       • WebSocket/socket.io: cần --sticky, hoặc Redis adapter."
+      );
+    }
+  } finally {
+    release();
+  }
 }

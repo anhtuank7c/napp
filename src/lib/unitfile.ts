@@ -275,6 +275,42 @@ export function writeManagedUnit(path: string, rendered: string, opts: WriteMana
   return { action: preserved.length > 0 ? "merged" : "rewritten", status, preserved, overridden };
 }
 
+/**
+ * Dựng file unit MỚI (đường dẫn khác) mang theo phần người dùng sửa tay ở file
+ * CŨ. Dùng khi chuyển 'napp-x.service' -> template 'napp-x@.service'.
+ *
+ * Không dùng được writeManagedUnit cho việc này: với file "đã sửa", nó coi MỌI
+ * directive lệch bản render là của người dùng — kể cả directive mà chính napp
+ * vừa đổi (template thêm '/usr/bin/env PORT=%i' vào ExecStart). Ở đây so file
+ * cũ với BẢN RENDER CỦA CHÍNH NÓ: chỉ directive lệch bản đó mới là người dùng
+ * sửa. Tên được ghi vào '# napp-preserve:' nên các lần ghi sau vẫn giữ đúng.
+ * Trả về danh sách directive đã mang sang (rỗng = không có gì, không ghi file).
+ */
+export function carryUserDirectives(path: string, rendered: string, previousText: string, previousRendered: string): string[] {
+  const prevBlocks = scanServiceDirectives(previousText.split("\n"));
+  const prevRenderedBlocks = scanServiceDirectives(previousRendered.split("\n"));
+  const names = new Set(recordedPreserves(previousText));
+  // Ba directive này napp TỰ VÁ theo phần cứng (patchUnitPriority) — giá trị
+  // trong file cũ lệch bản render không có nghĩa là người dùng sửa. Chỉ mang
+  // sang khi người dùng đã khoá bằng '# napp-preserve:' (đã có trong names).
+  const nappTuned = new Set(["MemoryHigh", "CPUWeight", "IOWeight"]);
+  for (const name of PRESERVABLE_DIRECTIVES) {
+    if (nappTuned.has(name)) continue;
+    const mine = blocksNamed(prevBlocks, name);
+    if (mine.length > 0 && blockText(mine) !== blockText(blocksNamed(prevRenderedBlocks, name))) names.add(name);
+  }
+  const carried: string[] = [];
+  let out = rendered.split("\n");
+  for (const name of [...names].sort()) {
+    const mine = blocksNamed(prevBlocks, name);
+    if (mine.length === 0) continue;
+    out = replaceServiceDirective(out, name, mine.flatMap((b) => b.lines));
+    carried.push(name);
+  }
+  if (carried.length > 0) writeFile(path, stamp(out.join("\n"), carried), 0o644);
+  return carried;
+}
+
 // --- vá đúng MỘT giá trị: --max-old-space-size ------------------------------
 
 const HEAP_FLAG = /--max-old-space-size=\d+/;

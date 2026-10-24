@@ -6,6 +6,7 @@ import { writeManagedUnit } from "../lib/unitfile";
 import { showTimer } from "../lib/timer";
 import { loadState, upsertApp, upsertService, SYSTEMD_DIR } from "../lib/state";
 import { writeAppUnit, writeServiceUnit, currentHeapPlan } from "./app";
+import { appInstanceRefs, serviceInstanceRefs, rollingRestart } from "../lib/instances";
 import { renderMemwatchService, renderMemwatchTimer, unitWorkDir } from "../templates/systemd";
 import {
   allUnits, readUnitMemory, readSamples, takeSample, analyseTrend, strayHeapSnapshots,
@@ -349,7 +350,12 @@ export function cmdMemGuard(id: string, on: boolean): void {
   }
 
   const plan = currentHeapPlan();
-  const unit = app ? `napp-${app.domain}` : `napp-svc-${svc!.name}`;
+  // Lấy tên unit THẬT (slug, và mọi instance nếu đã scale). Trước đây ghép
+  // 'napp-' + domain nguyên gốc: 'shop.example.com' thành unit không tồn tại
+  // (unit thật là 'napp-shop_example_com'), restart thất bại im lặng và cờ
+  // leak-guard chỉ có hiệu lực ở lần restart sau — đúng lúc người ta cần nó nhất
+  // thì nó chưa bật.
+  const refs = app ? appInstanceRefs(app) : serviceInstanceRefs(svc!);
   if (app) {
     app.leakGuard = on;
     app.updatedAt = new Date().toISOString();
@@ -362,7 +368,7 @@ export function cmdMemGuard(id: string, on: boolean): void {
     writeServiceUnit(svc!, plan.serviceMB);
   }
   runCmd("systemctl", ["daemon-reload"]);
-  runCmd("systemctl", ["restart", unit], { silentFail: true });
+  rollingRestart(refs, id);
 
   if (!on) {
     ok(`Đã TẮT leak-guard cho '${id}' và khởi động lại.`);

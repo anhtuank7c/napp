@@ -174,7 +174,8 @@ cặp `--x` / `--no-x` · cờ lặp lại được viết số ít và lặp l�
 | ↳ `[--allow-insecure-repo]` | Cho phép repo `http://`/`git://` (mặc định từ chối — dễ bị tráo mã giữa đường) |
 | `sudo napp app update <domain> [--auto-static] [--static-root …] [--upload-dir …] [--[no-]hotlink-protect] [--max-body …] [--[no-]scan-block]` | **Đổi cấu hình nginx của app ĐÃ TẠO** — chỉ đổi đúng cờ được truyền |
 | `sudo napp app delete <domain> [-y] [--source] [--database] [--all] [--keep-nginx] [--keep-ssl]` | Gỡ app — mặc định xoá nginx + SSL, **GIỮ** mã nguồn + database |
-| `sudo napp app deploy\|start\|stop\|restart <domain>` · `napp app logs <domain> [-f] [-n 200]` | Triển khai / điều khiển / xem log |
+| `sudo napp app deploy\|start\|stop\|restart <domain>` · `napp app logs <domain> [-f] [-n 200]` | Triển khai / điều khiển / xem log (nhiều instance: restart **cuốn chiếu**, không downtime) |
+| `sudo napp app scale <domain> <số> [--sticky\|--no-sticky]` | Chạy **nhiều instance** (`napp-<slug>@<cổng>.service`), nginx chia tải — xem [Chạy nhiều instance](#-chạy-nhiều-instance-scale) |
 | `sudo napp app env list <domain> [--reveal]` | Xem `.env` (giá trị bí mật bị che) |
 | `sudo napp app env set <domain> KEY=VALUE...` · `unset <domain> KEY...` | Ghi / xoá biến trong `.env` (restart app để áp dụng) |
 | `sudo napp app alias list\|create\|delete <domain> [<alias>]` | Domain phụ trỏ vào app |
@@ -186,6 +187,7 @@ cặp `--x` / `--no-x` · cờ lặp lại được viết số ít và lặp l�
 | `sudo napp service update <name> [--run-as <domain>\|--standalone] [--write-dir <path>\|--no-write-dir]` | Đổi **danh tính/quyền ghi** của service đã tạo |
 | `sudo napp service delete <name> [-y] [--source] [--database] [--all]` | Gỡ service — mặc định **GIỮ** mã nguồn + database |
 | `sudo napp service deploy\|start\|stop\|restart <name>` · `napp service logs <name> [-f]` | Triển khai / điều khiển / xem log |
+| `sudo napp service scale <name> <số>` | Chạy nhiều worker song song (`napp-svc-<slug>@1..N.service`) |
 | `sudo napp service env list\|set\|unset <name> …` | Như `app env` |
 | **`cert`** — SSL Let's Encrypt | |
 | `sudo napp cert list` · `show <domain>` | Liệt kê (kèm hạn dùng) / xem một chứng chỉ |
@@ -820,6 +822,40 @@ sudo napp service logs queue-email -f      # xem log
 sudo napp service deploy queue-email       # git pull + rebuild + restart
 sudo napp service delete queue-email       # gỡ (mặc định giữ mã nguồn + database)
 ```
+
+---
+
+## 📈 Chạy nhiều instance (scale)
+
+Một tiến trình Node chỉ dùng một nhân CPU. Muốn dùng hết máy, hoặc muốn deploy mà không rớt request, hãy chạy nhiều instance:
+
+```bash
+sudo napp app scale shop.example.com 3        # web app: 3 instance, nginx chia tải
+sudo napp app scale shop.example.com 3 --sticky   # một client luôn vào cùng instance
+sudo napp service scale queue-email 4         # worker: 4 tiến trình tiêu thụ hàng đợi song song
+sudo napp app scale shop.example.com 1        # giảm lại (instance chính không bao giờ bị bớt)
+```
+
+**Bên dưới là kiểu `nexus@.service` quen thuộc:**
+
+| | Unit | Instance |
+|---|---|---|
+| Web app | `napp-<slug>@.service` | **tên instance = cổng**: `napp-shop_example_com@3001` nghe `PORT=3001` |
+| Worker | `napp-svc-<slug>@.service` | số thứ tự `@1`, `@2`… (worker có `--port` thì cũng là cổng) |
+
+- nginx chia request qua file riêng `/etc/nginx/napp-upstreams/<domain>.conf` (`least_conn`, hoặc `ip_hash` khi `--sticky`). Vhost chỉ còn một dòng `include`, nên tăng/giảm instance **không bao giờ đụng vào khối SSL certbot**.
+- **Opt-in:** app chưa scale giữ nguyên `napp-<slug>.service` như mọi bản trước. Lần scale đầu mới chuyển, và chuyển **không downtime**: bật instance mới trên cổng mới → đưa vào nginx → mới thay unit cũ bằng instance chính (giữ **cổng cũ**, nên mọi thứ đang trỏ vào cổng đó vẫn chạy).
+- **Deploy/restart cuốn chiếu:** từng instance một, chờ instance đó **thực sự nghe cổng** rồi mới tới cái kế. Từ 2 instance trở lên, deploy không rớt request (nginx đẩy sang instance còn sống). Một instance không lên được thì napp dừng ngay, các instance chưa restart vẫn phục vụ bản cũ.
+- **Lỗi giữa chừng thì hoàn tác:** instance mới không lên, `nginx -t` hỏng… đều đưa máy về nguyên trạng trước khi scale.
+- **Heap chia theo tiến trình:** app 3 instance được tính như 3 phần heap (`napp tune show` hiển thị số tiến trình). Đổi số instance thì heap của mọi đơn vị được cân đối lại.
+
+**Mỗi instance có biến riêng:** `NAPP_INSTANCE` (cổng hoặc số thứ tự). Riêng instance đầu có thêm `NAPP_PRIMARY=1`.
+
+> ⚠️ **Trước khi scale web app, kiểm tra app của bạn:**
+> - **Việc định kỳ** trong app (`node-cron`, `setInterval` gửi email tổng hợp…) chạy ở **mọi** instance: scale lên 3 là chạy 3 lần. Bọc bằng `if (process.env.NAPP_PRIMARY === "1")`.
+> - **Session / cache trong RAM** không dùng chung giữa các instance: đưa vào Redis, hoặc dùng `--sticky`.
+> - **WebSocket / socket.io:** cần `--sticky` (long-polling phải về đúng instance), hoặc Redis adapter.
+> - Upload file ra đĩa thì không sao: mọi instance cùng máy, cùng thư mục.
 
 ---
 
