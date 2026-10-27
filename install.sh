@@ -38,6 +38,15 @@ warn() { printf '%b %s\n' "${C_YLW}[CẢNH BÁO]${C_RST}" "$*"; }
 die()  { printf '%b %s\n' "${C_RED}[LỖI]${C_RST}" "$*" >&2; exit 1; }
 
 [[ $EUID -eq 0 ]] || die "Script này cần quyền root. Hãy chạy lại với sudo."
+
+# apt PHẢI chạy không tương tác: Ubuntu 24.04 có needrestart (mặc định hỏi
+# bằng hộp thoại whiptail "Restart services?"/"Pending kernel upgrade") và
+# debconf có thể hỏi cấu hình. Khi output apt bị ẩn hoặc script chạy qua
+# `curl | sudo bash`, hộp thoại đó vô hình -> cài đặt treo vô thời hạn.
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a      # tự restart service cần thiết, không hỏi
+export NEEDRESTART_SUSPEND=1   # bỏ qua needrestart trong lúc script chạy apt
+APT_GET=(apt-get -y -o DPkg::Lock::Timeout=300)
 command -v curl >/dev/null 2>&1 || die "Cần 'curl'. Cài bằng: apt update && apt install -y curl"
 
 case "$NAPP_CJS_URL" in
@@ -55,7 +64,7 @@ esac
 install_node() {
   info "Đang cài Node.js ${NODE_MAJOR}.x LTS qua NodeSource (system-wide)..."
   curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash -
-  apt-get install -y nodejs
+  "${APT_GET[@]}" install nodejs </dev/null
   ok "Đã cài Node.js $(node --version) tại $(command -v node)"
 }
 
@@ -93,11 +102,12 @@ install_bun() {
   info "Đang cài bun (system-wide vào /usr/local/bin)..."
   # Trình cài bun cần 'unzip'.
   if ! command -v unzip >/dev/null 2>&1; then
-    apt-get install -y unzip >/dev/null 2>&1 || { apt-get update && apt-get install -y unzip; }
+    # KHÔNG ẩn output apt: nếu có gì chờ (khoá dpkg, hộp thoại) người dùng phải thấy được.
+    "${APT_GET[@]}" install unzip </dev/null || { "${APT_GET[@]}" update </dev/null && "${APT_GET[@]}" install unzip </dev/null; }
   fi
   # BUN_INSTALL=/usr/local -> nhị phân đặt tại /usr/local/bin/bun (systemd/sudo dùng được).
   export BUN_INSTALL=/usr/local
-  curl -fsSL https://bun.sh/install | bash
+  curl -fsSL --connect-timeout 20 https://bun.sh/install | bash
   command -v bun >/dev/null 2>&1 || return 1
   ok "Đã cài bun $(bun --version) tại $(command -v bun)"
 }

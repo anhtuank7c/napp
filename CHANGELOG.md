@@ -2,6 +2,14 @@
 
 Tất cả thay đổi đáng chú ý của `napp` được ghi lại ở đây.
 
+## 1.33.1
+
+Sửa lỗi **`install.sh` treo vĩnh viễn** trên Ubuntu 24.04 mới, ngay sau dòng "Đang cài bun".
+
+- **Nguyên nhân:** Ubuntu 24.04 có `needrestart`, mặc định hỏi bằng hộp thoại whiptail ("Restart services?", "Pending kernel upgrade"). Bước cài `unzip` (cần cho trình cài bun) ẩn toàn bộ output apt (`>/dev/null 2>&1`), nên hộp thoại vô hình và apt chờ mãi một câu trả lời.
+- **Sửa:** `install.sh` chạy apt hoàn toàn không tương tác (`DEBIAN_FRONTEND=noninteractive`, `NEEDRESTART_MODE=a`, `NEEDRESTART_SUSPEND=1`), chờ khoá dpkg tối đa 300 giây (`DPkg::Lock::Timeout`, phòng unattended-upgrades đang chạy trên máy mới) thay vì treo, không còn ẩn output apt, apt đọc stdin từ `/dev/null` (không nuốt phần còn lại của script khi chạy qua `curl | sudo bash`), và tải trình cài bun có `--connect-timeout`.
+- Binary `napp` không đổi tính năng — phát hành để đồng bộ version với `install.sh`.
+
 ## 1.33.0
 
 Chạy **nhiều instance** cho web app và worker, nginx chia tải, deploy không downtime.

@@ -16,6 +16,12 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.33.1
+- Sửa install.sh treo vĩnh viễn trên Ubuntu 24.04 mới ở bước cài bun: needrestart
+  hỏi bằng hộp thoại whiptail trong khi output apt bị ẩn. Nay apt chạy không
+  tương tác (DEBIAN_FRONTEND=noninteractive, NEEDRESTART_MODE=a), chờ khoá dpkg
+  tối đa 300 giây, không ẩn output, stdin từ /dev/null.
+
 ## 1.33.0
 - Chạy nhiều instance: napp app scale <domain> <số> [--sticky], napp service
   scale <name> <số>. Unit template kiểu nexus@.service: web app tên instance =
