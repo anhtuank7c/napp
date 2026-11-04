@@ -33,6 +33,49 @@ export function defaultInstallCmd(pm: PackageManager): string {
   }
 }
 
+// Cài ĐỦ cả devDependencies — dùng khi app có bước build. Build TypeScript cần
+// typescript/@nestjs/cli/tsup/vite… (đều là devDependencies); cài '--omit=dev'
+// rồi build là 'tsc: not found'. Build xong chạy pruneDevDepsCmd để gỡ chúng.
+export function devInstallCmd(pm: PackageManager): string {
+  switch (pm) {
+    case "bun":
+      return "if [ -f bun.lockb ] || [ -f bun.lock ]; then bun install --frozen-lockfile || bun install --no-frozen-lockfile; else bun install --no-frozen-lockfile; fi";
+    case "pnpm":
+      return "if [ -f pnpm-lock.yaml ]; then pnpm install --frozen-lockfile || pnpm install; else pnpm install; fi";
+    case "yarn":
+      return "if [ -f yarn.lock ]; then yarn install --frozen-lockfile || yarn install --immutable || yarn install; else yarn install; fi";
+    case "npm":
+    default:
+      // --include=dev: phòng NODE_ENV=production lọt vào môi trường (npm sẽ tự bỏ dev).
+      return "if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then npm ci --include=dev || npm install --include=dev; else npm install --include=dev; fi";
+  }
+}
+
+/**
+ * Gỡ devDependencies SAU khi build — server production chỉ giữ thứ app cần lúc
+ * chạy (ít mã bên thứ ba hơn, nhẹ đĩa hơn). KHÔNG BAO GIỜ làm hỏng deploy: prune
+ * lỗi thì giữ nguyên node_modules (app vẫn chạy được, chỉ nặng hơn).
+ * undefined = package manager không có cách prune an toàn tại chỗ.
+ */
+export function pruneDevDepsCmd(pm: PackageManager): string | undefined {
+  const keep = `echo "napp: không gỡ được devDependencies — giữ nguyên node_modules"`;
+  switch (pm) {
+    case "npm":
+      return `npm prune --omit=dev || ${keep}`;
+    case "pnpm":
+      return `pnpm prune --prod || ${keep}`;
+    case "yarn":
+      // yarn classic: cài lại chế độ production (gỡ dev). yarn berry (.yarnrc.yml):
+      // 'workspaces focus' chỉ có sẵn từ v4 — không có thì giữ nguyên.
+      return `if [ -f .yarnrc.yml ]; then yarn workspaces focus --all --production || ${keep}; else yarn install --production --frozen-lockfile --ignore-scripts --prefer-offline || ${keep}; fi`;
+    case "bun":
+    default:
+      // bun chưa có 'prune'; xoá node_modules rồi cài lại sẽ làm app ĐANG CHẠY
+      // hụt module lúc deploy — không đáng. Giữ devDependencies.
+      return undefined;
+  }
+}
+
 // Lệnh khởi động mặc định. Runtime bun luôn chạy bằng `bun run start`. Runtime
 // node chạy script "start" qua chính package manager đã chọn (npm/pnpm/yarn);
 // nếu lỡ ghép node + bun thì dùng npm cho an toàn (npm luôn có cùng Node).

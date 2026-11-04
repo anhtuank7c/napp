@@ -307,9 +307,10 @@ app
   .option("--ssh-key <path>", "deploy key để clone repo PRIVATE qua SSH — đường dẫn file HOẶC nội dung key")
   .addOption(new Option("--runtime <runtime>", "runtime chạy app").choices(["node", "bun"]).default("node"))
   .addOption(new Option("--package-manager <pm>", "trình quản lý gói phụ thuộc (mặc định: bun nếu runtime bun, còn lại npm)").choices(["npm", "pnpm", "yarn", "bun"]))
-  .option("--install-cmd <cmd>", "lệnh cài dependencies (mặc định theo package manager)")
-  .option("--build-cmd <cmd>", "lệnh build (vd: 'npm run build')")
-  .option("--start-cmd <cmd>", "lệnh khởi động (mặc định theo runtime, vd: 'npm start')")
+  .option("--install-cmd <cmd>", "lệnh cài dependencies (mặc định theo package manager; có build thì cài cả devDependencies rồi gỡ sau build)")
+  .option("--build-cmd <cmd>", "lệnh build (mặc định: '<pm> run build' nếu package.json có script build; '' để tắt)")
+  .option("--start-cmd <cmd>", "lệnh khởi động (mặc định theo framework: NestJS -> start:prod, AdonisJS -> build/bin/server.js…, còn lại '<pm> start')")
+  .option("--keep-dev-deps", "giữ devDependencies sau khi build (mặc định gỡ để server production gọn và ít mã bên thứ ba)")
   .option(
     "--address-header",
     "đặt ADDRESS_HEADER/XFF_DEPTH cho SvelteKit adapter-node — CHỈ dùng khi app KHÔNG tự phân giải IP khách (xem README)"
@@ -353,6 +354,7 @@ app
       installCmd: opts.installCmd,
       buildCmd: opts.buildCmd,
       startCmd: opts.startCmd,
+      keepDevDeps: Boolean(opts.keepDevDeps),
       db: Boolean(opts.db),
       dbEngine: typeof opts.db === "string" ? opts.db : undefined,
       redis: Boolean(opts.redis),
@@ -517,9 +519,10 @@ service
   .option("--ssh-key <path>", "deploy key để clone repo PRIVATE qua SSH — đường dẫn file HOẶC nội dung key")
   .addOption(new Option("--runtime <runtime>", "runtime chạy service").choices(["node", "bun"]).default("node"))
   .addOption(new Option("--package-manager <pm>", "trình quản lý gói phụ thuộc (mặc định: bun nếu runtime bun, còn lại npm)").choices(["npm", "pnpm", "yarn", "bun"]))
-  .option("--install-cmd <cmd>", "lệnh cài dependencies (mặc định theo package manager)")
-  .option("--build-cmd <cmd>", "lệnh build (vd: 'npm run build')")
-  .option("--start-cmd <cmd>", "lệnh khởi động (mặc định 'npm start' theo package.json; vd: 'node worker.js')")
+  .option("--install-cmd <cmd>", "lệnh cài dependencies (mặc định theo package manager; có build thì cài cả devDependencies rồi gỡ sau build)")
+  .option("--build-cmd <cmd>", "lệnh build (mặc định: '<pm> run build' nếu package.json có script build; '' để tắt)")
+  .option("--start-cmd <cmd>", "lệnh khởi động (mặc định theo framework: NestJS -> start:prod…, còn lại '<pm> start'; vd: 'node worker.js')")
+  .option("--keep-dev-deps", "giữ devDependencies sau khi build (mặc định gỡ)")
   .addOption(dbCreateOpt("service"))
   .option("--redis", "cấp Redis RIÊNG cho service (tiến trình riêng, có mật khẩu)")
   .option("--redis-db <n>", "KIỂU CŨ: dùng DB index trên Redis dùng chung (không mật khẩu, không cô lập)", (v) => parseInt(v, 10))
@@ -544,6 +547,7 @@ service
       installCmd: opts.installCmd,
       buildCmd: opts.buildCmd,
       startCmd: opts.startCmd,
+      keepDevDeps: Boolean(opts.keepDevDeps),
       db: Boolean(opts.db),
       dbEngine: typeof opts.db === "string" ? opts.db : undefined,
       redis: Boolean(opts.redis),

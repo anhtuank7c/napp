@@ -16,6 +16,17 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.35.0
+- Nhận diện framework từ package.json khi app/service create: NestJS, Express,
+  Fastify, Hono, Elysia, Koa, hapi, AdonisJS, Next.js, Nuxt, SvelteKit, Astro,
+  Remix/React Router. Tự chọn lệnh build/start (NestJS -> start:prod hoặc
+  node dist/main.js; AdonisJS -> build/bin/server.js; Bun -> bun src/index.ts…).
+- Có script build thì tự build. Có build thì cài ĐỦ devDependencies (trước đây
+  --omit=dev làm build TypeScript lỗi 'tsc: not found'), build xong gỡ chúng.
+  --keep-dev-deps để giữ. Start dùng tsx/ts-node/nodemon thì tự giữ.
+- Cảnh báo script start là lệnh dev; sau khi tạo app chờ app nghe đúng PORT,
+  không nghe thì cảnh báo kèm cách sửa theo framework (thay vì 502 im lặng).
+
 ## 1.34.0
 - napp db password <name> [--user] [--engine] [--custom] [--no-restart] [-y]:
   đổi mật khẩu user CSDL (MariaDB/MySQL/PostgreSQL/MongoDB), ngẫu nhiên hoặc tự

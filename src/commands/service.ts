@@ -33,7 +33,8 @@ import { unitWorkDir, renderServiceSystemdService, execStartLine } from "../temp
 import { detectHardware } from "../lib/hardware";
 import { serviceMemoryHighMB } from "../templates/tuning";
 import { GIT_NONINTERACTIVE_ENV, prepareRepoAuth, setupRepoAuth } from "../lib/repo";
-import { defaultPackageManager, defaultInstallCmd, defaultStartCmd, ensurePackageManager, ensureRuntime } from "../lib/provision";
+import { defaultPackageManager, ensurePackageManager, ensureRuntime } from "../lib/provision";
+import { resolveUnitCommands, frameworkEnv } from "../lib/appprofile";
 import { applyNodeHeaps, writeServiceUnit, currentHeapPlan, unitMix, reportBalance, nodeOptionsFor } from "./app";
 import { serviceInstanceRefs, rollingRestart, systemctlAll, anyActive, removeTemplateFiles, scaleService } from "../lib/instances";
 
@@ -46,6 +47,7 @@ export interface CreateServiceOptions {
   installCmd?: string;
   buildCmd?: string;
   startCmd?: string;
+  keepDevDeps?: boolean; // giữ devDependencies sau build (mặc định gỡ — xem lib/appprofile.ts)
   db: boolean;
   dbEngine?: string; // engine cho --db (bỏ trống = engine mặc định / engine duy nhất đang có)
   redis: boolean;
@@ -264,9 +266,11 @@ EOF`,
       ]);
     }
 
-    const installCmd = opts.installCmd ?? defaultInstallCmd(pm);
-    const buildCmd = opts.buildCmd ?? "";
-    const startCmd = opts.startCmd ?? defaultStartCmd(opts.runtime, pm);
+    // Như app create: cờ truyền tay thắng, còn lại suy từ package.json (lib/appprofile.ts).
+    const cmds = resolveUnitCommands(opts, workDir, unitWorkDir(workDir, opts.appDir), opts.runtime, pm, "service");
+    const { installCmd, buildCmd, startCmd, profile } = cmds;
+    for (const n of cmds.notes) info(n);
+    for (const w of profile.warnings) warn(w);
     validateUnitCommand(installCmd, "--install-cmd");
     validateUnitCommand(buildCmd, "--build-cmd");
     validateUnitCommand(startCmd, "--start-cmd");
@@ -313,6 +317,7 @@ EOF`,
     if (port !== undefined) envUpdates.PORT = String(port);
     if (dbInfo && dbEngine) Object.assign(envUpdates, driverFor(dbEngine).envFor(dbInfo));
     Object.assign(envUpdates, redisEnvForUnit(redisProv));
+    Object.assign(envUpdates, frameworkEnv(profile));
     for (const kv of opts.env) {
       const eq = kv.indexOf("=");
       if (eq === -1) die(`--env phải theo dạng KEY=VALUE, nhận được: '${kv}'`);
@@ -400,6 +405,8 @@ EOF`,
     console.log(`  Chạy bằng    : ${user}${borrowed ? ` — user của '${borrowed.id}' (dùng chung danh tính)` : " (user riêng)"} (systemd: ${unitName})`);
     if (writePaths.length > 0) console.log(`  Ghi được vào : ${workDir} · ${writePaths.join(" · ")}`);
     console.log(`  Runtime      : ${opts.runtime} · quản lý gói: ${pm}`);
+    if (profile.framework) console.log(`  Framework    : ${profile.framework}`);
+    console.log(`  Lệnh         : build: ${buildCmd || "-"} · start: ${startCmd}`);
     if (port !== undefined) console.log(`  Cổng nội bộ  : 127.0.0.1:${port} (service tự bind — KHÔNG public qua nginx)`);
     else console.log(`  Cổng         : không cấp (worker chạy ngầm, không listen)`);
     if (dbInfo && dbEngine) console.log(`  Database     : ${driverFor(dbEngine).label} '${dbInfo.name}'  (user: ${dbInfo.user}, mật khẩu + DATABASE_URL trong .env)`);

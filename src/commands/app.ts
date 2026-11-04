@@ -2,7 +2,7 @@ import { existsSync, rmSync, readFileSync } from "node:fs";
 import { provisionRedis, redisEnvForUnit, rollbackRedis, describeUnitRedis, leaveRedisInstance, type RedisProvision } from "../lib/redis";
 import { ensureLogrotate } from "../lib/logrotate";
 import { ask } from "../lib/prompt";
-import { execCapture, runCmd, runAs, ensureDir, requireRoot, commandExists, writeFile, appendFile, chmodNoFollow } from "../lib/exec";
+import { execCapture, runCmd, runAs, ensureDir, requireRoot, commandExists, writeFile, appendFile, chmodNoFollow, state as execState } from "../lib/exec";
 import { info, ok, warn, die, section } from "../lib/log";
 import { validateDomain, validatePort, validateRepoUrl, validateBranch, validateEnvKey, validateMaxBody, assertSafeNginxInputs, validateUnitCommand } from "../lib/validate";
 import {
@@ -33,7 +33,8 @@ import { acquireLock } from "../lib/lock";
 import { resolveEngine, driverFor, unitEngine, activeEngines, type DbEngine } from "../lib/db";
 import { mergeEnvFile, removeEnvKeys, printEnvFile } from "../lib/envfile";
 import { renderAppNginxConf, appLocationsPath, appUpstreamPath } from "../templates/nginx";
-import { appInstanceRefs, serviceInstanceRefs, rollingRestart, systemctlAll, anyActive, removeTemplateFiles, scaleApp, type InstanceRef } from "../lib/instances";
+import { appInstanceRefs, serviceInstanceRefs, rollingRestart, systemctlAll, anyActive, removeTemplateFiles, scaleApp, waitHealthy, type InstanceRef } from "../lib/instances";
+import { resolveUnitCommands, frameworkEnv } from "../lib/appprofile";
 import { writeAppLocationsConf, hintCustomLocations, injectLocationsInclude } from "../lib/locationsfile";
 import { ensureNappProxyConf } from "./nginx";
 import { renderAppSystemdService, renderServiceSystemdService, execStartLine, unitWorkDir } from "../templates/systemd";
@@ -44,7 +45,7 @@ import { ipv6Available } from "../lib/network";
 import { GIT_NONINTERACTIVE_ENV, prepareRepoAuth, setupRepoAuth } from "../lib/repo";
 import { detectStaticLayout, detectUploadDir, parseStaticAlias, staticSetCommand, type StaticAlias, type StaticSuggestion } from "../lib/framework";
 import { appServePaths, ensureNginxCanServe } from "../lib/staticaccess";
-import { defaultPackageManager, defaultInstallCmd, defaultStartCmd, ensurePackageManager, ensureRuntime } from "../lib/provision";
+import { defaultPackageManager, ensurePackageManager, ensureRuntime } from "../lib/provision";
 
 export interface CreateAppOptions {
   port?: number;
@@ -55,6 +56,7 @@ export interface CreateAppOptions {
   installCmd?: string;
   buildCmd?: string;
   startCmd?: string;
+  keepDevDeps?: boolean; // giữ devDependencies sau build (mặc định gỡ — xem lib/appprofile.ts)
   db: boolean;
   dbEngine?: string; // engine cho --db (bỏ trống = engine mặc định / engine duy nhất đang có)
   redis: boolean;
@@ -551,12 +553,15 @@ EOF`,
       ]);
     }
 
-    const installCmd = opts.installCmd ?? defaultInstallCmd(pm);
-    const buildCmd = opts.buildCmd ?? "";
-    const startCmd = opts.startCmd ?? defaultStartCmd(opts.runtime, pm);
+    // Lệnh install/build/start: cờ truyền tay thắng, còn lại suy từ package.json
+    // (NestJS, Express, Fastify, Hono… — xem lib/appprofile.ts).
+    const cmds = resolveUnitCommands(opts, webRoot, unitWorkDir(webRoot, opts.appDir), opts.runtime, pm, "web");
+    const { installCmd, buildCmd, startCmd, profile } = cmds;
     validateUnitCommand(installCmd, "--install-cmd");
     validateUnitCommand(buildCmd, "--build-cmd");
     validateUnitCommand(startCmd, "--start-cmd");
+    for (const n of cmds.notes) info(n);
+    for (const w of profile.warnings) warn(w);
 
     if (existsSync(`${webRoot}/package.json`) || opts.repo) {
       info("Đang cài dependencies...");
@@ -639,6 +644,7 @@ EOF`,
     }
     if (dbInfo && dbEngine) Object.assign(envUpdates, driverFor(dbEngine).envFor(dbInfo));
     Object.assign(envUpdates, redisEnvForUnit(redisProv));
+    Object.assign(envUpdates, frameworkEnv(profile));
     for (const kv of opts.env) {
       const eq = kv.indexOf("=");
       if (eq === -1) die(`--env phải theo dạng KEY=VALUE, nhận được: '${kv}'`);
@@ -798,7 +804,21 @@ EOF`,
     runCmd("systemctl", ["daemon-reload"]);
     runCmd("systemctl", ["enable", serviceName]);
     runCmd("systemctl", ["restart", serviceName]);
-    ok(`Đã tạo và khởi động systemd service '${serviceName}'`);
+    // Chờ app THẬT SỰ nghe đúng cổng. Lỗi hay gặp nhất với Fastify/Hono/Koa…
+    // là app tự nghe cổng 3000 (không đọc PORT) -> nginx trả 502 mà không có
+    // lỗi nào. Chỉ CẢNH BÁO, không hoàn tác: sửa code rồi 'app deploy' là xong,
+    // dựng lại cả app (user, DB, Redis…) thì phí.
+    if (!execState.dryRun) info(`Đang chờ app nghe cổng ${port}...`);
+    const health = execState.dryRun ? undefined : waitHealthy(serviceName, port);
+    if (health) {
+      warn(
+        `${health}\n` +
+          `  App đã được tạo nhưng CHƯA phục vụ được — nginx sẽ trả 502 cho tới khi app nghe 127.0.0.1:${port} (biến PORT trong .env).\n` +
+          (profile.hints.length ? profile.hints.map((h) => `  - ${h}`).join("\n") + "\n" : "") +
+          `  Xem log: sudo napp app logs ${domain} -n 50 — sửa xong: sudo napp app deploy ${domain}`
+      );
+    }
+    ok(`Đã tạo và khởi động systemd service '${serviceName}'${health ? "" : ` (đang nghe cổng ${port})`}`);
 
     // --- nginx vhost (chỉ HTTP; certbot sẽ thêm SSL sau) ---
     // Ghi map dùng chung TRƯỚC: vhost dưới đây tham chiếu $napp_connection_upgrade,
@@ -839,6 +859,8 @@ EOF`,
     console.log(`  Mã nguồn     : ${webRoot}`);
     console.log(`  Chạy bằng    : ${user} (systemd: ${serviceName})`);
     console.log(`  Runtime      : ${opts.runtime} · quản lý gói: ${pm}`);
+    if (profile.framework) console.log(`  Framework    : ${profile.framework}`);
+    console.log(`  Lệnh         : build: ${buildCmd || "-"} · start: ${startCmd}`);
     console.log(`  Cổng nội bộ  : 127.0.0.1:${port} (không public — chỉ nginx proxy vào)`);
     if (dbInfo && dbEngine) {
       console.log(`  Database     : ${driverFor(dbEngine).label} '${dbInfo.name}'  (user: ${dbInfo.user}, mật khẩu + DATABASE_URL trong .env)`);
@@ -850,7 +872,14 @@ EOF`,
     console.log(`  1. Trỏ bản ghi DNS A của ${domain} (và www.${domain} nếu dùng) về server này.`);
     console.log(`  2. Kích hoạt SSL:  sudo napp cert create ${domain}`);
     console.log(`  3. Xem log:        sudo napp app logs ${domain} -f`);
-    console.log("  App SvelteKit dùng form action: nếu POST bị 403 CSRF, xem ghi chú ORIGIN trong .env.");
+    if (profile.framework === "SvelteKit" || !profile.framework) {
+      console.log("  App SvelteKit dùng form action: nếu POST bị 403 CSRF, xem ghi chú ORIGIN trong .env.");
+    }
+    if (profile.hints.length) {
+      console.log();
+      console.log(`  Lưu ý cho ${profile.framework} chạy sau nginx:`);
+      for (const h of profile.hints) console.log(`  - ${h}`);
+    }
     console.log("===============================================================");
   } catch (e) {
     rollback();

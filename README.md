@@ -322,15 +322,41 @@ database của nó** (MongoDB: `readWrite` trên đúng DB đó).
 sudo napp app create api.example.com \
   --repo git@github.com:you/api.git \
   --branch main \
-  --install-cmd "npm ci --omit=dev" \
-  --build-cmd "npm run build" \
-  --start-cmd "node dist/server.js" \
   --db --redis
 ```
 
-- Tạo user hệ thống `na_api_example_com`, clone repo, cài deps, build
+- Tạo user hệ thống `na_api_example_com`, clone repo, cài deps, build (lệnh build/start tự chọn theo framework — xem [Framework được hỗ trợ](#-framework-được-hỗ-trợ))
 - Tạo `/var/www/api.example.com`, systemd service `napp-api_example_com`, vhost nginx (HTTP)
 - Tạo sẵn database + user riêng (engine đang cài — máy có nhiều engine thì ghi rõ, vd `--db postgresql`), tạo một **Redis riêng** (tiến trình riêng, có mật khẩu), ghi hết vào `.env` (kèm `DATABASE_URL`, `REDIS_URL`)
+
+### 🧩 Framework được hỗ trợ
+
+Ngay sau khi clone, napp đọc `package.json` để chọn lệnh **build** và **start**
+phù hợp. Cờ truyền tay (`--install-cmd`, `--build-cmd`, `--start-cmd`) luôn được
+ưu tiên. Áp dụng cho cả `app create` lẫn `service create`.
+
+| Framework | Lệnh start napp chọn | Cần sửa gì trong mã nguồn khi chạy sau nginx |
+|---|---|---|
+| **NestJS** | script `start:prod`, không có thì `node dist/main.js` (`npm start` của Nest là `nest start` — chế độ dev) | `app.listen(process.env.PORT)` · `app.set('trust proxy', 'loopback')` |
+| **Express** | `npm start` | `app.listen(process.env.PORT)` · `app.set('trust proxy', 'loopback')` |
+| **Fastify** | `npm start` | `listen({ port: Number(process.env.PORT), host: '127.0.0.1' })` · `Fastify({ trustProxy: '127.0.0.1' })` |
+| **Hono** | `npm start`; trên Bun không có script start thì `bun src/index.ts` | Node: `serve({ fetch: app.fetch, port: Number(process.env.PORT) })` · Bun: không cần gì |
+| **Elysia** (Bun) | `bun src/index.ts` (hoặc file trong `module`) | `.listen(Number(process.env.PORT))` |
+| **Koa** · **hapi** | `npm start`, không có thì file `main` | Koa: `app.proxy = true` · hapi: `server({ port: process.env.PORT, host: '127.0.0.1' })` |
+| **AdonisJS** | `node build/bin/server.js` | napp tự đặt `HOST`, `LOG_LEVEL`, `APP_KEY` (ngẫu nhiên) trong `.env` |
+| **Next.js** · **Remix / React Router** | `npm start` | — |
+| **SvelteKit** (adapter-node) · **Nuxt** · **Astro** (node) | `npm start`, không có thì `node build` · `node .output/server/index.mjs` · `node dist/server/entry.mjs` | — |
+
+- **Build:** `package.json` có script `build` thì napp chạy nó (`--build-cmd ''` để tắt).
+- **devDependencies:** có bước build thì napp cài **đủ** devDependencies (cần cho
+  `typescript`, `@nestjs/cli`, `vite`…), build xong thì **gỡ** chúng. Riêng bun chưa
+  có lệnh gỡ an toàn nên giữ nguyên. Lệnh start dùng `tsx`/`ts-node`/`nodemon`/`vite`
+  thì giữ devDependencies (nhưng nên build ra JS). Muốn giữ hẳn: `--keep-dev-deps`.
+- **Script start là lệnh dev** (`nodemon`, `tsx watch`, `next dev`, `vite`…): napp
+  dùng `start:prod` nếu có, không thì cảnh báo.
+- **Kiểm tra cổng:** sau khi khởi động, napp chờ app nghe đúng cổng `PORT`. App
+  hardcode cổng 3000 (hay gặp với Fastify, Hono) thì napp cảnh báo kèm cách sửa,
+  thay vì để nginx trả 502 mà không báo gì.
 
 **Repo private?** napp không hỏi mật khẩu tương tác (tránh treo) — truyền xác thực ngay khi tạo:
 

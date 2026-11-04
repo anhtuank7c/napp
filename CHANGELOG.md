@@ -2,6 +2,19 @@
 
 Tất cả thay đổi đáng chú ý của `napp` được ghi lại ở đây.
 
+## 1.35.0
+
+Hỗ trợ các framework Node.js phổ biến: **NestJS, Express, Fastify, Hono, Elysia, Koa, hapi, AdonisJS**, cùng Next.js, Nuxt, SvelteKit, Astro, Remix/React Router.
+
+- **Nhận diện framework từ `package.json`** ngay sau khi clone (`app create` và `service create`), để chọn lệnh build/start đúng thay vì `npm start` cho mọi app. Cờ `--install-cmd`, `--build-cmd`, `--start-cmd` truyền tay luôn được ưu tiên.
+- **Lệnh start theo framework:** NestJS dùng script `start:prod`, không có thì `node dist/main.js` (`npm start` của Nest là `nest start`, chế độ dev). AdonisJS chạy `node build/bin/server.js` và napp ghi sẵn `HOST`, `LOG_LEVEL`, `APP_KEY` (ngẫu nhiên) vào `.env`. SvelteKit / Nuxt / Astro không có script start thì chạy file trong thư mục build. Hono / Elysia trên Bun chạy thẳng `bun src/index.ts`.
+- **Tự build:** `package.json` có script `build` thì napp chạy nó (`--build-cmd ''` để tắt).
+- **Sửa lỗi build TypeScript:** trước đây napp luôn cài deps với `--omit=dev`, nên build cần `typescript`, `@nestjs/cli`, `vite`… đều lỗi `not found`. Nay có bước build thì napp cài **đủ** devDependencies, build xong **gỡ** chúng (npm `prune --omit=dev`, pnpm `prune --prod`, yarn). Gỡ lỗi thì giữ nguyên `node_modules`; build lỗi thì deploy vẫn dừng. bun chưa có cách gỡ an toàn nên giữ nguyên. Lệnh start dùng `tsx`/`ts-node`/`nodemon`/`vite` thì tự giữ devDependencies. Thêm cờ `--keep-dev-deps`.
+- **Cảnh báo script start là lệnh dev** (`nodemon`, `tsx watch`, `next dev`, `vite`…); có `start:prod` thì napp dùng nó.
+- **Kiểm tra cổng sau khi tạo app:** napp chờ app nghe đúng `PORT`. Không nghe (hay gặp với Fastify, `@hono/node-server` mặc định cổng 3000) thì cảnh báo kèm cách sửa cho framework đó, thay vì để nginx trả 502 mà không báo gì. Không hoàn tác app — sửa code rồi `napp app deploy`.
+- Cuối `app create` in gợi ý cấu hình khi chạy sau nginx (`trust proxy`, `trustProxy`, `app.proxy`…).
+- **Tương thích ngược:** app/service đã tạo giữ nguyên lệnh cũ; `state.json` không thêm trường mới (lệnh gỡ devDependencies nằm trong `buildCmd`, nên `app deploy` tự làm lại đúng trình tự).
+
 ## 1.34.0
 
 Thêm lệnh **đổi mật khẩu database**: `napp db password`.

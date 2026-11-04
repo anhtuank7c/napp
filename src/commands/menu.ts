@@ -827,7 +827,7 @@ async function createServiceFlow(): Promise<void> {
     if (/^https?:\/\//i.test(repo)) token = (await ask("Personal Access Token (HTTPS): ")) || undefined;
     else sshKey = await askSshKey();
   }
-  const startCmd = (await ask("Lệnh khởi động (Enter = 'npm start' theo package.json; vd: node worker.js): ")) || undefined;
+  const startCmd = (await ask("Lệnh khởi động (Enter = tự chọn theo framework/package.json; vd: node worker.js): ")) || undefined;
   const runtime = await askChoice<Runtime>("Runtime engine", ["node", "bun"], "node");
   const pmDefault: PackageManager = runtime === "bun" ? "bun" : "npm";
   const packageManager = await askChoice<PackageManager>("Trình quản lý gói phụ thuộc", ["npm", "pnpm", "yarn", "bun"], pmDefault);
