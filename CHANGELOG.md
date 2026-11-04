@@ -2,6 +2,18 @@
 
 Tất cả thay đổi đáng chú ý của `napp` được ghi lại ở đây.
 
+## 1.34.0
+
+Thêm lệnh **đổi mật khẩu database**: `napp db password`.
+
+- **`sudo napp db password <name> [--user <u>] [--engine <e>] [--custom] [--no-restart] [-y]`**, kèm mục menu **Database → "Đổi mật khẩu user database"**. Hỗ trợ cả bốn engine: MariaDB/MySQL (`ALTER USER`), PostgreSQL (`ALTER ROLE`), MongoDB (`changeUserPassword` trên chính database của app). Mật khẩu đi qua stdin hoặc file tạm 0600, không bao giờ nằm trong argv.
+- **Mật khẩu:** mặc định sinh ngẫu nhiên (hex, giống `db create`). `--custom` cho tự nhập, không hiện ký tự (không phải terminal thì đọc một dòng từ stdin). Mật khẩu tự nhập phải dài 16–128 ký tự, chỉ gồm chữ, số và `. _ ~ -`, để nhúng thẳng vào `DATABASE_URL`, `.env` và SQL mà không cần escape.
+- **User mặc định:** user CSDL của app/service dùng database đó, nếu không có thì trùng tên database. User không tồn tại thì napp dừng trước khi đổi gì.
+- **Tự cập nhật `.env`** của mọi app/service dùng database đó: theo registry (tạo bằng `--db`), và cả đơn vị có `.env` trỏ đúng database + user + cổng (vd worker chép cấu hình DB của web app). napp đổi `DB_PASSWORD` và **chỉ phần mật khẩu** trong `DATABASE_URL`/`MONGODB_URI`, giữ nguyên tham số tự thêm (`?connection_limit=5`, `?sslmode=…`). URL của user khác thì không đụng, chỉ cảnh báo.
+- **Restart cuốn chiếu** các đơn vị đó sau khi đổi (`--no-restart` để tự restart sau).
+- **Hoàn tác:** ghi `.env` lỗi khi chưa file nào được ghi thì đặt lại mật khẩu cũ (lấy từ `.env`). Đã ghi được một phần thì in mật khẩu mới và tên các đơn vị cần sửa tay.
+- Database không gắn app/service nào: mật khẩu mới + `DATABASE_URL` in ra **một lần**, như `db create`.
+
 ## 1.33.1
 
 Sửa lỗi **`install.sh` treo vĩnh viễn** trên Ubuntu 24.04 mới, ngay sau dòng "Đang cài bun".

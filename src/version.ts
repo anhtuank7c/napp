@@ -16,6 +16,14 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.34.0
+- napp db password <name> [--user] [--engine] [--custom] [--no-restart] [-y]:
+  đổi mật khẩu user CSDL (MariaDB/MySQL/PostgreSQL/MongoDB), ngẫu nhiên hoặc tự
+  nhập (--custom, ẩn ký tự). Tự cập nhật DB_PASSWORD + phần mật khẩu trong
+  DATABASE_URL/MONGODB_URI (giữ nguyên tham số URL) trong .env của mọi
+  app/service dùng database đó, rồi restart cuốn chiếu. Ghi .env lỗi -> đặt lại
+  mật khẩu cũ. Có trong menu Database.
+
 ## 1.33.1
 - Sửa install.sh treo vĩnh viễn trên Ubuntu 24.04 mới ở bước cài bun: needrestart
   hỏi bằng hộp thoại whiptail trong khi output apt bị ẩn. Nay apt chạy không

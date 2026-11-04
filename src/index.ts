@@ -53,7 +53,7 @@ import {
 } from "./commands/service";
 import { cmdDomainAdd, cmdDomainRemove, cmdDomainList } from "./commands/domain";
 import { cmdCertIssue, cmdCertRenew, cmdCertRevoke, cmdCertList, cmdCertStatus } from "./commands/cert";
-import { cmdDbCreate, cmdDbDrop, cmdDbList, cmdDbBackup } from "./commands/db";
+import { cmdDbCreate, cmdDbDrop, cmdDbList, cmdDbBackup, cmdDbPassword } from "./commands/db";
 import { cmdDbEngineList, cmdDbEngineAdd, cmdDbEngineRemove, cmdDbEngineDefault, cmdDbEngineSelect } from "./commands/dbengine";
 import { cmdRedisInfo, cmdRedisAllocations, cmdRedisFlush, cmdRedisList, cmdRedisShow, cmdRedisMigrate } from "./commands/redis";
 import { cmdBackupRun, cmdBackupList, cmdBackupSchedule, cmdBackupUnschedule, cmdBackupScheduleShow, DEFAULT_RETENTION_DAYS, type BackupTarget } from "./commands/backup";
@@ -684,6 +684,17 @@ db
   .option("--user <user>", "tên user CSDL (mặc định trùng tên database)")
   .addOption(engineOpt())
   .action((name, opts) => cmdDbCreate(name, { user: opts.user, engine: opts.engine }));
+db
+  .command("password <name>")
+  .description("đổi mật khẩu user CSDL của database — tự cập nhật .env của app/service dùng nó rồi restart")
+  .option("--user <user>", "user CSDL (mặc định: user của app/service dùng database này, hoặc trùng tên database)")
+  .option("--custom", "tự nhập mật khẩu (ẩn ký tự; không phải terminal thì đọc một dòng từ stdin) thay vì sinh ngẫu nhiên")
+  .option("--no-restart", "chỉ cập nhật .env, KHÔNG restart app/service")
+  .addOption(engineOpt())
+  .addOption(yesOpt())
+  .action(async (name, opts) =>
+    cmdDbPassword(name, { user: opts.user, engine: opts.engine, custom: Boolean(opts.custom), restart: opts.restart !== false, yes: Boolean(opts.yes) })
+  );
 const dbDelete = (c: Command) =>
   c
     .description("xoá database")

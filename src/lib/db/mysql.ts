@@ -214,6 +214,25 @@ FLUSH PRIVILEGES;`;
       runCmd(mysqlBin(), [], { input: parts.join("\n") });
     },
 
+    userExists(_name, user) {
+      const res = execCapture(mysqlBin(), [
+        "-N",
+        "-e",
+        `SELECT 1 FROM mysql.user WHERE User='${user.replace(/'/g, "")}' AND Host='localhost'`,
+      ]);
+      return res.code === 0 && res.stdout.trim().length > 0;
+    },
+
+    // ALTER USER (MariaDB >= 10.2, MySQL >= 5.7). Kết nối ĐANG mở của app vẫn
+    // sống; chỉ kết nối MỚI phải dùng mật khẩu mới.
+    setPassword(_name, user, password) {
+      if (execState.dryRun) {
+        dryRunNotice(`Sẽ đặt mật khẩu mới cho user ${label} '${user}'@'localhost'`);
+        return;
+      }
+      runCmd(mysqlBin(), [], { input: `ALTER USER '${user}'@'localhost' IDENTIFIED BY '${password}';\nFLUSH PRIVILEGES;` });
+    },
+
     dump(name, outPath) {
       runCmd("bash", [
         "-lc",

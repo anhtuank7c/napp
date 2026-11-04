@@ -342,6 +342,23 @@ d.dropDatabase(); print("ok");`
     if (!res.ok) die(`Không xoá được database MongoDB '${name}': ${res.err || res.out}`);
   },
 
+  userExists(name, user) {
+    const res = adminEval(`print(conn.getSiblingDB(${JSON.stringify(name)}).getUser(${JSON.stringify(user)}) ? "yes" : "no");`);
+    return res.ok && res.out.endsWith("yes");
+  },
+
+  // User của app nằm TRONG database của nó (authSource=<db>), không phải admin.
+  setPassword(name, user, password) {
+    if (execState.dryRun) {
+      dryRunNotice(`Sẽ đặt mật khẩu mới cho user MongoDB '${user}' (database '${name}')`);
+      return;
+    }
+    const res = adminEval(
+      `conn.getSiblingDB(${JSON.stringify(name)}).changeUserPassword(${JSON.stringify(user)}, ${JSON.stringify(password)}); print("ok");`
+    );
+    if (!res.ok) die(`Không đổi được mật khẩu user MongoDB '${user}': ${res.err || res.out}`);
+  },
+
   dump(name, outPath) {
     runCmd("mongodump", [
       "--host=127.0.0.1",

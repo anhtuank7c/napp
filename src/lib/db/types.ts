@@ -40,6 +40,10 @@ export interface DbDriver {
   exists(name: string): boolean;
   create(name: string, user: string): CreatedDb;
   drop(name: string, user?: string): void;
+  /** User CSDL có tồn tại không (MongoDB: user nằm TRONG database `name`). */
+  userExists(name: string, user: string): boolean;
+  /** Đặt mật khẩu mới cho user CSDL. Mật khẩu đi qua stdin/file tạm, không vào argv. */
+  setPassword(name: string, user: string, password: string): void;
   dump(name: string, outPath: string): void;
   dumpAll(outPath: string): void;
 

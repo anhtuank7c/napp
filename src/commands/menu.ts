@@ -43,7 +43,7 @@ import { getAcmeEmail, findUnit, getApp, getService, loadState } from "../lib/st
 import { anyActive, appInstanceRefs, serviceInstanceRefs, MAX_INSTANCES } from "../lib/instances";
 import { cmdDomainAdd, cmdDomainRemove, cmdDomainList } from "./domain";
 import { cmdCertIssue, cmdCertRenew, cmdCertList, cmdCertRevoke, cmdCertStatus } from "./cert";
-import { cmdDbCreate, cmdDbList, cmdDbBackup, cmdDbDrop } from "./db";
+import { cmdDbCreate, cmdDbList, cmdDbBackup, cmdDbDrop, cmdDbPassword } from "./db";
 import { cmdRedisAllocations, cmdRedisInfo, cmdRedisFlush, cmdRedisList, cmdRedisShow, cmdRedisMigrate } from "./redis";
 import {
   cmdBackupRun,
@@ -1040,6 +1040,15 @@ async function menuDb(): Promise<void> {
             if (!db || db === "__ALL__") return;
             cli(`backup create --database ${db.name} --engine ${db.engine}`);
             cmdDbBackup(db.name, { engine: db.engine });
+          },
+        },
+        {
+          label: "Đổi mật khẩu user database",
+          run: async () => {
+            const db = await askDatabase("đổi mật khẩu");
+            if (!db || db === "__ALL__") return;
+            cli(`db password ${db.name} --engine ${db.engine}`);
+            await cmdDbPassword(db.name, { engine: db.engine });
           },
         },
         {

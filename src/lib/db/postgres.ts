@@ -192,6 +192,20 @@ export const postgresDriver: DbDriver = {
     psqlExec(sql);
   },
 
+  userExists(_name, user) {
+    return psqlQuery(`SELECT 1 FROM pg_roles WHERE rolname = '${user.replace(/'/g, "")}'`).rows.length > 0;
+  },
+
+  // Mật khẩu được băm scram-sha-256 theo password_encryption mặc định. Kết nối
+  // đang mở không bị ngắt.
+  setPassword(_name, user, password) {
+    if (execState.dryRun) {
+      dryRunNotice(`Sẽ đặt mật khẩu mới cho role PostgreSQL '${user}'`);
+      return;
+    }
+    psqlExec(`ALTER ROLE ${q(user)} PASSWORD '${password}';\n`);
+  },
+
   dump(name, outPath) {
     runCmd("bash", ["-lc", `set -o pipefail; cd / && sudo -u postgres pg_dump ${shQuote(name)} | gzip > ${shQuote(outPath)}`]);
   },

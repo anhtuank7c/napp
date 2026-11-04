@@ -195,6 +195,7 @@ cặp `--x` / `--no-x` · cờ lặp lại được viết số ít và lặp l�
 | `sudo napp cert renew [<domain>] [--force]` · `delete <domain> [-y]` | Gia hạn / thu hồi + xoá |
 | **`db`** — database | |
 | `sudo napp db list [--engine <e>]` · `create <name> [--user <u>] [--engine <e>]` · `delete <name> [--user <u>] [--engine <e>] [-y]` | Database độc lập (ngoài `--db` của app) |
+| `sudo napp db password <name> [--user <u>] [--engine <e>] [--custom] [--no-restart] [-y]` | Đổi mật khẩu user CSDL (ngẫu nhiên, hoặc tự nhập với `--custom`); tự cập nhật `DB_PASSWORD`/`DATABASE_URL` trong `.env` của app/service dùng database đó (giữ nguyên tham số URL) rồi restart cuốn chiếu |
 | `sudo napp db engine list` | Engine nào: napp quản lý? đã cài? đang chạy? app nào dùng? |
 | `sudo napp db engine create <e...> [--default]` · `delete <e> [--force] [--purge]` | Cài / gỡ engine (xem [Chọn database engine](#️-chọn-database-engine)) |
 | `sudo napp db engine update <e> --default` · `set <e,e\|none>` | Đặt engine mặc định · ghi đè danh sách engine (không cài/gỡ) |
