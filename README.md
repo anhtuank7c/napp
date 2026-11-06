@@ -1,7 +1,7 @@
 # napp — Công cụ quản lý server Node.js/Bun đa ứng dụng (một file duy nhất)
 
 `napp` giúp **tạo, triển khai và quản lý nhiều ứng dụng Node.js/Bun** trên cùng
-một máy chủ Ubuntu — phiên bản "Node.js" của [`lara`](https://gist.github.com/anhtuank7c/c2b5a523e2bf8bdcacad8b7c0e4856ac)
+một máy chủ Linux (Ubuntu/Debian hoặc họ RHEL) — phiên bản "Node.js" của [`lara`](https://gist.github.com/anhtuank7c/c2b5a523e2bf8bdcacad8b7c0e4856ac)
 (công cụ tương tự cho PHP/Laravel), viết bằng TypeScript, đóng gói thành một
 file `napp.cjs` duy nhất chạy bằng Node.js.
 
@@ -15,7 +15,7 @@ cô lập hoàn toàn giữa các app, nginx chỉ đóng vai trò reverse-proxy
 - 👤 Mỗi app một **user Linux riêng**, systemd service riêng, thư mục riêng (750/640, `.env` 600)
 - 🌐 nginx reverse-proxy tự sinh, hỗ trợ **Cloudflare real-IP** (trích xuất đúng IP client thật)
 - ⚡ **Asset tĩnh do nginx trả thẳng** (`--auto-static`): napp nhận diện framework từ **thư mục build** (SvelteKit · Next.js · Nuxt · SolidStart · Astro · Remix · Vite), chọn đúng `root`/`alias` và tự cấp quyền đọc cho nginx — thay vì để hàng trăm chunk `.js`/`.css` xếp hàng trên event loop đơn luồng của Node
-- 🧱 **UFW**: mặc định deny, mở SSH + 80/443 công khai (tùy chọn khoá origin theo dải IP Cloudflare với `--restrict-cloudflare`)
+- 🧱 **Tường lửa** (UFW trên Ubuntu/Debian, **firewalld** trên họ RHEL): mặc định deny, mở SSH + 80/443 công khai (tùy chọn khoá origin theo dải IP Cloudflare với `--restrict-cloudflare`)
 - 🛑 **Hardening nginx** (`napp nginx hardening enable`): chặn truy cập thẳng IP / Host lạ (trả 444), chỉ domain đã cấu hình mới vào được; ẩn phiên bản nginx
 - 🚫 **Chặn quét lỗ hổng** (`napp nginx scan-block enable`): request dò CMS/framework PHP (`/wp-login.php`, `/wp-admin/`, `/phpmyadmin/`, `/cgi-bin/`) bị nginx trả **444** ngay, không vòng qua Node, và ghi sang **log riêng** để access log của site sạch trở lại — kèm jail fail2ban `napp-scanner` ban IP ngay ở tường lửa
 - 🛡️ **fail2ban**: sshd + nginx-botsearch/http-auth/limit-req + jail riêng chống spam 502/504/429
@@ -23,11 +23,41 @@ cô lập hoàn toàn giữa các app, nginx chỉ đóng vai trò reverse-proxy
 - ⚙️ **Tối ưu theo phần cứng thực tế**: `napp tune apply` phát hiện CPU/RAM và điều chỉnh nginx/database/Redis/sysctl **và NODE_OPTIONS heap V8 cho từng app node** — chạy lại bất cứ khi nào nâng cấp server
 - 🧠 **Phát hiện rò rỉ bộ nhớ TRƯỚC khi app chết** (`napp mem`): đếm số lần systemd âm thầm khởi động lại, theo dõi xu hướng bộ nhớ, và bật cờ Node tự chụp heap ngay trước khi OOM — mở bằng Chrome DevTools để tìm thủ phạm
 - 🥇 **Web app được ưu tiên hơn background service**: heap V8 chia theo trọng số (web gấp đôi worker) và `CPUWeight`/`IOWeight` ở systemd — một worker nén ảnh/video không còn làm chậm request của người dùng thật
-- 🔍 `napp check --fix`: kiểm tra + tự cài Node.js, nginx, certbot, database engine đã chọn, Redis, fail2ban, UFW nếu thiếu
+- 🔍 `napp check --fix`: kiểm tra + tự cài Node.js, nginx, certbot, database engine đã chọn, Redis, fail2ban, tường lửa nếu thiếu (họ RHEL: tự bật EPEL và cấu hình SELinux)
 - 🩺 **`napp doctor`**: soi **bản vá bảo mật đang chờ** (nginx, OpenSSL, OpenSSH…), dịch vụ còn chạy **thư viện cũ** sau khi vá, đối chiếu **CVE nổi bật của nginx**, vòng đời Node.js; quét **rủi ro chuỗi cung ứng** (dependency chain attack) trong dependencies của từng app/service — và `napp doctor upgrade` để lấy bản vá về
 - 🔄 Tự cập nhật (`napp update`) qua gist công khai, giống lara
 - 🇻🇳 Toàn bộ output tiếng Việt, menu tương tác dạng số
-- 💻 Hệ điều hành: **Ubuntu 20.04 – 26.04 LTS**
+- 💻 Hệ điều hành: **Ubuntu 20.04 – 26.04 LTS**, Debian 11+, và **họ RHEL**: RHEL, Rocky Linux, AlmaLinux, Oracle Linux, CentOS Stream **9 / 10**, Fedora 40+ — xem [Chạy trên họ RHEL](#-chạy-trên-họ-rhel-rhel--rocky--alma--oracle--centos-stream--fedora)
+
+---
+
+## 🎩 Chạy trên họ RHEL (RHEL · Rocky · Alma · Oracle · CentOS Stream · Fedora)
+
+Cùng lệnh cài, cùng mọi lệnh `napp`. Những gì napp tự lo khác đi so với Ubuntu:
+
+| Mảng | Ubuntu/Debian | Họ RHEL |
+|---|---|---|
+| Gói | `apt` | `dnf`; certbot + fail2ban từ **EPEL** (napp tự bật, kèm CRB; Fedora không cần) |
+| Tường lửa | UFW | **firewalld** (zone mặc định; chế độ Cloudflare dùng ipset `napp-cloudflare4/6`). fail2ban chặn bằng `firewallcmd-ipset` |
+| nginx | `sites-enabled` có sẵn | napp tạo `sites-available/enabled` và include qua `conf.d/zz-napp-sites.conf` |
+| Redis | `redis-server` | `redis` hoặc **Valkey** (bản thay thế tương thích giao thức, ở những bản không còn gói redis — RHEL 10, Fedora, Alma 9 mới). Lệnh `redis-cli` → `valkey-cli` |
+| PostgreSQL | sẵn sàng sau khi cài | napp chạy `postgresql-setup --initdb`, đổi `pg_hba.conf` từ `ident` sang `scram-sha-256` để app đăng nhập bằng mật khẩu |
+| MariaDB | nghe 127.0.0.1 | gói gốc nghe **mọi địa chỉ** → napp ghim về 127.0.0.1 (`/etc/my.cnf.d/napp-bind.cnf`) |
+| SSL tự gia hạn | `certbot.timer` tự bật | napp bật `certbot-renew.timer` (gói EPEL để tắt) |
+| `sudo napp` | `/usr/local/bin` nằm trong `secure_path` | **không** → napp symlink `napp`, `bun` vào `/usr/bin` |
+| Banner SSH | `update-motd.d` | `/etc/profile.d/zz-napp-motd.sh` |
+
+**SELinux: giữ Enforcing, napp tự cấu hình.** Không cần (và đừng) tắt SELinux:
+
+- `httpd_can_network_connect` bật (bền vững) khi cài nginx / tạo app — thiếu nó nginx proxy tới app là **502** với `Permission denied` trong error.log dù app vẫn chạy.
+- Thư mục asset tĩnh / upload **ngoài** `/var/www` được gán nhãn `httpd_sys_content_t` (trong `/var/www` policy đã lo sẵn).
+- Redis riêng của từng app: thư mục dữ liệu/socket/cấu hình mang nhãn `redis_*`, cổng 6400-6499 mang nhãn `redis_port_t`.
+- `napp check` báo nếu boolean bị tắt hoặc thiếu `semanage`, và `--fix` sửa được.
+
+**Chưa hỗ trợ trên họ RHEL ở bản này** (đang làm): MySQL, MongoDB, phần kiểm tra bản vá
+của `napp doctor` (`doctor system`, `doctor upgrade` — phần quét dependencies vẫn chạy),
+tuning PostgreSQL. Tạm thời: `dnf updateinfo list --security`, `dnf needs-restarting -r`.
+Họ RHEL **bản 8** không được hỗ trợ.
 
 ---
 
@@ -39,8 +69,8 @@ Chạy trên server mới (cần quyền sudo/root):
 curl -fsSL "https://gist.githubusercontent.com/anhtuank7c/cc1e8194608e3f5a942d6d1d6669e6a3/raw/install.sh" | sudo bash
 ```
 
-Script sẽ tự cài Node.js (qua NodeSource) nếu máy chưa có, rồi cài `napp` vào
-`/usr/local/bin/napp`. Xong, giờ gõ `sudo napp` ở bất cứ đâu để mở menu.
+Script sẽ tự cài Node.js (qua NodeSource, gói `.deb` hoặc `.rpm` tuỳ distro) nếu máy chưa có, rồi cài `napp` vào
+`/usr/local/bin/napp`. Xong, giờ gõ `sudo napp` ở bất cứ đâu để mở menu. Cùng một lệnh cho Ubuntu/Debian và họ RHEL.
 
 Muốn chọn database ngay từ đầu (mặc định MariaDB — xem [Chọn database engine](#️-chọn-database-engine)):
 
@@ -277,10 +307,10 @@ sudo napp app create api.example.com --repo ... --db postgresql
 
 | Engine | Nguồn cài | `DB_CONNECTION` | `DATABASE_URL` |
 |---|---|---|---|
-| `mariadb` (mặc định) | kho Ubuntu | `mysql` | `mysql://user:pass@127.0.0.1:3306/db` |
-| `mysql` | kho Ubuntu | `mysql` | `mysql://user:pass@127.0.0.1:3306/db` |
-| `postgresql` | kho Ubuntu (24.04 → 16) | `pgsql` | `postgresql://user:pass@127.0.0.1:5432/db` |
-| `mongodb` | kho chính thức MongoDB 8.0 | `mongodb` | `mongodb://user:pass@127.0.0.1:27017/db?authSource=db` |
+| `mariadb` (mặc định) | kho của distro | `mysql` | `mysql://user:pass@127.0.0.1:3306/db` |
+| `mysql` | kho Ubuntu (họ RHEL: chưa hỗ trợ) | `mysql` | `mysql://user:pass@127.0.0.1:3306/db` |
+| `postgresql` | kho của distro (Ubuntu 24.04 → 16, RHEL 9 → 13, RHEL 10 → 16) | `pgsql` | `postgresql://user:pass@127.0.0.1:5432/db` |
+| `mongodb` | kho chính thức MongoDB 8.0 (họ RHEL: chưa hỗ trợ) | `mongodb` | `mongodb://user:pass@127.0.0.1:27017/db?authSource=db` |
 
 `.env` của app vẫn có đủ `DB_HOST/DB_PORT/DB_DATABASE/DB_USERNAME/DB_PASSWORD`
 như trước, thêm **`DATABASE_URL`** — biến mà Prisma, Drizzle, TypeORM, Knex,

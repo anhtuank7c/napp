@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { ask } from "../lib/prompt";
 import { gunzipSync } from "node:zlib";
 import { execCapture, runCmd, commandExists, requireRoot, isServiceActive } from "../lib/exec";
+import { isRhel } from "../lib/platform";
 import { info, ok, warn, danger, colorText, section, step, die, type LogColor } from "../lib/log";
 import { hasApt, aptGet, waitForAptLocks, APT_LOCK_TIMEOUT_S, pendingUpdates, rebootRequired, unitStaleLibraries, isCriticalPackage, aptIndexAgeSeconds, type PendingUpdate } from "../lib/apt";
 import { assessNginxCves, assessNode, nodeFixedVersion, nodeLifecycle, type NodeAssessment, type NodeFeed } from "../lib/cve";
@@ -61,7 +62,7 @@ async function confirm(question: string, autoYes: boolean): Promise<boolean> {
 function managedUnits(): string[] {
   const st = loadState();
   return [
-    ...["nginx", "mariadb", "mysql", "postgresql", "mongod", "redis-server", "ssh", "sshd", "fail2ban"].filter((u) => isServiceActive(u)),
+    ...["nginx", "mariadb", "mysql", "postgresql", "mongod", "redis-server", "redis", "valkey", "ssh", "sshd", "fail2ban"].filter((u) => isServiceActive(u)),
     ...Object.values(st.apps).flatMap((a) => appUnits(a)),
     ...Object.values(st.services).flatMap((s) => serviceUnits(s)),
     // Redis riêng: vá libssl/redis mà không restart thì chúng vẫn chạy mã cũ.
@@ -213,7 +214,13 @@ export async function cmdDoctorSystem(opts: DoctorSystemOptions): Promise<System
   section("Kiểm tra bản vá bảo mật của hệ thống");
 
   if (!hasApt()) {
-    warn("Không tìm thấy apt-get — phần kiểm tra bản vá chỉ hỗ trợ Ubuntu/Debian. Bỏ qua.");
+    if (isRhel()) {
+      warn(
+        "Họ RHEL: phần kiểm tra bản vá của 'napp doctor' chưa hỗ trợ ở bản này (sẽ có ở bản sau). Tạm thời tự kiểm tra:\n" +
+          "  dnf updateinfo list --security        # bản vá bảo mật đang chờ\n" +
+          "  dnf needs-restarting -r               # có cần khởi động lại máy không"
+      );
+    } else warn("Không tìm thấy apt-get — phần kiểm tra bản vá chỉ hỗ trợ Ubuntu/Debian. Bỏ qua.");
     return undefined;
   }
 
@@ -643,7 +650,13 @@ async function switchNodeMajor(major: number, yes: boolean, feed: NodeFeed): Pro
 
 export async function cmdDoctorUpgrade(opts: DoctorUpgradeOptions): Promise<void> {
   requireRoot();
-  if (!hasApt()) die("Không tìm thấy apt-get — lệnh này chỉ hỗ trợ Ubuntu/Debian.");
+  if (!hasApt()) {
+    die(
+      isRhel()
+        ? "Họ RHEL: 'napp doctor upgrade' chưa hỗ trợ ở bản này. Cài bản vá bảo mật: sudo dnf upgrade --security -y, rồi: sudo dnf needs-restarting -s (dịch vụ cần restart)."
+        : "Không tìm thấy apt-get — lệnh này chỉ hỗ trợ Ubuntu/Debian."
+    );
+  }
 
   section("Cài bản vá cho hệ thống");
 

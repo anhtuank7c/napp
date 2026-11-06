@@ -2,6 +2,22 @@
 
 Tất cả thay đổi đáng chú ý của `napp` được ghi lại ở đây.
 
+## 1.37.0
+
+Chạy trên **họ RHEL**: RHEL, Rocky Linux, AlmaLinux, Oracle Linux, CentOS Stream **9 và 10**, và **Fedora** 40+ (đợt 1). Đã kiểm thử thật trên AlmaLinux 9.8, AlmaLinux 10, Fedora 42 và Ubuntu 24.04 (chạy lại để chắc không hỏng gì).
+
+- **`install.sh`** nhận diện `apt`/`dnf`; cài Node.js qua NodeSource `.rpm` (tắt module nodejs của AppStream), tự cài `curl` nếu thiếu. Họ RHEL: `secure_path` của sudo không có `/usr/local/bin` nên `sudo napp` báo "command not found" — napp và bun được symlink vào `/usr/bin`.
+- **`napp check --fix`** cài qua `dnf`; tự bật **EPEL** (+ CRB) cho certbot và fail2ban; bật `certbot-renew.timer` (gói EPEL để tắt — không bật là chứng chỉ hết hạn sau 90 ngày mà không ai biết). Phạm vi hỗ trợ của distro được báo rõ.
+- **SELinux giữ Enforcing, napp tự cấu hình:** bật `httpd_can_network_connect` (thiếu nó nginx proxy tới app là 502 "Permission denied"), gán nhãn `httpd_sys_content_t` cho thư mục tĩnh/upload ngoài `/var/www`, nhãn `redis_*` + cổng `redis_port_t` (6400-6499) cho Redis riêng. `napp check` báo và `--fix` sửa được.
+- **Tường lửa firewalld:** `napp firewall apply/show` dùng firewalld trên họ RHEL (zone mặc định, cấu hình permanent rồi reload). `--restrict-cloudflare` dùng ipset `napp-cloudflare4/6` + rich rule. napp chỉ gỡ/đặt lại phần của mình; dịch vụ người dùng tự mở (vd cockpit) được giữ nguyên và liệt kê ra. fail2ban dùng `banaction = firewallcmd-ipset` và đọc `/var/log/secure`.
+- **nginx:** họ RHEL chỉ có `conf.d` — napp tạo `sites-available/enabled` và include qua `conf.d/zz-napp-sites.conf`; bỏ cờ `default_server` khỏi server mẫu trong `nginx.conf` nếu có (tránh trùng với server chặn Host lạ của napp, bản gốc lưu ở `nginx.conf.napp-bak`).
+- **Redis/Valkey:** dùng `redis` nếu kho còn, không thì **Valkey** (RHEL 10, Fedora, AlmaLinux 9 mới đã thay). Redis riêng của từng app chạy bằng `valkey-server`; đường dẫn cấu hình (`/etc/valkey/conf.d`), unit (`valkey`), `valkey-cli` được nhận diện tự động.
+- **PostgreSQL trên họ RHEL:** `postgresql-setup --initdb`, đổi `pg_hba.conf` từ `ident` sang `scram-sha-256` cho 127.0.0.1/::1 và đặt `password_encryption = scram-sha-256` (PG 13 của RHEL 9 mặc định md5) — không thì app luôn bị "Ident authentication failed". Nhận diện tiến trình `postmaster`.
+- **MariaDB trên họ RHEL:** gói gốc nghe mọi địa chỉ — napp ghim về 127.0.0.1 (`/etc/my.cnf.d/napp-bind.cnf`); tuning ghi vào `/etc/my.cnf.d`.
+- Banner đăng nhập SSH trên họ RHEL qua `/etc/profile.d` (chỉ shell SSH tương tác).
+- **Chưa hỗ trợ trên họ RHEL (đợt 2):** MySQL, MongoDB (báo lỗi rõ khi cài), `napp doctor system/upgrade` (in lệnh `dnf` tương đương), tuning PostgreSQL.
+- **Sửa lỗi (mọi distro): `--redis` không chạy trên máy mới cài.** `/etc/napp` được tạo `0750 root:root` nên user `nr_<id>` của Redis riêng không mở được file cấu hình của nó ("Permission denied") — `app create --redis` luôn hoàn tác sau 15 giây. Nay `/etc/napp` là `0711` (đi qua được, không liệt kê được; mọi file bên trong vẫn 0600/0640 của root). `napp check --fix` sửa luôn cho Redis riêng đang không chạy.
+
 ## 1.36.0
 
 **Deploy key riêng cho từng dự án** và **deploy thông minh từ git**.

@@ -4,6 +4,8 @@ import { execCapture, runCmd, requireRoot, commandExists } from "../lib/exec";
 import { info, ok, warn, die, section } from "../lib/log";
 import { fetchCloudflareIpRanges } from "../lib/cloudflare";
 import { ipv6Available } from "../lib/network";
+import { isRhel } from "../lib/platform";
+import { firewalldSync } from "../lib/firewalld";
 
 // Cố dò cổng SSH thực tế đang cấu hình để KHÔNG khoá chính mình ra ngoài khi
 // bật UFW. Ưu tiên /etc/ssh/sshd_config.d/*.conf (override mới hơn), sau đó
@@ -38,6 +40,7 @@ export interface FirewallSyncOptions {
 
 export async function cmdFirewallSync(opts: FirewallSyncOptions): Promise<void> {
   requireRoot();
+  if (isRhel()) return firewalldSync(opts, detectSshPort());
   if (!commandExists("ufw")) {
     die("UFW chưa được cài. Chạy 'napp check --fix' trước.");
   }
@@ -110,5 +113,10 @@ export async function cmdFirewallSync(opts: FirewallSyncOptions): Promise<void> 
 }
 
 export function cmdFirewallStatus(): void {
+  if (isRhel()) {
+    if (!commandExists("firewall-cmd")) die("firewalld chưa được cài. Chạy 'napp check --fix' trước.");
+    runCmd("firewall-cmd", ["--list-all"]);
+    return;
+  }
   runCmd("ufw", ["status", "verbose"]);
 }

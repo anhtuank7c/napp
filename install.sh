@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# install.sh — Bootstrap cài đặt napp trên một server Ubuntu mới.
+# install.sh — Bootstrap cài đặt napp trên một server mới: Ubuntu/Debian, hoặc
+# họ RHEL (RHEL, Rocky, AlmaLinux, Oracle Linux, CentOS Stream 9/10, Fedora).
 #
 # napp được viết bằng TypeScript/Node.js và đóng gói thành MỘT file duy nhất
 # (napp.cjs), nên trước tiên cần đảm bảo Node.js đã có mặt trên máy — script
@@ -39,6 +40,15 @@ die()  { printf '%b %s\n' "${C_RED}[LỖI]${C_RST}" "$*" >&2; exit 1; }
 
 [[ $EUID -eq 0 ]] || die "Script này cần quyền root. Hãy chạy lại với sudo."
 
+# Trình quản lý gói: apt (Ubuntu/Debian) hoặc dnf (họ RHEL).
+if command -v apt-get >/dev/null 2>&1; then
+  PKG=apt
+elif command -v dnf >/dev/null 2>&1; then
+  PKG=dnf
+else
+  die "Không tìm thấy apt-get hay dnf — napp hỗ trợ Ubuntu/Debian và họ RHEL (RHEL, Rocky, Alma, Oracle, CentOS Stream 9/10, Fedora)."
+fi
+
 # apt PHẢI chạy không tương tác: Ubuntu 24.04 có needrestart (mặc định hỏi
 # bằng hộp thoại whiptail "Restart services?"/"Pending kernel upgrade") và
 # debconf có thể hỏi cấu hình. Khi output apt bị ẩn hoặc script chạy qua
@@ -47,7 +57,28 @@ export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a      # tự restart service cần thiết, không hỏi
 export NEEDRESTART_SUSPEND=1   # bỏ qua needrestart trong lúc script chạy apt
 APT_GET=(apt-get -y -o DPkg::Lock::Timeout=300)
-command -v curl >/dev/null 2>&1 || die "Cần 'curl'. Cài bằng: apt update && apt install -y curl"
+DNF=(dnf -y)
+
+# Cài gói hệ thống, không tương tác, không đọc stdin (qua `curl | bash` stdin là chính script).
+pkg_install() {
+  if [[ "$PKG" == "apt" ]]; then
+    "${APT_GET[@]}" install "$@" </dev/null || { "${APT_GET[@]}" update </dev/null && "${APT_GET[@]}" install "$@" </dev/null; }
+  else
+    "${DNF[@]}" install "$@" </dev/null
+  fi
+}
+
+# Họ RHEL: secure_path của sudo là /sbin:/bin:/usr/sbin:/usr/bin — KHÔNG có
+# /usr/local/bin như Ubuntu. Không symlink thì 'sudo napp' / 'sudo -u <app> bun'
+# báo "command not found".
+link_for_sudo() {  # $1 = tên lệnh
+  [[ "$PKG" == "dnf" && -x "/usr/local/bin/$1" && ! -e "/usr/bin/$1" ]] && ln -s "/usr/local/bin/$1" "/usr/bin/$1" || true
+}
+
+if ! command -v curl >/dev/null 2>&1; then
+  info "Chưa có 'curl' — đang cài..."
+  pkg_install curl
+fi
 
 case "$NAPP_CJS_URL" in
   *REPLACE_WITH_GIST_ID*)
@@ -63,8 +94,15 @@ esac
 # Vì vậy ta cố tình bỏ qua node kiểu home và luôn đảm bảo có node system-wide.
 install_node() {
   info "Đang cài Node.js ${NODE_MAJOR}.x LTS qua NodeSource (system-wide)..."
-  curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash -
-  "${APT_GET[@]}" install nodejs </dev/null
+  if [[ "$PKG" == "apt" ]]; then
+    curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash -
+    "${APT_GET[@]}" install nodejs </dev/null
+  else
+    curl -fsSL "https://rpm.nodesource.com/setup_${NODE_MAJOR}.x" | bash -
+    # AppStream có module/gói nodejs riêng (bản cũ hơn) — tắt để NodeSource thắng.
+    "${DNF[@]}" module disable nodejs </dev/null >/dev/null 2>&1 || true
+    "${DNF[@]}" install nodejs </dev/null
+  fi
   ok "Đã cài Node.js $(node --version) tại $(command -v node)"
 }
 
@@ -102,13 +140,14 @@ install_bun() {
   info "Đang cài bun (system-wide vào /usr/local/bin)..."
   # Trình cài bun cần 'unzip'.
   if ! command -v unzip >/dev/null 2>&1; then
-    # KHÔNG ẩn output apt: nếu có gì chờ (khoá dpkg, hộp thoại) người dùng phải thấy được.
-    "${APT_GET[@]}" install unzip </dev/null || { "${APT_GET[@]}" update </dev/null && "${APT_GET[@]}" install unzip </dev/null; }
+    # KHÔNG ẩn output: nếu có gì chờ (khoá dpkg, hộp thoại) người dùng phải thấy được.
+    pkg_install unzip
   fi
   # BUN_INSTALL=/usr/local -> nhị phân đặt tại /usr/local/bin/bun (systemd/sudo dùng được).
   export BUN_INSTALL=/usr/local
   curl -fsSL --connect-timeout 20 https://bun.sh/install | bash
   command -v bun >/dev/null 2>&1 || return 1
+  link_for_sudo bun
   ok "Đã cài bun $(bun --version) tại $(command -v bun)"
 }
 
@@ -117,6 +156,7 @@ if [[ "$INSTALL_BUN" == "1" ]]; then
   BUN_REAL="$(readlink -f "$BUN_BIN" 2>/dev/null || echo "$BUN_BIN")"
   case "$BUN_REAL" in
     /usr/*|/opt/*|/bin/*)   # bun hệ thống — systemd & sudo đều dùng được
+      link_for_sudo bun
       ok "bun hệ thống đã có sẵn: $("$BUN_BIN" --version) ($BUN_BIN)" ;;
     "")   # chưa có bun nào trên PATH
       info "bun chưa được cài (system-wide) — đang cài..."
@@ -199,6 +239,7 @@ done
 
 ok "Chữ ký hợp lệ (Ed25519, khoá phát hành của napp)."
 install -m 0755 "$TMP_FILE" "$INSTALL_PATH"
+link_for_sudo napp
 ok "Đã cài napp vào $INSTALL_PATH"
 
 # napp install: thêm banner chào mừng SSH (không bắt buộc, bỏ qua nếu lỗi)

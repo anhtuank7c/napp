@@ -1,4 +1,5 @@
 import { execCapture, runCmd, requireRoot, ensureDir, writeFile, commandExists, isServiceActive } from "../lib/exec";
+import { redisServerBin, redisConfDir, redisSystemUnit, ensureRedisConfInclude } from "../lib/platform";
 import { redisBudgetSplit, setInstanceMaxmemory } from "../lib/redis";
 import { ask } from "../lib/prompt";
 import { info, ok, warn, die, section } from "../lib/log";
@@ -12,7 +13,7 @@ import {
   CPU_WEIGHT_SERVICE,
   IO_WEIGHT_WEB,
   IO_WEIGHT_SERVICE,
-  REDIS_TUNING_PATH,
+  redisTuningPath,
   SYSCTL_TUNING_PATH,
 } from "../templates/tuning";
 import { renderNginxTuningConf, NGINX_TUNING_CONF } from "../templates/nginx";
@@ -287,27 +288,20 @@ export async function cmdTuneApply(opts: TuneApplyOptions): Promise<void> {
   applyDbTuning(hw, plan, { skipRestart: opts.skipRestart });
 
   // Redis
-  if (commandExists("redis-server")) {
-    ensureDir("/etc/redis/conf.d", 0o755);
+  if (redisServerBin()) {
+    ensureDir(redisConfDir(), 0o755);
     // Redis dùng chung chỉ còn nhận một phần (bằng mỗi Redis riêng) nếu vẫn có đơn
     // vị kiểu cũ dùng nó; không còn ai dùng thì giữ nguyên cả phần — nó rỗng.
     const split = redisBudgetSplit(plan.redisMaxMemoryMB);
     const sharedMB = split.ids.length && split.legacyInUse ? split.perMB : plan.redisMaxMemoryMB;
-    writeFile(REDIS_TUNING_PATH, renderRedisTuning(hw, { ...plan, redisMaxMemoryMB: Math.round(sharedMB) }), 0o644);
-    // Ubuntu package redis-server thường không tự include conf.d/*.conf —
-    // đảm bảo có dòng include trong redis.conf chính.
-    const mainConf = "/etc/redis/redis.conf";
-    if (existsSync(mainConf)) {
-      const content = readFileSync(mainConf, "utf8");
-      if (!content.includes("conf.d/*.conf")) {
-        writeFile(mainConf, content + "\ninclude /etc/redis/conf.d/*.conf\n", 0o640);
-      }
-    }
-    if (!opts.skipRestart && isServiceActive("redis-server")) {
-      runCmd("systemctl", ["restart", "redis-server"]);
+    writeFile(redisTuningPath(), renderRedisTuning(hw, { ...plan, redisMaxMemoryMB: Math.round(sharedMB) }), 0o644);
+    // Gói redis/valkey thường không tự include conf.d/*.conf — đảm bảo có dòng include.
+    ensureRedisConfInclude();
+    if (!opts.skipRestart && isServiceActive(redisSystemUnit())) {
+      runCmd("systemctl", ["restart", redisSystemUnit()]);
       ok("Đã áp tuning cho Redis và khởi động lại.");
     } else {
-      ok(`Đã ghi ${REDIS_TUNING_PATH} — service chưa chạy nên chưa restart.`);
+      ok(`Đã ghi ${redisTuningPath()} — service chưa chạy nên chưa restart.`);
     }
   } else {
     warn("Redis chưa cài — bỏ qua.");

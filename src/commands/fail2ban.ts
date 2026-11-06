@@ -1,5 +1,6 @@
 import { runCmd, requireRoot, commandExists, writeFile, execCapture } from "../lib/exec";
 import { info, ok, die } from "../lib/log";
+import { isRhel, authLogPath } from "../lib/platform";
 import {
   renderJailLocal,
   renderNappRatelimitFilter,
@@ -29,7 +30,7 @@ export function cmdFail2banSetup(opts: { sshPort?: number }): void {
 
   writeFile(FAIL2BAN_NAPP_FILTER_PATH, renderNappRatelimitFilter(), 0o644);
   writeFile(FAIL2BAN_SCANNER_FILTER_PATH, renderNappScannerFilter(), 0o644);
-  writeFile(FAIL2BAN_JAIL_PATH, renderJailLocal(sshPort), 0o644);
+  writeFile(FAIL2BAN_JAIL_PATH, renderJailLocal(sshPort, { banaction: isRhel() ? "firewallcmd-ipset" : "ufw", authLog: authLogPath() }), 0o644);
 
   // Tạo sẵn file log của jail 'napp-scanner' nếu chưa có.
   //

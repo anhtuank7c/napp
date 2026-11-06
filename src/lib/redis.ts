@@ -1,6 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { execCapture, runCmd, writeFile, whichAll, isServiceActive, state as execState } from "./exec";
+import { existsSync, readFileSync, statSync, chmodSync } from "node:fs";
+import { execCapture, runCmd, writeFile, isServiceActive, state as execState } from "./exec";
+import { redisServerBin, redisCliBin } from "./platform";
+import { ensureRedisInstanceSelinux } from "./selinux";
 import { die, info, ok, warn } from "./log";
 import { loadState, saveState, slugFor, findUnit, resolveRedisDb, SYSTEMD_DIR, NAPP_ROOT } from "./state";
 import { computeTuningPlan } from "../templates/tuning";
@@ -53,7 +55,8 @@ export function instances(): Record<string, RedisInstance> {
 }
 
 function serverBin(): string {
-  const bin = whichAll("redis-server")[0];
+  // redis-server (Ubuntu, RHEL 9) hoặc valkey-server (RHEL 10, Fedora mới) — cùng giao thức, cùng file cấu hình.
+  const bin = redisServerBin();
   if (!bin) die("redis-server chưa được cài. Cài bằng: sudo napp check --fix");
   return bin;
 }
@@ -144,7 +147,7 @@ export function readInstanceConf(id: string): { port: number; password: string }
  */
 export function redisInstanceCmd(id: string, commandLines: string[]): { ok: boolean; lines: string[] } {
   const { password } = readInstanceConf(id);
-  const res = execCapture("redis-cli", ["-s", redisSocketPath(id)], { input: [`AUTH ${password}`, ...commandLines, ""].join("\n") });
+  const res = execCapture(redisCliBin(), ["-s", redisSocketPath(id)], { input: [`AUTH ${password}`, ...commandLines, ""].join("\n") });
   const lines = res.stdout.split("\n").map((l) => l.trim());
   return { ok: res.code === 0 && lines[0] === "OK", lines: lines.slice(1).filter((l, i, a) => l !== "" || i < a.length - 1) };
 }
@@ -185,6 +188,24 @@ function waitReady(id: string, seconds: number): boolean {
   return false;
 }
 
+/**
+ * redis-server chạy bằng user nr_<id> phải ĐI QUA được /etc/napp để mở file
+ * cấu hình của nó. /etc/napp được tạo 0750 root:root (state.json...) -> user đó
+ * bị "Permission denied" và Redis riêng không bao giờ khởi động. 0711 = ai cũng
+ * đi qua được nhưng KHÔNG liệt kê được; mọi file bên trong đều 0600/0640 thuộc
+ * root nên vẫn không ai khác đọc được.
+ */
+export function ensureConfDirTraversable(): void {
+  if (execState.dryRun) return;
+  for (const [dir, mode] of [[NAPP_ROOT, 0o711], [REDIS_CONF_DIR, 0o755]] as const) {
+    try {
+      if ((statSync(dir).mode & 0o777 & mode) !== mode) chmodSync(dir, (statSync(dir).mode & 0o777) | mode);
+    } catch {
+      /* chưa có thư mục -> writeFile sẽ tạo */
+    }
+  }
+}
+
 /** Tạo instance cho một đơn vị (owner) và cho user Linux của nó vào nhóm. Trả về id. */
 export function createRedisInstance(owner: string, ownerUser: string, maxmemoryMB: number): string {
   const bin = serverBin();
@@ -200,7 +221,10 @@ export function createRedisInstance(owner: string, ownerUser: string, maxmemoryM
     runCmd("useradd", ["--system", "--user-group", "--no-create-home", "--home-dir", "/nonexistent", "--shell", "/usr/sbin/nologin", user]);
   }
   writeFile(redisConfPath(id), renderRedisInstanceConf(id, port, password, maxmemoryMB), 0o640, { group: user });
+  ensureConfDirTraversable();
   writeFile(`${SYSTEMD_DIR}/${redisUnitFor(id)}.service`, renderRedisInstanceUnit(id, bin), 0o644);
+  // SELinux (họ RHEL): redis_t chỉ ghi được thư mục mang nhãn redis_* và nghe cổng redis_port_t.
+  ensureRedisInstanceSelinux({ conf: REDIS_CONF_DIR, data: "/var/lib/napp-redis", run: "/run/napp-redis" });
   runCmd("systemctl", ["daemon-reload"]);
   runCmd("systemctl", ["enable", "--now", redisUnitFor(id)]);
   runCmd("usermod", ["-aG", user, ownerUser]);

@@ -1,6 +1,8 @@
 import type { HardwareProfile } from "../lib/hardware";
+import { redisConfDir } from "../lib/platform";
 
-export const REDIS_TUNING_PATH = "/etc/redis/conf.d/napp-tuning.conf";
+// /etc/redis/conf.d (Ubuntu, RHEL 9) hoặc /etc/valkey/conf.d (RHEL 10, Fedora mới).
+export const redisTuningPath = (): string => `${redisConfDir()}/napp-tuning.conf`;
 export const SYSCTL_TUNING_PATH = "/etc/sysctl.d/99-napp-tuning.conf";
 
 // Bảng tỷ lệ phân bổ RAM theo tier — vì server còn chạy Node apps + Redis +

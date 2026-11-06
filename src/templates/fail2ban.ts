@@ -14,20 +14,22 @@ export const FAIL2BAN_SCANNER_FILTER_PATH = "/etc/fail2ban/filter.d/napp-scanner
 // đứng yên ở 0 mãi mãi. Không có lỗi nào được in ra để lần.
 const FILE_BACKEND = "backend  = auto";
 
-export function renderJailLocal(sshPort: number): string {
+// banaction: Ubuntu chặn bằng UFW; họ RHEL bằng firewalld (ipset — một luật
+// cho mọi IP bị ban, không phình bảng luật khi ban hàng nghìn IP).
+export function renderJailLocal(sshPort: number, p: { banaction: string; authLog: string } = { banaction: "ufw", authLog: "/var/log/auth.log" }): string {
   return `# Managed by napp — TỰ ĐỘNG SINH RA bởi \`napp fail2ban apply\`.
 [DEFAULT]
 bantime  = 3600
 findtime = 600
 maxretry = 3
 backend  = systemd
-banaction = ufw
+banaction = ${p.banaction}
 
 [sshd]
 enabled  = true
 port     = ${sshPort}
 filter   = sshd
-logpath  = /var/log/auth.log
+logpath  = ${p.authLog}
 maxretry = 3
 bantime  = 86400
 

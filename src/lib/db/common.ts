@@ -1,6 +1,5 @@
 import { randomBytes } from "node:crypto";
 import { execCapture, isServiceActive, state as execState } from "../exec";
-import { aptGet } from "../apt";
 import { die, warn } from "../log";
 
 // Mật khẩu hex: an toàn khi nhúng vào SQL, URL (DATABASE_URL) và .env mà không
@@ -9,34 +8,12 @@ export function randomPassword(): string {
   return randomBytes(16).toString("hex");
 }
 
-// Gói apt đã cài thật (trạng thái "install ok installed"), không tính gói chỉ
-// còn file cấu hình sau khi 'apt remove' (trạng thái "deinstall ok config-files").
-export function dpkgInstalled(pkg: string): boolean {
-  const res = execCapture("dpkg-query", ["-W", "-f=${Status}", pkg]);
-  return res.code === 0 && /install ok installed/.test(res.stdout);
-}
-
 export function anyUnitActive(units: string[]): boolean {
   return units.some((u) => isServiceActive(u));
 }
 
 export function processRunning(names: string[]): boolean {
   return names.some((n) => execCapture("pgrep", ["-x", n]).code === 0);
-}
-
-export function aptInstall(pkgs: string[]): void {
-  aptGet(["update"]);
-  aptGet(["install", "-y", ...pkgs]);
-}
-
-// Gỡ gói. Mặc định 'remove' GIỮ dữ liệu + file cấu hình (cài lại là dùng tiếp);
-// 'purge' xoá cấu hình, và caller tự xoá thư mục dữ liệu nếu người dùng yêu cầu.
-export function aptRemove(pkgs: string[], purge: boolean): void {
-  // Chỉ gỡ gói đang thật sự có — apt-get báo lỗi với tên gói không tồn tại.
-  const present = pkgs.filter((p) => execCapture("dpkg-query", ["-W", "-f=${Status}", p]).code === 0);
-  if (present.length === 0) return;
-  aptGet([purge ? "purge" : "remove", "-y", ...present]);
-  if (purge) aptGet(["autoremove", "--purge", "-y"], { silentFail: true });
 }
 
 // --- Cổng đang lắng nghe ----------------------------------------------------

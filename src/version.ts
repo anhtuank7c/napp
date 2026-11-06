@@ -16,6 +16,29 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.37.0
+- Chạy trên họ RHEL: RHEL, Rocky, AlmaLinux, Oracle Linux, CentOS Stream 9/10,
+  Fedora 40+. install.sh + check --fix dùng dnf, tự bật EPEL (certbot, fail2ban),
+  bật certbot-renew.timer, symlink napp/bun vào /usr/bin (sudo không thấy
+  /usr/local/bin).
+- SELinux giữ Enforcing: napp bật httpd_can_network_connect, gán nhãn thư mục
+  tĩnh ngoài /var/www và nhãn redis_* + cổng 6400-6499 cho Redis riêng.
+- Tường lửa firewalld (firewall apply/show), fail2ban banaction firewallcmd-ipset.
+- nginx: tạo sites-available/enabled + include qua conf.d/zz-napp-sites.conf.
+- Redis hoặc Valkey (RHEL 10, Fedora). PostgreSQL: initdb + pg_hba scram-sha-256.
+  MariaDB ghim bind-address 127.0.0.1.
+- Chưa hỗ trợ trên họ RHEL: MySQL, MongoDB, doctor system/upgrade, tune PostgreSQL.
+- SỬA LỖI mọi distro: --redis không chạy trên máy mới cài (/etc/napp 0750 khiến
+  Redis riêng không đọc được cấu hình). Nay /etc/napp là 0711.
+
+## 1.36.0
+- Deploy key RIÊNG cho từng app/service: repo SSH mà không có --ssh-key thì napp
+  tự sinh key ed25519, in public key + link trang Deploy keys (GitHub/GitLab/
+  Bitbucket/Gitea), chờ và kiểm tra truy cập. napp app|service deploy-key
+  [--regenerate] để xem lại / xoay vòng key.
+- deploy chỉ cài/build/restart khi cần (không có commit mới -> không restart);
+  --check, --force, --no-restart. napp sync: deploy mọi app/service có commit mới.
+
 ## 1.35.0
 - Nhận diện framework từ package.json khi app/service create: NestJS, Express,
   Fastify, Hono, Elysia, Koa, hapi, AdonisJS, Next.js, Nuxt, SvelteKit, Astro,

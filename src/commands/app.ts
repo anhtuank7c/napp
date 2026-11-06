@@ -37,6 +37,7 @@ import { appInstanceRefs, serviceInstanceRefs, rollingRestart, systemctlAll, any
 import { resolveUnitCommands, frameworkEnv } from "../lib/appprofile";
 import { writeAppLocationsConf, hintCustomLocations, injectLocationsInclude } from "../lib/locationsfile";
 import { ensureNappProxyConf } from "./nginx";
+import { ensureNginxCanConnect } from "../lib/selinux";
 import { renderAppSystemdService, renderServiceSystemdService, execStartLine, unitWorkDir } from "../templates/systemd";
 import { writeManagedUnit, patchUnitHeap, patchUnitPriority, type UnitWriteResult } from "../lib/unitfile";
 import { detectHardware, detectResourceControl } from "../lib/hardware";
@@ -821,6 +822,8 @@ EOF`,
     // Ghi map dùng chung TRƯỚC: vhost dưới đây tham chiếu $napp_connection_upgrade,
     // thiếu file này thì `nginx -t` sẽ trượt vì biến chưa được định nghĩa.
     ensureNappProxyConf();
+    // SELinux (họ RHEL): không có boolean này thì nginx proxy tới app là 502 "Permission denied".
+    ensureNginxCanConnect();
     const ngxConf = `${NGINX_AVAILABLE}/${domain}.conf`;
     // PHẢI ghi trước vhost: vhost `include` file này, và nginx TỪ CHỐI KHỞI ĐỘNG
     // nếu include trỏ vào file không tồn tại. Ghi cả khi app không bật tuỳ chọn

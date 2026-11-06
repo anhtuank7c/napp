@@ -1,9 +1,10 @@
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { execCapture, runCmd, commandExists, ensureDir, writeFile, shQuote, state as execState } from "../exec";
 import { die, dryRunNotice, ok, info } from "../log";
 import type { HardwareProfile } from "../hardware";
 import type { CreatedDb, DbDriver } from "./types";
-import { randomPassword, dpkgInstalled, processRunning, aptInstall, aptRemove, connectionUrl, preflightInstall } from "./common";
+import { randomPassword, processRunning, connectionUrl, preflightInstall } from "./common";
+import { pkgInstalled, pkgInstall, pkgRemove, isRhel } from "../platform";
 
 // PostgreSQL từ kho Ubuntu (24.04 -> 16, 22.04 -> 14). Cố ý KHÔNG thêm kho PGDG:
 // bản vá bảo mật đi theo 'apt upgrade' như mọi gói hệ thống khác, và `napp
@@ -14,6 +15,8 @@ import { randomPassword, dpkgInstalled, processRunning, aptInstall, aptRemove, c
 // (scram-sha-256, mặc định của pg_hba.conf trên Ubuntu).
 
 const PG_ETC = "/etc/postgresql";
+// Họ RHEL: một cluster duy nhất, cấu hình nằm NGAY trong thư mục dữ liệu.
+const RHEL_PGDATA = "/var/lib/pgsql/data";
 export const PG_TUNING_FILE = "napp-tuning.conf";
 
 function psqlAdmin(): string[] {
@@ -41,8 +44,9 @@ function q(ident: string): string {
   return `"${ident.replace(/"/g, "")}"`;
 }
 
-/** Thư mục cấu hình của cluster mới nhất, vd /etc/postgresql/16/main. */
+/** Thư mục cấu hình của cluster mới nhất, vd /etc/postgresql/16/main (RHEL: /var/lib/pgsql/data). */
 function clusterConfDir(): string | undefined {
+  if (isRhel()) return existsSync(`${RHEL_PGDATA}/postgresql.conf`) ? RHEL_PGDATA : undefined;
   if (!existsSync(PG_ETC)) return undefined;
   const versions = readdirSync(PG_ETC)
     .filter((v) => /^\d+$/.test(v) && existsSync(`${PG_ETC}/${v}/main`))
@@ -99,6 +103,37 @@ log_min_duration_statement = 2000
 `;
 }
 
+/** Thêm một dòng vào file cấu hình nếu chưa có (giữ chủ/quyền của file gốc: postgres 0600). */
+function ensureConfLine(path: string, present: RegExp, line: string): void {
+  if (execState.dryRun) return dryRunNotice(`Sẽ thêm '${line}' vào ${path}`);
+  const text = readFileSync(path, "utf8");
+  if (present.test(text)) return;
+  writeFile(path, `${text.replace(/\n*$/, "\n")}# Managed by napp\n${line}\n`, 0o600, { owner: "postgres" });
+}
+
+/**
+ * Họ RHEL: gói không tự khởi tạo cluster, và pg_hba.conf mặc định xác thực
+ * kết nối TCP 127.0.0.1 bằng 'ident' — app đăng nhập bằng mật khẩu sẽ luôn
+ * nhận "Ident authentication failed". napp chuyển các dòng đó sang
+ * scram-sha-256 (như Ubuntu) và ép password_encryption cùng loại (PG 13 trên
+ * RHEL 9 mặc định còn md5).
+ */
+function installRhel(): void {
+  preflightInstall("PostgreSQL", 5432, "/var/lib/pgsql", 1024);
+  info("Đang cài đặt PostgreSQL server...");
+  pkgInstall(["postgresql-server", "postgresql"]);
+  if (!existsSync(`${RHEL_PGDATA}/PG_VERSION`)) runCmd("postgresql-setup", ["--initdb"]);
+  const hba = `${RHEL_PGDATA}/pg_hba.conf`;
+  if (!execState.dryRun && existsSync(hba)) {
+    const text = readFileSync(hba, "utf8");
+    const next = text.replace(/^(host\s+all\s+all\s+(?:127\.0\.0\.1\/32|::1\/128)\s+)ident\s*$/gm, "$1scram-sha-256");
+    if (next !== text) writeFile(hba, next, 0o600, { owner: "postgres" });
+  }
+  ensureConfLine(`${RHEL_PGDATA}/postgresql.conf`, /^\s*password_encryption\s*=\s*'?scram-sha-256/m, "password_encryption = 'scram-sha-256'");
+  runCmd("systemctl", ["enable", "--now", "postgresql"]);
+  ok("Đã cài PostgreSQL (chỉ lắng nghe trên localhost; app đăng nhập bằng mật khẩu scram-sha-256).");
+}
+
 export const postgresDriver: DbDriver = {
   engine: "postgresql",
   label: "PostgreSQL",
@@ -108,7 +143,8 @@ export const postgresDriver: DbDriver = {
   maxNameLength: 63,
 
   isInstalled() {
-    if (dpkgInstalled("postgresql")) return true;
+    if (isRhel()) return pkgInstalled("postgresql-server");
+    if (pkgInstalled("postgresql")) return true;
     // Cài thẳng gói có số phiên bản (postgresql-16) mà không qua gói meta.
     return existsSync("/usr/lib/postgresql") && readdirSync("/usr/lib/postgresql").some((v) => existsSync(`/usr/lib/postgresql/${v}/bin/postgres`));
   },
@@ -116,7 +152,7 @@ export const postgresDriver: DbDriver = {
   // 'postgresql.service' trên Ubuntu chỉ là unit oneshot bọc các cluster — nó
   // báo "active" kể cả khi cluster đã chết. Tiến trình postgres mới là sự thật.
   isRunning() {
-    return processRunning(["postgres"]);
+    return processRunning(["postgres", "postmaster"]);
   },
 
   unit() {
@@ -124,19 +160,28 @@ export const postgresDriver: DbDriver = {
   },
 
   install() {
+    if (isRhel()) {
+      installRhel();
+      return;
+    }
     preflightInstall("PostgreSQL", 5432, "/var/lib/postgresql", 1024);
     info("Đang cài đặt PostgreSQL server...");
-    aptInstall(["postgresql", "postgresql-client"]);
+    pkgInstall(["postgresql", "postgresql-client"]);
     runCmd("systemctl", ["enable", "--now", "postgresql"]);
     ok("Đã cài PostgreSQL (chỉ lắng nghe trên localhost — mặc định của Ubuntu).");
   },
 
   uninstall({ purge }) {
     runCmd("systemctl", ["disable", "--now", "postgresql"], { silentFail: true });
+    if (isRhel()) {
+      pkgRemove(["postgresql-server", "postgresql"], purge);
+      if (purge) runCmd("rm", ["-rf", "/var/lib/pgsql"], { silentFail: true });
+      return;
+    }
     const versioned = existsSync("/usr/lib/postgresql")
       ? readdirSync("/usr/lib/postgresql").flatMap((v) => [`postgresql-${v}`, `postgresql-client-${v}`])
       : [];
-    aptRemove(purge ? ["postgresql", "postgresql-client", ...versioned, "postgresql-common", "postgresql-client-common"] : ["postgresql", ...versioned], purge);
+    pkgRemove(purge ? ["postgresql", "postgresql-client", ...versioned, "postgresql-common", "postgresql-client-common"] : ["postgresql", ...versioned], purge);
     if (purge) runCmd("rm", ["-rf", "/var/lib/postgresql", PG_ETC], { silentFail: true });
   },
 
@@ -237,8 +282,9 @@ export const postgresDriver: DbDriver = {
       info("Không tìm thấy cluster PostgreSQL trong /etc/postgresql — bỏ qua tuning.");
       return;
     }
-    // postgresql.conf của Ubuntu đã có sẵn "include_dir = 'conf.d'".
+    // postgresql.conf của Ubuntu đã có sẵn "include_dir = 'conf.d'"; của RHEL thì không.
     ensureDir(`${dir}/conf.d`, 0o755);
+    if (isRhel()) ensureConfLine(`${dir}/postgresql.conf`, /^\s*include_dir\s*=\s*'conf\.d'/m, "include_dir = 'conf.d'");
     const path = `${dir}/conf.d/${PG_TUNING_FILE}`;
     writeFile(path, renderPostgresTuning(hw, budgetMB), 0o644);
     // shared_buffers/max_connections chỉ đổi được khi RESTART (reload là không đủ).

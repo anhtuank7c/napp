@@ -80,7 +80,7 @@ function renderUnit(spec: UnitSpec): string {
 # Muốn khoá trước một directive: thêm dòng '# napp-preserve: Tên1 Tên2'.
 [Unit]
 Description=${spec.description}
-After=network.target mariadb.service mysql.service postgresql.service mongod.service redis-server.service
+After=network.target mariadb.service mysql.service postgresql.service mongod.service redis-server.service redis.service valkey.service
 Wants=network-online.target
 StartLimitIntervalSec=60
 StartLimitBurst=5

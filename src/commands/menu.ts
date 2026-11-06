@@ -45,6 +45,7 @@ import { getAcmeEmail, findUnit, getApp, getService, loadState } from "../lib/st
 import { anyActive, appInstanceRefs, serviceInstanceRefs, MAX_INSTANCES } from "../lib/instances";
 import { cmdDomainAdd, cmdDomainRemove, cmdDomainList } from "./domain";
 import { cmdSync } from "./sync";
+import { isRhel } from "../lib/platform";
 import { cmdCertIssue, cmdCertRenew, cmdCertList, cmdCertRevoke, cmdCertStatus } from "./cert";
 import { cmdDbCreate, cmdDbList, cmdDbBackup, cmdDbDrop, cmdDbPassword } from "./db";
 import { cmdRedisAllocations, cmdRedisInfo, cmdRedisFlush, cmdRedisList, cmdRedisShow, cmdRedisMigrate } from "./redis";
@@ -1334,7 +1335,7 @@ async function menuSecurity(): Promise<void> {
     return {
       title: "Bảo mật",
       items: [
-        { label: "Tường lửa UFW", run: menuFirewall, open: true },
+        { label: isRhel() ? "Tường lửa firewalld" : "Tường lửa UFW", run: menuFirewall, open: true },
         { label: "fail2ban (tự ban IP brute-force / quét lỗ hổng)", run: menuFail2ban, open: true },
         {
           label: `${state(hardening)} Chặn truy cập bằng IP / Host lạ (nginx hardening)`,
@@ -1353,7 +1354,7 @@ async function menuSecurity(): Promise<void> {
 
 async function menuFirewall(): Promise<void> {
   await menuLoop(() => ({
-    title: "Tường lửa UFW",
+    title: isRhel() ? "Tường lửa firewalld" : "Tường lửa UFW",
     items: [
       { label: "Xem trạng thái", run: () => (cli("firewall show"), cmdFirewallStatus()) },
       {

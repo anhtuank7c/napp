@@ -2,14 +2,20 @@ import { execCapture, runCmd, commandExists, ensureDir, writeFile, shQuote, stat
 import { die, dryRunNotice, ok, info } from "../log";
 import type { HardwareProfile } from "../hardware";
 import type { CreatedDb, DbDriver } from "./types";
-import { randomPassword, dpkgInstalled, anyUnitActive, processRunning, aptInstall, aptRemove, connectionUrl, preflightInstall } from "./common";
+import { randomPassword, anyUnitActive, processRunning, connectionUrl, preflightInstall } from "./common";
+import { pkgInstalled, pkgInstall, pkgRemove, isRhel, mysqlConfDir } from "../platform";
 
 // Driver dùng CHUNG cho MariaDB và MySQL: cùng giao thức, cùng client
-// (mysql/mariadb), cùng mysqldump, cùng /etc/mysql. Hai engine này LOẠI TRỪ
+// (mysql/mariadb), cùng mysqldump, cùng /etc/mysql (RHEL: /etc/my.cnf.d). Hai engine này LOẠI TRỪ
 // nhau trên một máy (gói apt xung đột, cùng cổng 3306, cùng /var/lib/mysql) —
 // lib/db/index.ts chặn việc chọn cả hai.
 
-export const MYSQL_TUNING_PATH = "/etc/mysql/conf.d/napp-tuning.cnf";
+// Thư mục drop-in mà file cấu hình chính include sẵn: /etc/mysql/conf.d (Ubuntu)
+// hoặc /etc/my.cnf.d (họ RHEL).
+export const mysqlTuningPath = (): string => `${mysqlConfDir()}/napp-tuning.cnf`;
+// Họ RHEL: MariaDB mặc định nghe MỌI địa chỉ (bind-address bị comment) — khác
+// Ubuntu (127.0.0.1). napp ghim về localhost ngay lúc cài.
+const RHEL_BIND_CONF = "/etc/my.cnf.d/napp-bind.cnf";
 
 type Variant = "mariadb" | "mysql";
 
@@ -84,7 +90,8 @@ long_query_time = 2
 
 function makeMysqlDriver(variant: Variant): DbDriver {
   const label = variant === "mariadb" ? "MariaDB" : "MySQL";
-  const packages = variant === "mariadb" ? ["mariadb-server", "mariadb-client"] : ["mysql-server", "mysql-client"];
+  const packages = (): string[] =>
+    isRhel() ? (variant === "mariadb" ? ["mariadb-server", "mariadb"] : ["mysql-server", "mysql"]) : variant === "mariadb" ? ["mariadb-server", "mariadb-client"] : ["mysql-server", "mysql-client"];
   const purgeExtra = variant === "mariadb" ? ["mariadb-common"] : ["mysql-common"];
   const primaryUnit = variant === "mariadb" ? "mariadb" : "mysql";
 
@@ -99,10 +106,10 @@ function makeMysqlDriver(variant: Variant): DbDriver {
     maxNameLength: 64,
 
     isInstalled() {
-      if (variant === "mariadb") return dpkgInstalled("mariadb-server") || commandExists("mariadbd");
+      if (variant === "mariadb") return pkgInstalled("mariadb-server") || commandExists("mariadbd");
       // MariaDB >= 10.5 cũng có /usr/sbin/mysqld (symlink tới mariadbd) — phải
       // loại trừ để không nhận nhầm MariaDB thành MySQL.
-      return dpkgInstalled("mysql-server") || (commandExists("mysqld") && !commandExists("mariadbd"));
+      return pkgInstalled("mysql-server") || (commandExists("mysqld") && !commandExists("mariadbd"));
     },
 
     isRunning() {
@@ -130,17 +137,23 @@ function makeMysqlDriver(variant: Variant): DbDriver {
             `  Muốn chuyển hẳn sang ${label}: backup, 'sudo napp db engine delete ${other.engine}', rồi cài ${label} và import lại.`
         );
       }
+      if (isRhel() && variant === "mysql") {
+        die("MySQL trên họ RHEL chưa được napp hỗ trợ ở bản này — dùng MariaDB (tương thích giao thức MySQL): sudo napp db engine create mariadb");
+      }
       preflightInstall(label, 3306, "/var/lib/mysql", 1024);
       info(`Đang cài đặt ${label} server...`);
-      aptInstall(packages);
+      pkgInstall(packages());
+      if (isRhel()) {
+        writeFile(RHEL_BIND_CONF, "# Managed by napp — chỉ nhận kết nối từ chính máy này.\n[mysqld]\nbind-address = 127.0.0.1\n", 0o644);
+      }
       runCmd("systemctl", ["enable", "--now", primaryUnit]);
       ok(`Đã cài ${label} (khuyến nghị chạy 'sudo mysql_secure_installation' để rà soát cấu hình bảo mật)`);
     },
 
     uninstall({ purge }) {
       runCmd("systemctl", ["disable", "--now", primaryUnit], { silentFail: true });
-      aptRemove(purge ? [...packages, `${variant}-server-core`, ...purgeExtra] : packages, purge);
-      if (purge) runCmd("rm", ["-rf", "/var/lib/mysql", MYSQL_TUNING_PATH], { silentFail: true });
+      pkgRemove(purge ? [...packages(), `${variant}-server-core`, ...purgeExtra] : packages(), purge);
+      if (purge) runCmd("rm", ["-rf", "/var/lib/mysql", mysqlTuningPath(), RHEL_BIND_CONF], { silentFail: true });
     },
 
     canConnectAsAdmin() {
@@ -264,13 +277,13 @@ FLUSH PRIVILEGES;`;
     },
 
     applyTuning(hw, budgetMB, opts) {
-      ensureDir("/etc/mysql/conf.d", 0o755);
-      writeFile(MYSQL_TUNING_PATH, renderMysqlTuning(variant, hw, budgetMB), 0o644);
+      ensureDir(mysqlConfDir(), 0o755);
+      writeFile(mysqlTuningPath(), renderMysqlTuning(variant, hw, budgetMB), 0o644);
       if (!opts.skipRestart && this.isRunning()) {
         runCmd("systemctl", ["restart", primaryUnit]);
         ok(`Đã áp tuning cho ${label} và khởi động lại.`);
       } else {
-        ok(`Đã ghi ${MYSQL_TUNING_PATH}${opts.skipRestart ? " — chưa restart do --skip-restart." : " — service chưa chạy nên chưa restart."}`);
+        ok(`Đã ghi ${mysqlTuningPath()}${opts.skipRestart ? " — chưa restart do --skip-restart." : " — service chưa chạy nên chưa restart."}`);
       }
     },
   };

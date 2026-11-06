@@ -1,4 +1,5 @@
 import { runCmd, commandExists, whichAll } from "./exec";
+import { ensureSudoVisible } from "./platform";
 import { realpathSync } from "node:fs";
 import { info, ok, die } from "./log";
 import type { Runtime, PackageManager } from "./state";
@@ -106,6 +107,7 @@ export function commandExistsSystemWide(cmd: string): boolean {
 // thấy). bun phải được cài sẵn system-wide (do install.sh) — thiếu thì báo lỗi rõ.
 export function ensurePackageManager(pm: PackageManager): void {
   if (pm === "npm") return;
+  if (pm === "bun") ensureSudoVisible("bun"); // họ RHEL: sudo không thấy /usr/local/bin
   if (commandExistsSystemWide(pm)) return;
   if (pm === "bun") {
     die(
@@ -124,6 +126,7 @@ export function ensurePackageManager(pm: PackageManager): void {
 
 // Kiểm tra runtime engine (node/bun) đã cài chưa — dùng chung cho app và service.
 export function ensureRuntime(runtime: Runtime): void {
+  if (runtime === "bun") ensureSudoVisible("bun");
   if (runtime === "node" && !commandExists("node")) {
     die("Node.js chưa được cài. Chạy 'napp check --fix' trước.");
   }

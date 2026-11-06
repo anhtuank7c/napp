@@ -861,13 +861,13 @@ legacyGroup(backupSchedule, ["--time", "--keep-days", "--target"], "backup sched
 legacy(backup, "unschedule", "backup schedule disable", (c) => c.action(() => cmdBackupUnschedule()));
 
 // ------------------------------------------------------------- firewall ---
-const firewall = program.command("firewall").description("tường lửa UFW");
-const firewallShow = (c: Command) => c.description("xem trạng thái UFW").action(() => cmdFirewallStatus());
+const firewall = program.command("firewall").description("tường lửa: UFW (Ubuntu/Debian) hoặc firewalld (họ RHEL)");
+const firewallShow = (c: Command) => c.description("xem trạng thái tường lửa (UFW / firewalld)").action(() => cmdFirewallStatus());
 firewallShow(firewall.command("show"));
 legacy(firewall, "status", "firewall show", firewallShow);
 const firewallApply = (c: Command) =>
   c
-    .description("áp cấu hình UFW: deny mặc định, allow SSH, mở 80/443")
+    .description("áp cấu hình tường lửa (UFW / firewalld): chặn mặc định, mở SSH, mở 80/443")
     .option("--ssh-port <port>", "cổng SSH (mặc định: tự dò từ sshd_config)", (v) => parseInt(v, 10))
     .option("--restrict-cloudflare", "(nâng cao) khoá origin: 80/443 CHỈ nhận từ dải IP Cloudflare (không cần cho việc lấy IP client thật)")
     .option("--extra-port <port...>", "cổng công khai bổ sung, lặp lại được", repeat((v) => parseInt(v, 10)), [] as number[])

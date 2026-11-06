@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { execCapture, runCmd, commandExists } from "./exec";
+import { labelForNginx } from "./selinux";
 import { info, ok, warn } from "./log";
 import type { AppRecord } from "./state";
 
@@ -123,6 +124,9 @@ export function appServePaths(app: AppRecord): string[] {
 export function ensureNginxCanServe(appGroup: string, paths: string[]): void {
   const dirs = paths.filter((p) => p && existsSync(p));
   if (dirs.length === 0) return;
+  // SELinux (họ RHEL): quyền Unix đúng vẫn bị chặn nếu nhãn file không phải
+  // httpd_sys_content_t (thư mục ngoài /var/www, hoặc file 'mv' từ nơi khác vào).
+  for (const d of dirs) labelForNginx(d);
   const nginxUser = nginxWorkerUser();
   const unreadable = dirs.filter((d) => pathReadableBy(nginxUser, d) === false);
   if (unreadable.length === 0) return;

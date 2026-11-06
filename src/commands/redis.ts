@@ -1,4 +1,5 @@
-import { execCapture, runCmd, requireRoot, commandExists } from "../lib/exec";
+import { execCapture, runCmd, requireRoot } from "../lib/exec";
+import { redisCliBin, redisCliAvailable } from "../lib/platform";
 import { ask } from "../lib/prompt";
 import { info, ok, warn, die, section } from "../lib/log";
 import { loadState, saveState, findUnit, upsertApp, upsertService, releaseRedisDbIfUnused, appUnits, serviceUnits, REDIS_DB_MAX } from "../lib/state";
@@ -22,14 +23,14 @@ import { computeTuningPlan } from "../templates/tuning";
 import { detectHardware } from "../lib/hardware";
 
 function requireRedisCli(): void {
-  if (!commandExists("redis-cli")) {
+  if (!redisCliAvailable()) {
     die("redis-cli chưa được cài. Chạy 'napp check --fix' để cài Redis.");
   }
 }
 
 export function cmdRedisInfo(): void {
   requireRedisCli();
-  const res = execCapture("redis-cli", ["INFO", "memory"]);
+  const res = execCapture(redisCliBin(), ["INFO", "memory"]);
   console.log(res.stdout);
 }
 
@@ -57,7 +58,7 @@ export async function cmdRedisFlush(dbIndex: number, opts: { yes: boolean }): Pr
       return;
     }
   }
-  runCmd("redis-cli", ["-n", String(dbIndex), "FLUSHDB"]);
+  runCmd(redisCliBin(), ["-n", String(dbIndex), "FLUSHDB"]);
   ok(`Đã flush Redis DB #${dbIndex}.`);
 }
 
@@ -113,7 +114,7 @@ export function cmdRedisShow(unitId?: string): void {
     }
     console.log(`  Mật khẩu    : trong .env (REDIS_PASSWORD / REDIS_URL) của các đơn vị trên`);
   } else if (unit.redisDbIndex !== undefined) {
-    const keys = execCapture("redis-cli", ["-n", String(unit.redisDbIndex), "DBSIZE"]).stdout.trim();
+    const keys = execCapture(redisCliBin(), ["-n", String(unit.redisDbIndex), "DBSIZE"]).stdout.trim();
     console.log(`  Loại        : DB #${unit.redisDbIndex} trên Redis DÙNG CHUNG (127.0.0.1:6379, KHÔNG mật khẩu)`);
     console.log(`  Key         : ${keys || "?"}`);
     warn(`CHƯA cô lập: mọi user trên máy đọc/ghi được dữ liệu này. Chuyển sang Redis riêng: sudo napp redis migrate ${unitId}`);
@@ -161,7 +162,7 @@ export async function cmdRedisMigrate(unitId: string, opts: { yes: boolean }): P
   if (unit.redisDbIndex === undefined) die(`'${unitId}' không dùng Redis.`);
   const idx = unit.redisDbIndex;
   const group = legacyGroup(idx);
-  const sourceKeys = Number(execCapture("redis-cli", ["-n", String(idx), "DBSIZE"]).stdout.trim());
+  const sourceKeys = Number(execCapture(redisCliBin(), ["-n", String(idx), "DBSIZE"]).stdout.trim());
   if (!Number.isInteger(sourceKeys)) die("Không đọc được Redis dùng chung (redis-server có đang chạy ở 127.0.0.1:6379 không?).");
 
   section(`Chuyển Redis DB #${idx} sang Redis riêng`);
@@ -186,20 +187,20 @@ export async function cmdRedisMigrate(unitId: string, opts: { yes: boolean }): P
     // Chép theo lô 200 key. Lệnh đi qua STDIN của redis-cli (mật khẩu không vào argv);
     // key được đặt trong nháy kép + thoát ký tự, nên key có dấu cách/ký tự lạ vẫn đúng.
     const { port, password } = readInstanceConf(id);
-    const keys = execCapture("redis-cli", ["-n", String(idx), "--scan", "--count", "1000"]).stdout.split("\n").filter((k) => k.length > 0);
+    const keys = execCapture(redisCliBin(), ["-n", String(idx), "--scan", "--count", "1000"]).stdout.split("\n").filter((k) => k.length > 0);
     const lines: string[] = [];
     for (let i = 0; i < keys.length; i += 200) {
       const batch = keys.slice(i, i + 200).map(quoteRedisArg).join(" ");
       lines.push(`MIGRATE 127.0.0.1 ${port} "" 0 30000 COPY REPLACE AUTH ${quoteRedisArg(password)} KEYS ${batch}`);
     }
     if (lines.length) {
-      const res = execCapture("redis-cli", ["-n", String(idx)], { input: lines.join("\n") + "\n" });
+      const res = execCapture(redisCliBin(), ["-n", String(idx)], { input: lines.join("\n") + "\n" });
       const errs = res.stdout.split("\n").filter((l) => /ERR|error/i.test(l));
       if (res.code !== 0 || errs.length) die(`Chép key thất bại: ${(errs[0] ?? res.stderr).slice(0, 200)}`);
     }
     const destKeys = Number(redisInstanceCmd(id, ["DBSIZE"]).lines[0]);
     // Key có TTL có thể vừa hết hạn trong lúc chép: nguồn giảm theo, không phải lỗi.
-    const sourceNow = Number(execCapture("redis-cli", ["-n", String(idx), "DBSIZE"]).stdout.trim());
+    const sourceNow = Number(execCapture(redisCliBin(), ["-n", String(idx), "DBSIZE"]).stdout.trim());
     if (destKeys !== sourceNow) die(`Số key không khớp: DB #${idx} có ${sourceNow}, Redis riêng có ${destKeys}.`);
     ok(`Đã chép ${destKeys} key sang Redis riêng '${id}' (giữ nguyên TTL).`);
   } catch (e) {

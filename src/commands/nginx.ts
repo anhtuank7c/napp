@@ -2,6 +2,7 @@ import { existsSync, readFileSync, copyFileSync } from "node:fs";
 import { execCapture, runCmd, requireRoot, ensureDir, writeFile, commandExists, state as execState } from "../lib/exec";
 import { info, ok, warn, die, section } from "../lib/log";
 import { ipv6Available } from "../lib/network";
+import { ensureNginxLayout } from "../lib/nginxlayout";
 import { loadState, slugFor, NGINX_AVAILABLE, type AppRecord } from "../lib/state";
 import { writeAppLocationsConf, injectLocationsInclude } from "../lib/locationsfile";
 import {
@@ -54,8 +55,11 @@ function ensureSelfSignedCert(): { certPath: string; keyPath: string } {
 // Ghi file map dùng chung (idempotent). PHẢI chạy TRƯỚC khi ghi bất kỳ vhost nào
 // dùng $napp_connection_upgrade — thiếu file này thì `nginx -t` báo unknown variable.
 export function ensureNappProxyConf(): boolean {
+  // Họ RHEL: tạo sites-available/enabled + include (Ubuntu có sẵn). Mọi đường
+  // ghi vhost (app create, nginx apply) đều đi qua đây trước.
+  const layoutChanged = ensureNginxLayout();
   const want = renderNappProxyConf();
-  if (existsSync(NGINX_PROXY_CONF) && readFileSync(NGINX_PROXY_CONF, "utf8") === want) return false;
+  if (existsSync(NGINX_PROXY_CONF) && readFileSync(NGINX_PROXY_CONF, "utf8") === want) return layoutChanged;
   ensureDir("/etc/nginx/conf.d", 0o755);
   writeFile(NGINX_PROXY_CONF, want, 0o644);
   return true;
@@ -425,6 +429,7 @@ export function cmdNginxHarden(): void {
   section("Hardening nginx + chặn truy cập IP / Host lạ");
 
   ensureDir("/etc/nginx/conf.d", 0o755);
+  ensureNginxLayout();
 
   // Gỡ site 'default' mặc định của Ubuntu (nó cũng là default_server, sẽ gây lỗi
   // "duplicate default server" với server mặc định của napp). Chỉ gỡ symlink

@@ -5,7 +5,8 @@ import { die, dryRunNotice, ok, info, warn } from "../log";
 import type { HardwareProfile } from "../hardware";
 import type { CreatedDb, DbDriver } from "./types";
 import { aptGet } from "../apt";
-import { randomPassword, dpkgInstalled, anyUnitActive, processRunning, aptRemove, connectionUrl, preflightInstall } from "./common";
+import { randomPassword, anyUnitActive, processRunning, connectionUrl, preflightInstall } from "./common";
+import { pkgInstalled, pkgRemove, isRhel } from "../platform";
 
 // MongoDB KHÁC hẳn ba engine còn lại ở bốn điểm, và mỗi điểm là một cái bẫy:
 //
@@ -217,7 +218,7 @@ export const mongoDriver: DbDriver = {
   maxNameLength: 63,
 
   isInstalled() {
-    return dpkgInstalled("mongodb-org-server") || dpkgInstalled("mongodb-org") || commandExists("mongod");
+    return pkgInstalled("mongodb-org-server") || pkgInstalled("mongodb-org") || commandExists("mongod");
   },
 
   isRunning() {
@@ -229,6 +230,9 @@ export const mongoDriver: DbDriver = {
   },
 
   install() {
+    if (isRhel()) {
+      die("MongoDB trên họ RHEL chưa được napp hỗ trợ ở bản này (sẽ có ở bản sau). Dùng PostgreSQL hoặc MariaDB: sudo napp db engine create postgresql");
+    }
     requireAvx();
     const line = repoLine();
     preflightInstall("MongoDB", 27017, "/var/lib/mongodb", 2048);
@@ -267,7 +271,7 @@ export const mongoDriver: DbDriver = {
 
   uninstall({ purge }) {
     runCmd("systemctl", ["disable", "--now", "mongod"], { silentFail: true });
-    aptRemove(
+    pkgRemove(
       ["mongodb-org", "mongodb-org-server", "mongodb-org-mongos", "mongodb-org-tools", "mongodb-org-database", "mongodb-org-shell", "mongodb-mongosh", "mongodb-database-tools"],
       purge
     );

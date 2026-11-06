@@ -6,6 +6,7 @@ import { mariadbDriver, mysqlDriver } from "./mysql";
 import { postgresDriver } from "./postgres";
 import { mongoDriver } from "./mongo";
 import { publicListeners, describeListener, type PortListener } from "./common";
+import { isRhel } from "../platform";
 
 export { describeListener };
 
@@ -120,19 +121,26 @@ export function exposedEngines(): { driver: DbDriver; listeners: PortListener[] 
   return out;
 }
 
-const BIND_SETTING: Record<DbEngine, string> = {
-  mariadb: "bind-address trong /etc/mysql/mariadb.conf.d/50-server.cnf",
-  mysql: "bind-address / mysqlx-bind-address trong /etc/mysql/mysql.conf.d/mysqld.cnf",
-  postgresql: "listen_addresses trong /etc/postgresql/<phiên bản>/main/postgresql.conf",
-  mongodb: "net.bindIp trong /etc/mongod.conf",
-};
+function bindSetting(engine: DbEngine): string {
+  const rhel = isRhel();
+  switch (engine) {
+    case "mariadb":
+      return rhel ? "bind-address trong /etc/my.cnf.d/napp-bind.cnf (hoặc mariadb-server.cnf)" : "bind-address trong /etc/mysql/mariadb.conf.d/50-server.cnf";
+    case "mysql":
+      return rhel ? "bind-address / mysqlx-bind-address trong /etc/my.cnf.d/mysql-server.cnf" : "bind-address / mysqlx-bind-address trong /etc/mysql/mysql.conf.d/mysqld.cnf";
+    case "postgresql":
+      return rhel ? "listen_addresses trong /var/lib/pgsql/data/postgresql.conf" : "listen_addresses trong /etc/postgresql/<phiên bản>/main/postgresql.conf";
+    case "mongodb":
+      return "net.bindIp trong /etc/mongod.conf";
+  }
+}
 
 export function exposureMessage(x: { driver: DbDriver; listeners: PortListener[] }): string {
   return (
     `${x.driver.label} đang lắng nghe RA NGOÀI: ${x.listeners.map(describeListener).join("; ")}. ` +
     `App trên cùng máy chỉ cần 127.0.0.1 — lúc này chỉ còn firewall đứng giữa database và Internet. ` +
-    `Đưa về 127.0.0.1 (${BIND_SETTING[x.driver.engine]}) rồi restart ${x.driver.unit()}; ` +
-    `nếu CỐ Ý mở, chắc chắn UFW chỉ cho IP tin cậy vào cổng ${x.driver.port}.`
+    `Đưa về 127.0.0.1 (${bindSetting(x.driver.engine)}) rồi restart ${x.driver.unit()}; ` +
+    `nếu CỐ Ý mở, chắc chắn tường lửa (UFW/firewalld) chỉ cho IP tin cậy vào cổng ${x.driver.port}.`
   );
 }
 

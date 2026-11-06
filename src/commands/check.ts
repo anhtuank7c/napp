@@ -1,11 +1,30 @@
 import { readFileSync, existsSync } from "node:fs";
-import { instances, instanceRunning, redisUnitFor } from "../lib/redis";
+import { instances, instanceRunning, redisUnitFor, ensureConfDirTraversable } from "../lib/redis";
 import { ensureLogrotate, logrotateInstalled } from "../lib/logrotate";
 import { ask, checkbox } from "../lib/prompt";
 import { execCapture, runCmd, commandExists, requireRoot, isServiceActive, writeFile, ensureDir } from "../lib/exec";
 import { info, ok, warn, section, die } from "../lib/log";
-import { REDIS_TUNING_PATH } from "../templates/tuning";
-import { aptGet } from "../lib/apt";
+import { redisTuningPath } from "../templates/tuning";
+import {
+  osSupport,
+  pkgManager,
+  pkgInstall,
+  packagesFor,
+  needsEpel,
+  ensureEpel,
+  installNodeSource,
+  isRhel,
+  redisPackage,
+  redisSystemUnit,
+  redisServerBin,
+  redisCliBin,
+  redisCliAvailable,
+  redisConfDir,
+} from "../lib/platform";
+import { selinuxFindings } from "../lib/selinux";
+import { ensureNginxLayout, nginxLayoutMissing } from "../lib/nginxlayout";
+import { firewalldActive } from "../lib/firewalld";
+import { ensureRedisConfInclude } from "../lib/platform";
 import { loadState, NGINX_AVAILABLE, type AppRecord } from "../lib/state";
 import { cmdNginxSync, cmdNginxScanBlock, stripInlineProxyBuffers } from "./nginx";
 import { appLocationsPath, NGINX_SCANNER_BLOCK_CONF } from "../templates/nginx";
@@ -49,17 +68,6 @@ interface Finding {
   engine?: string;
 }
 
-function osRelease(): Record<string, string> {
-  const out: Record<string, string> = {};
-  if (!existsSync("/etc/os-release")) return out;
-  const raw = readFileSync("/etc/os-release", "utf8");
-  for (const line of raw.split("\n")) {
-    const m = line.match(/^([A-Z_]+)=(.*)$/);
-    if (m) out[m[1]!] = m[2]!.replace(/^"|"$/g, "");
-  }
-  return out;
-}
-
 async function confirm(question: string, autoYes: boolean): Promise<boolean> {
   if (autoYes) return true;
   const ans = await ask(`${question} [y/N] `);
@@ -68,23 +76,24 @@ async function confirm(question: string, autoYes: boolean): Promise<boolean> {
 
 function installNodejs(): void {
   info("Đang cài đặt Node.js 24.x LTS qua NodeSource...");
-  runCmd("bash", ["-lc", "curl -fsSL https://deb.nodesource.com/setup_24.x | bash -"]);
-  aptGet(["install", "-y", "nodejs"]);
+  installNodeSource(24);
   runCmd("bash", ["-lc", "corepack enable || true"]);
   ok("Đã cài Node.js");
 }
 
 function installNginx(): void {
   info("Đang cài đặt nginx...");
-  aptGet(["update"]);
-  aptGet(["install", "-y", "nginx"]);
+  pkgInstall(packagesFor("nginx"));
+  ensureNginxLayout(); // họ RHEL: sites-available/enabled + include
   runCmd("systemctl", ["enable", "--now", "nginx"]);
   ok("Đã cài nginx");
 }
 
 function installCertbot(): void {
   info("Đang cài đặt certbot + plugin nginx...");
-  aptGet(["install", "-y", "certbot", "python3-certbot-nginx"]);
+  if (needsEpel("certbot")) ensureEpel();
+  pkgInstall(packagesFor("certbot"));
+  enableCertbotRenewTimer();
   ok("Đã cài certbot");
 }
 
@@ -106,17 +115,28 @@ async function promptEngineSelection(): Promise<DbEngine[] | undefined> {
 }
 
 function installRedis(): void {
-  info("Đang cài đặt Redis server...");
-  aptGet(["install", "-y", "redis-server"]);
-  runCmd("systemctl", ["enable", "--now", "redis-server"]);
-  ok("Đã cài Redis");
+  const pkg = redisPackage();
+  info(`Đang cài đặt ${pkg === "valkey" ? "Valkey (bản thay thế Redis, tương thích giao thức — kho của distro này không còn gói redis)" : "Redis server"}...`);
+  pkgInstall([pkg]);
+  runCmd("systemctl", ["enable", "--now", redisSystemUnit()]);
+  ok(`Đã cài ${pkg}`);
+}
+
+// Ubuntu: gói certbot tự bật certbot.timer. Họ RHEL (EPEL): certbot-renew.timer
+// có sẵn nhưng TẮT — không bật là chứng chỉ hết hạn sau 90 ngày, im lặng.
+const CERTBOT_RHEL_TIMER = "certbot-renew.timer";
+function certbotTimerMissing(): boolean {
+  return isRhel() && commandExists("certbot") && execCapture("systemctl", ["is-enabled", CERTBOT_RHEL_TIMER]).stdout.trim() !== "enabled";
+}
+function enableCertbotRenewTimer(): void {
+  if (isRhel()) runCmd("systemctl", ["enable", "--now", CERTBOT_RHEL_TIMER], { silentFail: true });
 }
 
 // Đọc maxmemory-policy ĐANG CHẠY (không phải trong file cấu hình) — trả về null
 // nếu không hỏi được (redis-cli thiếu, cần auth, socket không mở...).
 function redisEvictionPolicy(): string | null {
-  if (!commandExists("redis-cli")) return null;
-  const res = execCapture("redis-cli", ["CONFIG", "GET", "maxmemory-policy"]);
+  if (!redisCliAvailable()) return null;
+  const res = execCapture(redisCliBin(), ["CONFIG", "GET", "maxmemory-policy"]);
   if (res.code !== 0) return null;
   // Kết quả dạng 2 dòng: "maxmemory-policy" rồi tới giá trị. Chỉ chấp nhận một
   // trong các chính sách Redis biết — redis-cli có lúc in "(error) NOAUTH ..."
@@ -131,17 +151,17 @@ function redisEvictionPolicy(): string | null {
 // sau khi restart Redis. Chỉ chạm file do napp sở hữu (conf.d), không sửa
 // redis.conf gốc ngoài dòng `include`.
 function fixRedisEvictionPolicy(): void {
-  ensureDir("/etc/redis/conf.d", 0o755);
+  ensureDir(redisConfDir(), 0o755);
   const line = "maxmemory-policy noeviction";
-  if (existsSync(REDIS_TUNING_PATH)) {
-    const content = readFileSync(REDIS_TUNING_PATH, "utf8");
+  if (existsSync(redisTuningPath())) {
+    const content = readFileSync(redisTuningPath(), "utf8");
     const next = /^\s*maxmemory-policy\s+.*$/m.test(content)
       ? content.replace(/^\s*maxmemory-policy\s+.*$/m, line)
       : `${content.replace(/\n*$/, "\n")}${line}\n`;
-    writeFile(REDIS_TUNING_PATH, next, 0o644);
+    writeFile(redisTuningPath(), next, 0o644);
   } else {
     writeFile(
-      REDIS_TUNING_PATH,
+      redisTuningPath(),
       `# Managed by napp — đặt bởi \`napp check --fix\`\n` +
         `# BullMQ và mọi hàng đợi Redis YÊU CẦU noeviction: dữ liệu hàng đợi không\n` +
         `# phải cache, để Redis tự trục xuất là mất job mà không bên nào báo lỗi.\n` +
@@ -150,18 +170,12 @@ function fixRedisEvictionPolicy(): void {
       0o644
     );
   }
-  // Ubuntu package redis-server thường không tự include conf.d/*.conf.
-  const mainConf = "/etc/redis/redis.conf";
-  if (existsSync(mainConf)) {
-    const content = readFileSync(mainConf, "utf8");
-    if (!content.includes("conf.d/*.conf")) {
-      writeFile(mainConf, content + "\ninclude /etc/redis/conf.d/*.conf\n", 0o640);
-    }
-  }
+  // Gói redis/valkey thường không tự include conf.d/*.conf.
+  ensureRedisConfInclude();
   // CONFIG SET áp ngay, không phải restart Redis (restart là mất toàn bộ job
   // đang nằm trong bộ nhớ nếu chưa kịp ghi AOF).
-  if (commandExists("redis-cli")) runCmd("redis-cli", ["CONFIG", "SET", "maxmemory-policy", "noeviction"], { silentFail: true });
-  ok("Đã đặt maxmemory-policy=noeviction (áp ngay + ghi vào /etc/redis/conf.d/napp-tuning.conf).");
+  if (redisCliAvailable()) runCmd(redisCliBin(), ["CONFIG", "SET", "maxmemory-policy", "noeviction"], { silentFail: true });
+  ok(`Đã đặt maxmemory-policy=noeviction (áp ngay + ghi vào ${redisTuningPath()}).`);
 }
 
 // Vhost tạo bằng bản trước 1.20.0 mang khối bộ đệm proxy NỘI TUYẾN trong
@@ -295,19 +309,21 @@ function uploadCandidates(): { app: AppRecord; dir: string; prefix: string }[] {
 
 function installFail2ban(): void {
   info("Đang cài đặt fail2ban...");
-  aptGet(["install", "-y", "fail2ban"]);
+  if (needsEpel("fail2ban")) ensureEpel();
+  pkgInstall(packagesFor("fail2ban"));
   runCmd("systemctl", ["enable", "--now", "fail2ban"]);
   ok("Đã cài fail2ban (chạy 'napp fail2ban apply' để áp cấu hình jail)");
 }
 
-function installUfw(): void {
-  info("Đang cài đặt UFW...");
-  aptGet(["install", "-y", "ufw"]);
-  ok("Đã cài UFW (chạy 'napp firewall apply' để bật và cấu hình)");
+function installFirewall(): void {
+  const pkg = packagesFor("firewall");
+  info(`Đang cài đặt ${pkg.join(", ")}...`);
+  pkgInstall(pkg);
+  ok(`Đã cài ${pkg.join(", ")} (chạy 'napp firewall apply' để bật và cấu hình)`);
 }
 
 function installGit(): void {
-  aptGet(["install", "-y", "git"]);
+  pkgInstall(packagesFor("git"));
   ok("Đã cài git");
 }
 
@@ -316,23 +332,15 @@ export async function cmdCheck(opts: CheckOptions): Promise<void> {
   section("Kiểm tra môi trường máy chủ");
 
   const findings: Finding[] = [];
-  let hasApt = commandExists("apt-get");
-  if (!hasApt) {
-    warn("Không tìm thấy apt-get — công cụ này chỉ hỗ trợ Ubuntu/Debian. Việc tự cài đặt (--fix) sẽ bị bỏ qua.");
+  const pm = pkgManager();
+  if (!pm) {
+    warn("Không tìm thấy apt-get hay dnf — napp hỗ trợ Ubuntu/Debian và họ RHEL (RHEL, Rocky, Alma, Oracle, CentOS Stream 9/10, Fedora). Việc tự cài đặt (--fix) sẽ bị bỏ qua.");
   }
 
   // OS
-  const os = osRelease();
-  if (os.ID === "ubuntu") {
-    const major = parseInt((os.VERSION_ID ?? "0").split(".")[0] ?? "0", 10);
-    if (major >= 20 && major <= 26) {
-      ok(`Hệ điều hành: ${os.PRETTY_NAME ?? "Ubuntu " + os.VERSION_ID}`);
-    } else {
-      warn(`Ubuntu ${os.VERSION_ID} nằm ngoài phạm vi đã kiểm thử (20.04 - 26.04 LTS)`);
-    }
-  } else {
-    warn(`Hệ điều hành chưa được kiểm thử: ${os.PRETTY_NAME ?? "không rõ"} (napp nhắm tới Ubuntu 20.04 - 26.04 LTS)`);
-  }
+  const support = osSupport();
+  if (support.ok) ok(support.message);
+  else warn(support.message);
 
   // Node.js
   if (commandExists("node")) {
@@ -355,7 +363,7 @@ export async function cmdCheck(opts: CheckOptions): Promise<void> {
       name: "sudo",
       ok: false,
       message: "sudo chưa được cài (bắt buộc — napp dùng 'sudo -u <user>' để chạy lệnh cô lập theo từng app).",
-      fix: () => aptGet(["install", "-y", "sudo"]),
+      fix: () => pkgInstall(packagesFor("sudo")),
     });
   }
 
@@ -552,11 +560,36 @@ export async function cmdCheck(opts: CheckOptions): Promise<void> {
         name: "certbot-nginx-plugin",
         ok: false,
         message: "certbot đã cài nhưng THIẾU plugin nginx.",
-        fix: () => aptGet(["install", "-y", "python3-certbot-nginx"]),
+        fix: () => pkgInstall(["python3-certbot-nginx"]),
       });
     }
   } else {
     findings.push({ name: "certbot", ok: false, message: "certbot chưa được cài (cần cho SSL miễn phí).", fix: installCertbot });
+  }
+  if (certbotTimerMissing()) {
+    findings.push({
+      name: "certbot-renew",
+      ok: false,
+      message: `${CERTBOT_RHEL_TIMER} chưa bật — chứng chỉ SSL sẽ KHÔNG tự gia hạn và hết hạn sau 90 ngày.`,
+      fix: enableCertbotRenewTimer,
+    });
+  }
+
+  // Họ RHEL: SELinux + bố cục nginx của napp
+  for (const f of selinuxFindings()) {
+    if (f.ok) ok(f.message);
+    else findings.push({ name: "selinux", ok: false, message: f.message, fix: f.fix });
+  }
+  if (commandExists("nginx") && nginxLayoutMissing()) {
+    findings.push({
+      name: "nginx-layout",
+      ok: false,
+      message: "nginx chưa include /etc/nginx/sites-enabled (họ RHEL chỉ có conf.d) — vhost napp tạo ra sẽ không được nạp.",
+      fix: () => {
+        ensureNginxLayout();
+        runCmd("bash", ["-lc", "nginx -t && systemctl reload nginx"], { silentFail: true });
+      },
+    });
   }
 
   // Database — chỉ những engine người dùng đã chọn (mặc định MariaDB). Engine
@@ -608,11 +641,11 @@ export async function cmdCheck(opts: CheckOptions): Promise<void> {
   }
 
   // Redis
-  if (isServiceActive("redis-server") || isServiceActive("redis")) {
+  if (isServiceActive(redisSystemUnit())) {
     ok("Redis đang chạy");
     const policy = redisEvictionPolicy();
     if (policy === null) {
-      warn("Không đọc được maxmemory-policy của Redis (redis-cli thiếu hoặc cần mật khẩu) — hãy tự kiểm tra: redis-cli CONFIG GET maxmemory-policy (phải là 'noeviction').");
+      warn(`Không đọc được maxmemory-policy của Redis (redis-cli thiếu hoặc cần mật khẩu) — hãy tự kiểm tra: ${redisCliBin()} CONFIG GET maxmemory-policy (phải là 'noeviction').`);
     } else if (policy === "noeviction") {
       ok("Redis maxmemory-policy = noeviction (đúng cho BullMQ/hàng đợi)");
     } else {
@@ -625,12 +658,12 @@ export async function cmdCheck(opts: CheckOptions): Promise<void> {
         fix: fixRedisEvictionPolicy,
       });
     }
-  } else if (commandExists("redis-server")) {
+  } else if (redisServerBin()) {
     findings.push({
       name: "redis",
       ok: false,
       message: "Redis đã cài nhưng chưa chạy.",
-      fix: () => runCmd("systemctl", ["enable", "--now", "redis-server"]),
+      fix: () => runCmd("systemctl", ["enable", "--now", redisSystemUnit()]),
     });
   } else {
     findings.push({ name: "redis", ok: false, message: "Redis chưa cài (tuỳ chọn — bỏ qua nếu app không dùng cache/queue Redis).", fix: installRedis });
@@ -655,7 +688,10 @@ export async function cmdCheck(opts: CheckOptions): Promise<void> {
       name: `redis-${id}`,
       ok: false,
       message: `Redis riêng '${id}' (dùng bởi ${inst.members.join(", ")}) KHÔNG chạy — các app đó mất cache/hàng đợi.`,
-      fix: () => runCmd("systemctl", ["enable", "--now", redisUnitFor(id)]),
+      fix: () => {
+        ensureConfDirTraversable(); // bản cũ tạo /etc/napp 0750 -> user nr_<id> không mở được cấu hình
+        runCmd("systemctl", ["enable", "--now", redisUnitFor(id)]);
+      },
     });
   }
   // Đơn vị còn dùng Redis DÙNG CHUNG (không mật khẩu, mọi user trên máy đọc được).
@@ -696,13 +732,20 @@ export async function cmdCheck(opts: CheckOptions): Promise<void> {
     findings.push({ name: "fail2ban", ok: false, message: "fail2ban chưa cài (khuyến nghị cài để chống brute-force).", fix: installFail2ban });
   }
 
-  // UFW
-  if (commandExists("ufw")) {
+  // Tường lửa: UFW (Ubuntu/Debian) / firewalld (họ RHEL)
+  if (isRhel()) {
+    if (commandExists("firewall-cmd")) {
+      if (firewalldActive()) ok("firewalld đã cài và đang chạy");
+      else warn("firewalld đã cài nhưng CHƯA chạy — chạy 'napp firewall apply' để bật (napp mở SSH trước rồi mới nạp lại luật).");
+    } else {
+      findings.push({ name: "firewalld", ok: false, message: "firewalld chưa cài (khuyến nghị để giới hạn cổng mở).", fix: installFirewall });
+    }
+  } else if (commandExists("ufw")) {
     const status = execCapture("ufw", ["status"]).stdout;
     if (/Status: active/i.test(status)) ok("UFW đã cài và đang active");
     else warn("UFW đã cài nhưng CHƯA active — chạy 'napp firewall apply' để bật (script sẽ tự thêm rule SSH trước khi bật để tránh khoá bạn ra ngoài).");
   } else {
-    findings.push({ name: "ufw", ok: false, message: "UFW chưa cài (khuyến nghị để giới hạn cổng mở).", fix: installUfw });
+    findings.push({ name: "ufw", ok: false, message: "UFW chưa cài (khuyến nghị để giới hạn cổng mở).", fix: installFirewall });
   }
 
   if (findings.length === 0) {
@@ -722,8 +765,8 @@ export async function cmdCheck(opts: CheckOptions): Promise<void> {
     return;
   }
 
-  if (!hasApt) {
-    warn("Bỏ qua --fix vì không có apt-get trên hệ thống này.");
+  if (!pm) {
+    warn("Bỏ qua --fix vì không có apt-get / dnf trên hệ thống này.");
     return;
   }
 

@@ -6,7 +6,7 @@ import { requireApp, getAcmeEmail, setAcmeEmail } from "../lib/state";
 
 function requireCertbot(): void {
   if (!commandExists("certbot")) {
-    die("certbot chưa được cài. Chạy 'napp check --fix' trước, hoặc: apt install certbot python3-certbot-nginx");
+    die("certbot chưa được cài. Chạy 'napp check --fix' trước (họ RHEL: napp tự bật EPEL để cài certbot).");
   }
 }
 

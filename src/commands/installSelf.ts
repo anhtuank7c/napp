@@ -1,9 +1,21 @@
 import { existsSync, copyFileSync, chmodSync, unlinkSync, realpathSync } from "node:fs";
 import { runCmd, requireRoot, ensureDir, writeFile } from "../lib/exec";
 import { info, ok, warn } from "../lib/log";
+import { isRhel, ensureSudoVisible } from "../lib/platform";
+
+function realpathSafe(p: string): string | undefined {
+  try {
+    return realpathSync(p);
+  } catch {
+    return undefined;
+  }
+}
 
 const INSTALL_PATH = "/usr/local/bin/napp";
-export const MOTD_PATH = "/etc/update-motd.d/99-napp";
+// Ubuntu chạy script trong update-motd.d lúc đăng nhập (pam_motd). Họ RHEL không
+// có cơ chế đó (motd.d chỉ nhận file tĩnh) -> dùng profile.d, chỉ in khi đăng
+// nhập SSH tương tác.
+export const MOTD_PATH = isRhel() ? "/etc/profile.d/zz-napp-motd.sh" : "/etc/update-motd.d/99-napp";
 
 // Banner giới thiệu napp, hiển thị mỗi khi đăng nhập SSH (Ubuntu update-motd.d).
 // Phiên bản được lấy ĐỘNG qua `napp version` nên luôn khớp bản đang cài kể cả
@@ -45,6 +57,19 @@ BANNER
 // Ghi (hoặc ghi đè) file banner MOTD. Tách riêng để 'napp update' có thể làm
 // mới banner theo bản mới nhất mà không cần chạy lại 'napp install'.
 export function writeMotdBanner(): void {
+  if (isRhel()) {
+    // profile.d được 'source' (không exec): bọc trong hàm + điều kiện, không 'exit'.
+    const body = motdScript().replace(/^#!.*\n/, "").replace("command -v napp >/dev/null 2>&1 || exit 0", "command -v napp >/dev/null 2>&1 || return 0");
+    writeFile(
+      MOTD_PATH,
+      `# Managed by napp — banner khi đăng nhập SSH (họ RHEL). Gỡ: napp uninstall\n` +
+        `if [ -n "\${SSH_CONNECTION:-}" ] && [ -t 1 ] && [ -z "\${NAPP_MOTD_SHOWN:-}" ]; then\n` +
+        `  export NAPP_MOTD_SHOWN=1\n` +
+        `  __napp_motd() {\n${body}\n  }\n  __napp_motd\n  unset -f __napp_motd\nfi\n`,
+      0o644
+    );
+    return;
+  }
   writeFile(MOTD_PATH, motdScript(), 0o755);
 }
 
@@ -68,6 +93,8 @@ export function cmdInstallSelf(): void {
     chmodSync(INSTALL_PATH, 0o755);
     ok(`Đã cài vào ${INSTALL_PATH}`);
   }
+  // Họ RHEL: secure_path của sudo không có /usr/local/bin -> 'sudo napp' không tìm thấy lệnh.
+  ensureSudoVisible("napp");
   writeMotdBanner();
   ok("Đã cài banner giới thiệu SSH (hiện mỗi lần đăng nhập).");
   info("Giờ bạn có thể chạy napp từ bất cứ đâu, ví dụ: sudo napp check --fix");
@@ -76,6 +103,7 @@ export function cmdInstallSelf(): void {
 export function cmdUninstallSelf(): void {
   requireRoot();
   let removed = false;
+  if (isRhel() && existsSync("/usr/bin/napp") && realpathSafe("/usr/bin/napp") === INSTALL_PATH) unlinkSync("/usr/bin/napp");
   if (existsSync(INSTALL_PATH)) {
     unlinkSync(INSTALL_PATH);
     ok(`Đã gỡ ${INSTALL_PATH} (các app, systemd service và cấu hình nginx hiện có vẫn giữ nguyên)`);
