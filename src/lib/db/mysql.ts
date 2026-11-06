@@ -1,5 +1,5 @@
 import { execCapture, runCmd, commandExists, ensureDir, writeFile, shQuote, state as execState } from "../exec";
-import { die, dryRunNotice, ok, info } from "../log";
+import { die, dryRunNotice, ok, info, warn } from "../log";
 import type { HardwareProfile } from "../hardware";
 import type { CreatedDb, DbDriver } from "./types";
 import { randomPassword, anyUnitActive, processRunning, connectionUrl, preflightInstall } from "./common";
@@ -13,9 +13,71 @@ import { pkgInstalled, pkgInstall, pkgRemove, isRhel, mysqlConfDir } from "../pl
 // Thư mục drop-in mà file cấu hình chính include sẵn: /etc/mysql/conf.d (Ubuntu)
 // hoặc /etc/my.cnf.d (họ RHEL).
 export const mysqlTuningPath = (): string => `${mysqlConfDir()}/napp-tuning.cnf`;
-// Họ RHEL: MariaDB mặc định nghe MỌI địa chỉ (bind-address bị comment) — khác
-// Ubuntu (127.0.0.1). napp ghim về localhost ngay lúc cài.
+// Họ RHEL: MariaDB/MySQL mặc định nghe MỌI địa chỉ (bind-address bị comment,
+// MySQL còn mở cả X Protocol 33060) — khác Ubuntu (127.0.0.1). napp ghim về
+// localhost ngay lúc cài.
 const RHEL_BIND_CONF = "/etc/my.cnf.d/napp-bind.cnf";
+
+// Tên gói MySQL trên họ RHEL khác nhau theo bản: EL9 'mysql-server' (8.0),
+// EL10 CHỈ có 'mysql8.4-server', Fedora có cả hai. Gói versioned không
+// Provides 'mysql-server' -> 'rpm -q mysql-server' sẽ báo "chưa cài" nhầm.
+const RHEL_MYSQL_SERVER_RE = /^(?:mysql(\d+\.\d+)?|community-mysql)-server$/;
+const RHEL_MYSQL_CLIENT_RE = /^(?:mysql(\d+\.\d+)?|community-mysql)$/;
+
+/** Gói MySQL (server + client) ĐANG CÀI — tên thật, để nhận diện và gỡ. */
+function rhelMysqlInstalled(): string[] {
+  const res = execCapture("rpm", ["-qa", "--qf", "%{NAME}\n"]);
+  return res.stdout
+    .split("\n")
+    .map((x) => x.trim())
+    .filter((n) => RHEL_MYSQL_SERVER_RE.test(n) || RHEL_MYSQL_CLIENT_RE.test(n));
+}
+
+/** Gói sẽ cài: nhánh versioned mới nhất kho có (8.4 LTS), không có thì mysql-server. */
+function rhelMysqlPackages(): string[] {
+  const res = execCapture("dnf", ["-q", "repoquery", "--available", "--qf", "%{name}\n", "mysql*-server"]);
+  const versioned = [...new Set(res.stdout.split("\n").map((x) => x.trim()))]
+    .map((n) => ({ n, v: n.match(/^mysql(\d+)\.(\d+)-server$/) }))
+    .filter((x) => x.v)
+    .sort((a, b) => Number(b.v![1]) - Number(a.v![1]) || Number(b.v![2]) - Number(a.v![2]));
+  const server = versioned[0]?.n;
+  return server ? [server, server.replace(/-server$/, "")] : ["mysql-server", "mysql"];
+}
+
+/** File log truy vấn chậm: thư mục log có sẵn của từng gói. */
+function slowLogPath(variant: Variant): string {
+  if (isRhel() && variant === "mariadb") return "/var/log/mariadb/slow.log";
+  return "/var/log/mysql/slow.log";
+}
+
+/**
+ * MySQL trên họ RHEL khởi tạo bằng --initialize-insecure: root@localhost
+ * KHÔNG có mật khẩu — mọi user trên máy gõ 'mysql -uroot' là thành quản trị.
+ * Chuyển root sang auth_socket (như Ubuntu): chỉ user root của hệ điều hành
+ * đăng nhập được, qua unix socket.
+ */
+function secureRhelMysqlRoot(): void {
+  if (execState.dryRun) return dryRunNotice("Sẽ chuyển root@localhost của MySQL sang auth_socket");
+  const plugin = execCapture("mysql", ["-N", "-uroot", "-e", "SELECT plugin FROM mysql.user WHERE user='root' AND host='localhost'"]);
+  if (plugin.code !== 0) {
+    // Đã có mật khẩu/đã khoá từ trước (máy cài tay) — không đụng vào.
+    if (execCapture("mysql", ["-e", "SELECT 1"]).code !== 0) warn("MySQL: root@localhost đã có mật khẩu — napp cần đăng nhập không mật khẩu bằng root (auth_socket) để quản lý database.");
+    return;
+  }
+  if (plugin.stdout.trim() === "auth_socket") return;
+  const res = execCapture("mysql", ["-uroot"], {
+    input:
+      "INSTALL PLUGIN auth_socket SONAME 'auth_socket.so';\n" +
+      "ALTER USER 'root'@'localhost' IDENTIFIED WITH auth_socket;\n",
+  });
+  // INSTALL PLUGIN báo lỗi nếu plugin đã nạp — chạy lại riêng ALTER USER.
+  if (res.code !== 0) execCapture("mysql", ["-uroot", "-e", "ALTER USER 'root'@'localhost' IDENTIFIED WITH auth_socket"]);
+  if (execCapture("mysql", ["-N", "-e", "SELECT plugin FROM mysql.user WHERE user='root' AND host='localhost'"]).stdout.trim() === "auth_socket") {
+    ok("MySQL: root@localhost chỉ đăng nhập được bằng user root của hệ thống (auth_socket), không còn mật khẩu rỗng.");
+  } else {
+    warn("MySQL: KHÔNG chuyển được root@localhost sang auth_socket — root đang KHÔNG có mật khẩu. Chạy 'sudo mysql_secure_installation'.");
+  }
+}
 
 type Variant = "mariadb" | "mysql";
 
@@ -83,7 +145,7 @@ table_definition_cache = ${t.tableOpenCache}
 thread_cache_size = ${Math.max(8, hw.cpuCores * 4)}
 
 slow_query_log = 1
-slow_query_log_file = /var/log/mysql/slow.log
+slow_query_log_file = ${slowLogPath(variant)}
 long_query_time = 2
 `;
 }
@@ -91,9 +153,10 @@ long_query_time = 2
 function makeMysqlDriver(variant: Variant): DbDriver {
   const label = variant === "mariadb" ? "MariaDB" : "MySQL";
   const packages = (): string[] =>
-    isRhel() ? (variant === "mariadb" ? ["mariadb-server", "mariadb"] : ["mysql-server", "mysql"]) : variant === "mariadb" ? ["mariadb-server", "mariadb-client"] : ["mysql-server", "mysql-client"];
+    isRhel() ? (variant === "mariadb" ? ["mariadb-server", "mariadb"] : rhelMysqlPackages()) : variant === "mariadb" ? ["mariadb-server", "mariadb-client"] : ["mysql-server", "mysql-client"];
   const purgeExtra = variant === "mariadb" ? ["mariadb-common"] : ["mysql-common"];
-  const primaryUnit = variant === "mariadb" ? "mariadb" : "mysql";
+  // MySQL trên họ RHEL chạy dưới tên mysqld.service.
+  const primaryUnit = variant === "mariadb" ? "mariadb" : isRhel() ? "mysqld" : "mysql";
 
   const driver: DbDriver = {
     engine: variant,
@@ -101,7 +164,7 @@ function makeMysqlDriver(variant: Variant): DbDriver {
     port: 3306,
     extraPorts: variant === "mysql" ? [33060] : undefined,
     // Gói MariaDB của Ubuntu cài kèm alias mysql.service — kiểm cả hai.
-    systemdUnits: variant === "mariadb" ? ["mariadb", "mysql"] : ["mysql"],
+    systemdUnits: variant === "mariadb" ? ["mariadb", "mysql"] : ["mysql", "mysqld"],
     dumpExt: ".sql.gz",
     maxNameLength: 64,
 
@@ -109,7 +172,9 @@ function makeMysqlDriver(variant: Variant): DbDriver {
       if (variant === "mariadb") return pkgInstalled("mariadb-server") || commandExists("mariadbd");
       // MariaDB >= 10.5 cũng có /usr/sbin/mysqld (symlink tới mariadbd) — phải
       // loại trừ để không nhận nhầm MariaDB thành MySQL.
-      return pkgInstalled("mysql-server") || (commandExists("mysqld") && !commandExists("mariadbd"));
+      if (commandExists("mariadbd")) return false;
+      if (isRhel()) return rhelMysqlInstalled().some((n) => RHEL_MYSQL_SERVER_RE.test(n));
+      return pkgInstalled("mysql-server") || commandExists("mysqld");
     },
 
     isRunning() {
@@ -137,22 +202,31 @@ function makeMysqlDriver(variant: Variant): DbDriver {
             `  Muốn chuyển hẳn sang ${label}: backup, 'sudo napp db engine delete ${other.engine}', rồi cài ${label} và import lại.`
         );
       }
-      if (isRhel() && variant === "mysql") {
-        die("MySQL trên họ RHEL chưa được napp hỗ trợ ở bản này — dùng MariaDB (tương thích giao thức MySQL): sudo napp db engine create mariadb");
-      }
       preflightInstall(label, 3306, "/var/lib/mysql", 1024);
       info(`Đang cài đặt ${label} server...`);
       pkgInstall(packages());
       if (isRhel()) {
-        writeFile(RHEL_BIND_CONF, "# Managed by napp — chỉ nhận kết nối từ chính máy này.\n[mysqld]\nbind-address = 127.0.0.1\n", 0o644);
+        writeFile(
+          RHEL_BIND_CONF,
+          "# Managed by napp — chỉ nhận kết nối từ chính máy này.\n[mysqld]\nbind-address = 127.0.0.1\n" +
+            (variant === "mysql" ? "mysqlx-bind-address = 127.0.0.1\n" : ""),
+          0o644
+        );
       }
       runCmd("systemctl", ["enable", "--now", primaryUnit]);
+      if (isRhel() && variant === "mysql") secureRhelMysqlRoot();
       ok(`Đã cài ${label} (khuyến nghị chạy 'sudo mysql_secure_installation' để rà soát cấu hình bảo mật)`);
     },
 
     uninstall({ purge }) {
       runCmd("systemctl", ["disable", "--now", primaryUnit], { silentFail: true });
-      pkgRemove(purge ? [...packages(), `${variant}-server-core`, ...purgeExtra] : packages(), purge);
+      if (isRhel()) {
+        // Gỡ đúng tên gói thật (mysql8.4-server...), không phải tên "provides".
+        const real = variant === "mysql" ? rhelMysqlInstalled() : packages();
+        pkgRemove(real, purge);
+      } else {
+        pkgRemove(purge ? [...packages(), `${variant}-server-core`, ...purgeExtra] : packages(), purge);
+      }
       if (purge) runCmd("rm", ["-rf", "/var/lib/mysql", mysqlTuningPath(), RHEL_BIND_CONF], { silentFail: true });
     },
 

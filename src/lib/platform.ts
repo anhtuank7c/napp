@@ -255,15 +255,19 @@ export function ensureRedisConfInclude(): void {
   const main = redisMainConf();
   if (!existsSync(main)) return;
   const content = readFileSync(main, "utf8");
+  // napp 1.37.0 ghi lại file này thành root:root -> valkey không đọc được.
+  // Trả chủ/nhóm về đúng như gói rpm khai báo (idempotent, rẻ).
+  if (isRhel()) execCapture("rpm", ["--setugids", pkgInstalled("valkey") ? "valkey" : "redis"]);
   if (content.includes("conf.d/*.conf")) return;
-  writeFile(main, `${content.replace(/\n*$/, "\n")}include ${redisConfDir()}/*.conf\n`, 0o640, isRhel() ? { group: redisConfGroup(main) } : {});
+  writeFile(main, `${content.replace(/\n*$/, "\n")}include ${redisConfDir()}/*.conf\n`, 0o640, isRhel() ? redisConfOwnership(main) : {});
 }
 
-// Họ RHEL: redis.conf/valkey.conf thuộc root:redis (hoặc root:valkey) 0640 —
-// ghi lại phải giữ nhóm đó, không thì redis không đọc được cấu hình của chính nó.
-function redisConfGroup(path: string): string | undefined {
-  const g = execCapture("stat", ["-c", "%G", path]).stdout.trim();
-  return g && g !== "root" ? g : undefined;
+// Họ RHEL: redis.conf/valkey.conf thuộc root:redis, redis:root hay valkey:root
+// (tuỳ bản gói) 0640 — ghi lại phải giữ NGUYÊN chủ và nhóm, không thì
+// redis/valkey không đọc được cấu hình của chính nó và không khởi động lại được.
+function redisConfOwnership(path: string): { owner?: string; group?: string } {
+  const [u, g] = execCapture("stat", ["-c", "%U %G", path]).stdout.trim().split(" ");
+  return { ...(u && u !== "root" ? { owner: u } : {}), group: g || "root" };
 }
 
 /** Thư mục drop-in cấu hình MariaDB/MySQL được file chính include sẵn. */

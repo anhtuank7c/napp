@@ -16,6 +16,28 @@ export const NAPP_UPDATE_URL_DEFAULT =
 export const CHANGELOG = `\
 # Changelog
 
+## 1.38.0
+- Họ RHEL đợt 2 — mọi tính năng đã chạy trên RHEL/Rocky/Alma/Oracle/
+  CentOS Stream 9-10, Fedora:
+  * doctor system/upgrade dùng dnf: check-update + errata bảo mật
+    (updateinfo --security), needs-restarting -r, CVE nginx/Node đối chiếu
+    rpm --changelog; upgrade bằng dnf, restart dịch vụ còn thư viện cũ;
+    --node-major qua NodeSource rpm. CentOS Stream không có errata -> --all.
+  * MySQL: mysql-server (EL9, 8.0) / mysql8.4-server (EL10, Fedora), unit
+    mysqld; ghim 127.0.0.1 (cả cổng 33060), root chuyển sang auth_socket
+    (gói gốc để root KHÔNG mật khẩu).
+  * MongoDB: kho yum chính thức redhat/8|9|10, /var/lib/mongo, policy
+    mongodb-selinux khi SELinux bật. Fedora: dùng gói RHEL 10 + cảnh báo.
+  * tune: slow log MariaDB ở /var/log/mariadb.
+- Sửa: tune apply làm valkey chết trên họ RHEL (valkey.conf bị ghi thành
+  root:root) — giữ chủ/nhóm; check --fix sửa máy đã dính (rpm --setugids).
+- Sửa: tune apply lỗi "keepalive_timeout directive is duplicate" trên họ
+  RHEL; tự bật gzip khi nginx.conf chưa bật.
+- Sửa (mọi distro): lệnh không sudo chết vì EACCES state.json sau 1.37.0.
+- Sửa: cảnh báo nhầm MongoDB nghe ra ngoài (chú thích cuối dòng bindIp).
+- Sửa: nginx harden lỗi "server_tokens directive is duplicate" trên Debian 13
+  (nginx.conf đã đặt sẵn) — không khai báo lại.
+
 ## 1.37.0
 - Chạy trên họ RHEL: RHEL, Rocky, AlmaLinux, Oracle Linux, CentOS Stream 9/10,
   Fedora 40+. install.sh + check --fix dùng dnf, tự bật EPEL (certbot, fail2ban),

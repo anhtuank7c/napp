@@ -271,7 +271,8 @@ export async function cmdTuneApply(opts: TuneApplyOptions): Promise<void> {
   // nginx
   if (commandExists("nginx")) {
     ensureDir("/etc/nginx/conf.d", 0o755);
-    writeFile(NGINX_TUNING_CONF, renderNginxTuningConf(hw.cpuCores, hw.tier), 0o644);
+    const mainConf = existsSync("/etc/nginx/nginx.conf") ? readFileSync("/etc/nginx/nginx.conf", "utf8") : "";
+    writeFile(NGINX_TUNING_CONF, renderNginxTuningConf(hw.cpuCores, hw.tier, mainConf), 0o644);
     patchNginxMainConf(plan.workerConnections);
     const test = execCapture("nginx", ["-t"]);
     if (test.code !== 0) {

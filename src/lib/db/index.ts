@@ -127,7 +127,7 @@ function bindSetting(engine: DbEngine): string {
     case "mariadb":
       return rhel ? "bind-address trong /etc/my.cnf.d/napp-bind.cnf (hoặc mariadb-server.cnf)" : "bind-address trong /etc/mysql/mariadb.conf.d/50-server.cnf";
     case "mysql":
-      return rhel ? "bind-address / mysqlx-bind-address trong /etc/my.cnf.d/mysql-server.cnf" : "bind-address / mysqlx-bind-address trong /etc/mysql/mysql.conf.d/mysqld.cnf";
+      return rhel ? "bind-address / mysqlx-bind-address trong /etc/my.cnf.d/napp-bind.cnf" : "bind-address / mysqlx-bind-address trong /etc/mysql/mysql.conf.d/mysqld.cnf";
     case "postgresql":
       return rhel ? "listen_addresses trong /var/lib/pgsql/data/postgresql.conf" : "listen_addresses trong /etc/postgresql/<phiên bản>/main/postgresql.conf";
     case "mongodb":

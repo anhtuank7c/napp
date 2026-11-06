@@ -7,6 +7,7 @@ import { loadState, slugFor, NGINX_AVAILABLE, type AppRecord } from "../lib/stat
 import { writeAppLocationsConf, injectLocationsInclude } from "../lib/locationsfile";
 import {
   renderNginxHardeningConf,
+  mainConfServerTokensNotOff,
   renderDefaultServerConf,
   renderNappProxyConf,
   renderScannerBlockConf,
@@ -449,7 +450,11 @@ export function cmdNginxHarden(): void {
     info("nginx < 1.19.4 — dùng chứng chỉ tự ký cho server chặn HTTPS (thay ssl_reject_handshake).");
   }
 
-  writeFile(NGINX_HARDENING_CONF, renderNginxHardeningConf(), 0o644);
+  const mainConf = existsSync("/etc/nginx/nginx.conf") ? readFileSync("/etc/nginx/nginx.conf", "utf8") : "";
+  if (mainConfServerTokensNotOff(mainConf)) {
+    warn("/etc/nginx/nginx.conf đặt server_tokens khác 'off' — phiên bản nginx vẫn lộ. Sửa dòng đó thành 'server_tokens off;'.");
+  }
+  writeFile(NGINX_HARDENING_CONF, renderNginxHardeningConf(mainConf), 0o644);
   writeFile(NGINX_DEFAULT_SERVER_CONF, renderDefaultServerConf({ ipv6, sslMode, certPath, keyPath }), 0o644);
 
   const test = execCapture("nginx", ["-t"]);

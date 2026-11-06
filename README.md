@@ -43,6 +43,9 @@ Cùng lệnh cài, cùng mọi lệnh `napp`. Những gì napp tự lo khác đi
 | Redis | `redis-server` | `redis` hoặc **Valkey** (bản thay thế tương thích giao thức, ở những bản không còn gói redis — RHEL 10, Fedora, Alma 9 mới). Lệnh `redis-cli` → `valkey-cli` |
 | PostgreSQL | sẵn sàng sau khi cài | napp chạy `postgresql-setup --initdb`, đổi `pg_hba.conf` từ `ident` sang `scram-sha-256` để app đăng nhập bằng mật khẩu |
 | MariaDB | nghe 127.0.0.1 | gói gốc nghe **mọi địa chỉ** → napp ghim về 127.0.0.1 (`/etc/my.cnf.d/napp-bind.cnf`) |
+| MySQL | `mysql-server` (8.0) | `mysql-server` (EL9, 8.0) hoặc `mysql8.4-server` (EL10/Fedora, 8.4 LTS), unit `mysqld`. Gói gốc nghe mọi địa chỉ và root **không mật khẩu** → napp ghim 127.0.0.1 (cả cổng X 33060) và chuyển root sang `auth_socket` |
+| MongoDB | kho apt của MongoDB | kho yum chính thức `repo.mongodb.org/yum/redhat/<8\|9\|10>`; dữ liệu ở `/var/lib/mongo`. Fedora không được MongoDB hỗ trợ chính thức → dùng gói của RHEL 10 kèm cảnh báo |
+| Bản vá (`doctor`) | `apt` + kho `-security` | `dnf check-update` + errata `dnf updateinfo --security` (RHSA/ALSA/RLSA/FEDORA-…); reboot theo `dnf needs-restarting -r`; CVE nginx đối chiếu `rpm -q --changelog`. CentOS Stream không có errata → napp nhắc dùng `--all` |
 | SSL tự gia hạn | `certbot.timer` tự bật | napp bật `certbot-renew.timer` (gói EPEL để tắt) |
 | `sudo napp` | `/usr/local/bin` nằm trong `secure_path` | **không** → napp symlink `napp`, `bun` vào `/usr/bin` |
 | Banner SSH | `update-motd.d` | `/etc/profile.d/zz-napp-motd.sh` |
@@ -52,12 +55,11 @@ Cùng lệnh cài, cùng mọi lệnh `napp`. Những gì napp tự lo khác đi
 - `httpd_can_network_connect` bật (bền vững) khi cài nginx / tạo app — thiếu nó nginx proxy tới app là **502** với `Permission denied` trong error.log dù app vẫn chạy.
 - Thư mục asset tĩnh / upload **ngoài** `/var/www` được gán nhãn `httpd_sys_content_t` (trong `/var/www` policy đã lo sẵn).
 - Redis riêng của từng app: thư mục dữ liệu/socket/cấu hình mang nhãn `redis_*`, cổng 6400-6499 mang nhãn `redis_port_t`.
+- MongoDB: cài policy chính thức [`mongodb-selinux`](https://github.com/mongodb/mongodb-selinux) (MongoDB không kèm policy trong gói rpm; thiếu nó mongod có thể không khởi động được).
 - `napp check` báo nếu boolean bị tắt hoặc thiếu `semanage`, và `--fix` sửa được.
 
-**Chưa hỗ trợ trên họ RHEL ở bản này** (đang làm): MySQL, MongoDB, phần kiểm tra bản vá
-của `napp doctor` (`doctor system`, `doctor upgrade` — phần quét dependencies vẫn chạy),
-tuning PostgreSQL. Tạm thời: `dnf updateinfo list --security`, `dnf needs-restarting -r`.
-Họ RHEL **bản 8** không được hỗ trợ.
+Mọi tính năng của napp đều chạy trên họ RHEL (từ 1.38.0: MySQL, MongoDB, `napp doctor
+system/upgrade`, `napp tune`). Họ RHEL **bản 8** không được hỗ trợ.
 
 ---
 
@@ -308,9 +310,9 @@ sudo napp app create api.example.com --repo ... --db postgresql
 | Engine | Nguồn cài | `DB_CONNECTION` | `DATABASE_URL` |
 |---|---|---|---|
 | `mariadb` (mặc định) | kho của distro | `mysql` | `mysql://user:pass@127.0.0.1:3306/db` |
-| `mysql` | kho Ubuntu (họ RHEL: chưa hỗ trợ) | `mysql` | `mysql://user:pass@127.0.0.1:3306/db` |
+| `mysql` | kho của distro (Ubuntu 8.0, RHEL 9 → 8.0, RHEL 10/Fedora → 8.4 LTS) | `mysql` | `mysql://user:pass@127.0.0.1:3306/db` |
 | `postgresql` | kho của distro (Ubuntu 24.04 → 16, RHEL 9 → 13, RHEL 10 → 16) | `pgsql` | `postgresql://user:pass@127.0.0.1:5432/db` |
-| `mongodb` | kho chính thức MongoDB 8.0 (họ RHEL: chưa hỗ trợ) | `mongodb` | `mongodb://user:pass@127.0.0.1:27017/db?authSource=db` |
+| `mongodb` | kho chính thức MongoDB 8.0 (apt hoặc yum) | `mongodb` | `mongodb://user:pass@127.0.0.1:27017/db?authSource=db` |
 
 `.env` của app vẫn có đủ `DB_HOST/DB_PORT/DB_DATABASE/DB_USERNAME/DB_PASSWORD`
 như trước, thêm **`DATABASE_URL`** — biến mà Prisma, Drizzle, TypeORM, Knex,

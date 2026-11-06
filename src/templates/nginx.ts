@@ -130,11 +130,20 @@ proxy_busy_buffers_size 256k;
 `;
 
 // Cấu hình hardening ở mức http (áp cho toàn nginx).
-export function renderNginxHardeningConf(): string {
+// mainConf: nội dung nginx.conf. Debian 13 đã đặt sẵn 'server_tokens off;' —
+// khai báo lại ở conf.d là lỗi "server_tokens directive is duplicate".
+export function renderNginxHardeningConf(mainConf = ""): string {
+  const inMain = /^\s*server_tokens\s/m.test(mainConf);
   return `# Managed by napp — hardening nginx (chạy \`napp nginx hardening enable\`).
 # Ẩn phiên bản nginx trong header/response lỗi để đỡ lộ thông tin cho kẻ dò quét.
-server_tokens off;
+${inMain ? "# server_tokens: nginx.conf đã khai báo — không khai báo lại (lỗi \"directive is duplicate\")." : "server_tokens off;"}
 `;
+}
+
+/** nginx.conf đặt server_tokens khác 'off' (vd 'on'/'build') — hardening không ghi đè được từ conf.d. */
+export function mainConfServerTokensNotOff(mainConf: string): boolean {
+  const m = mainConf.match(/^\s*server_tokens\s+(\S+?)\s*;/m);
+  return Boolean(m && m[1] !== "off");
 }
 
 export interface DefaultServerOptions {
@@ -666,19 +675,24 @@ function sanitizeUpstreamName(domain: string): string {
 // Tuning nginx theo phần cứng thực tế — worker_processes/connections co giãn
 // theo số lõi CPU. Ghi vào /etc/nginx/conf.d/napp-tuning.conf; worker_processes
 // nằm ở khối `main` nên còn cần patch nginx.conf riêng (xem tune.ts).
-export function renderNginxTuningConf(cpuCores: number, tier: string): string {
-  const workerConnections = tier === "micro" ? 1024 : tier === "small" ? 2048 : 4096;
+//
+// mainConf: nội dung nginx.conf đang có. Chỉ thị nào nginx.conf ĐÃ đặt (không bị
+// comment) thì bỏ qua — khai báo lại trong conf.d là lỗi "directive is duplicate"
+// (nginx.conf của họ RHEL đặt sẵn keepalive_timeout; của Ubuntu thì không).
+// Ngược lại 'gzip on' chỉ bật ở Ubuntu — RHEL tắt nên phải bật ở đây.
+export function renderNginxTuningConf(cpuCores: number, tier: string, mainConf = ""): string {
+  const inMain = (d: string): boolean => new RegExp(`^\\s*${d}\\s`, "m").test(mainConf);
+  const line = (d: string, v: string): string => (inMain(d) ? `# ${d}: đã đặt trong nginx.conf — giữ nguyên giá trị ở đó` : `${d} ${v};`);
+  const gzipOn = /^\s*gzip\s+on\s*;/m.test(mainConf);
   return `# Managed by napp — TỰ ĐỘNG SINH RA bởi \`napp tune apply\` (phần cứng: ${cpuCores} lõi, tier ${tier}).
-keepalive_timeout 65;
-keepalive_requests 1000;
-client_body_timeout 12;
-client_header_timeout 12;
-send_timeout 10;
+${line("keepalive_timeout", "65")}
+${line("keepalive_requests", "1000")}
+${line("client_body_timeout", "12")}
+${line("client_header_timeout", "12")}
+${line("send_timeout", "10")}
 
-gzip_vary on;
-# 'gzip on;' KHÔNG khai báo lại ở đây vì nginx.conf mặc định trên Ubuntu đã
-# bật sẵn — khai báo lại sẽ gây lỗi "gzip directive is duplicate". Nếu server
-# của bạn đã tắt gzip trong nginx.conf, hãy bật lại ở đó.
+${inMain("gzip") ? "# gzip: nginx.conf đã khai báo — không khai báo lại (lỗi \"gzip directive is duplicate\")." : "gzip on;"}${gzipOn || !inMain("gzip") ? "" : "\n# CẢNH BÁO: nginx.conf đang TẮT gzip — các dòng gzip_* dưới đây không có tác dụng."}
+${line("gzip_vary", "on")}
 #
 # gzip_proxied quyết định có nén hay không khi REQUEST CỦA CLIENT mang header
 # 'Via' — nginx lấy sự hiện diện của Via làm dấu hiệu "request này đã đi qua một
@@ -693,10 +707,10 @@ gzip_vary on;
 # Cloudflare không gửi Via nên site sau Cloudflare thường không dính. Nhưng
 # Fastly, Varnish, squid và phần lớn proxy doanh nghiệp thì CÓ — và khi dính thì
 # triệu chứng là "chậm với một số người dùng", gần như không thể lần ra.
-gzip_proxied any;
-gzip_comp_level 5;
-gzip_min_length 256;
-gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
+${line("gzip_proxied", "any")}
+${line("gzip_comp_level", "5")}
+${line("gzip_min_length", "256")}
+${line("gzip_types", "text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript")}
 
 open_file_cache max=10000 inactive=60s;
 open_file_cache_valid 80s;

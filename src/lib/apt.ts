@@ -22,9 +22,10 @@ export interface PendingUpdate {
 
 // Các gói ĐỤNG TRỰC TIẾP tới bề mặt tấn công của một VPS chạy web: lộ ra
 // Internet (nginx/openssh), xử lý dữ liệu không tin cậy (openssl/zlib/curl),
+// (tên gói của cả Ubuntu/Debian lẫn họ RHEL: libssl3 / openssl-libs, libc6 / glibc...)
 // hoặc chạy mã ứng dụng (nodejs). Bản vá cho nhóm này cần ưu tiên cao hơn.
 const CRITICAL_PKG_RE =
-  /^(nginx|nginx-\w+|openssl|libssl[0-9.]*|libcrypto\S*|openssh-\S+|libc6|libc-bin|zlib1g|libcurl\S*|curl|nodejs|npm|mariadb-\S+|mysql-\S+|libmariadb\S*|postgresql\S*|libpq\S*|mongodb-\S+|redis\S*|certbot|python3-certbot\S*|sudo|systemd|libsystemd\S*|libexpat\S*|libxml2|libpcre\S*|git)$/;
+  /^(nginx|nginx-\w+|openssl|openssl-libs|libssl[0-9.]*|libcrypto\S*|openssh(-\S+)?|libc6|libc-bin|glibc(-\S+)?|zlib1g|zlib(-ng)?(-\S+)?|libcurl\S*|curl|nodejs|npm|mariadb(-\S+)?|mysql\S*|libmariadb\S*|postgresql\S*|libpq\S*|mongodb-\S+|redis\S*|valkey\S*|certbot|python3-certbot\S*|sudo|systemd(-libs)?|libsystemd\S*|libexpat\S*|expat|libxml2|libpcre\S*|pcre2\S*|git(-core)?)$/;
 
 export function hasApt(): boolean {
   return commandExists("apt-get");

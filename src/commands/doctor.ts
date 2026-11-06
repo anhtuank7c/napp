@@ -2,7 +2,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { ask } from "../lib/prompt";
 import { gunzipSync } from "node:zlib";
 import { execCapture, runCmd, commandExists, requireRoot, isServiceActive } from "../lib/exec";
-import { isRhel } from "../lib/platform";
+import { installNodeSource } from "../lib/platform";
+import { hasDnf, dnfPendingUpdates, dnfRebootRequired, dnfIndexAgeSeconds, dnfRefresh, dnfUpgrade, distroHasErrata } from "../lib/dnfupdates";
 import { info, ok, warn, danger, colorText, section, step, die, type LogColor } from "../lib/log";
 import { hasApt, aptGet, waitForAptLocks, APT_LOCK_TIMEOUT_S, pendingUpdates, rebootRequired, unitStaleLibraries, isCriticalPackage, aptIndexAgeSeconds, type PendingUpdate } from "../lib/apt";
 import { assessNginxCves, assessNode, nodeFixedVersion, nodeLifecycle, type NodeAssessment, type NodeFeed } from "../lib/cve";
@@ -58,11 +59,41 @@ async function confirm(question: string, autoYes: boolean): Promise<boolean> {
   return /^y(es)?$/i.test(ans.trim());
 }
 
+// --- apt (Ubuntu/Debian) hay dnf (họ RHEL): cùng một mặt tiền cho doctor ---
+const useDnf = (): boolean => !hasApt() && hasDnf();
+const pmLabel = (): string => (useDnf() ? "dnf" : "apt");
+const sysPendingUpdates = (): PendingUpdate[] => (useDnf() ? dnfPendingUpdates() : pendingUpdates());
+const sysRebootRequired = (): { required: boolean; packages: string[] } => (useDnf() ? dnfRebootRequired() : rebootRequired());
+const sysIndexAgeSeconds = (): number | undefined => (useDnf() ? dnfIndexAgeSeconds() : aptIndexAgeSeconds());
+function sysRefreshIndex(opts: { silentFail?: boolean } = {}): void {
+  if (useDnf()) {
+    info("Đang làm mới metadata gói (dnf makecache)...");
+    dnfRefresh(opts);
+  } else {
+    info("Đang làm mới chỉ mục gói (apt-get update)...");
+    aptGet(["update", "-qq"], opts);
+  }
+}
+
+/** Phiên bản gói đã cài (dpkg hoặc rpm), undefined nếu không có. */
+function installedPkgVersion(pkg: string): string | undefined {
+  const res = useDnf()
+    ? execCapture("rpm", ["-q", "--qf", "%|EPOCH?{%{EPOCH}:}:{}|%{VERSION}-%{RELEASE}", pkg])
+    : execCapture("dpkg-query", ["-W", "-f=${Version}", pkg]);
+  return res.code === 0 && res.stdout.trim() ? res.stdout.trim() : undefined;
+}
+
+/** Changelog của gói rpm (nơi bản vá backport ghi mã CVE: "- Resolves: CVE-..."). */
+function rpmChangelog(pkg: string): string | undefined {
+  const res = execCapture("rpm", ["-q", "--changelog", pkg]);
+  return res.code === 0 && res.stdout.trim() ? res.stdout : undefined;
+}
+
 // Các unit napp quan tâm khi kiểm tra "đã vá nhưng chưa restart".
 function managedUnits(): string[] {
   const st = loadState();
   return [
-    ...["nginx", "mariadb", "mysql", "postgresql", "mongod", "redis-server", "redis", "valkey", "ssh", "sshd", "fail2ban"].filter((u) => isServiceActive(u)),
+    ...["nginx", "mariadb", "mysql", "mysqld", "postgresql", "mongod", "redis-server", "redis", "valkey", "ssh", "sshd", "fail2ban"].filter((u) => isServiceActive(u)),
     ...Object.values(st.apps).flatMap((a) => appUnits(a)),
     ...Object.values(st.services).flatMap((s) => serviceUnits(s)),
     // Redis riêng: vá libssl/redis mà không restart thì chúng vẫn chạy mã cũ.
@@ -82,8 +113,8 @@ function nginxUpstreamVersion(): string | undefined {
 // đứng yên suốt vòng đời bản phân phối.
 function nginxPackageInfo(): { pkg: string; version: string } | undefined {
   for (const pkg of ["nginx-core", "nginx-full", "nginx-light", "nginx-extras", "nginx", "nginx-common"]) {
-    const res = execCapture("dpkg-query", ["-W", "-f=${Version}", pkg]);
-    if (res.code === 0 && res.stdout.trim()) return { pkg, version: res.stdout.trim() };
+    const version = installedPkgVersion(pkg);
+    if (version) return { pkg, version };
   }
   return undefined;
 }
@@ -92,6 +123,13 @@ function nginxPackageInfo(): { pkg: string; version: string } | undefined {
 // thẳng file trên đĩa (không cần mạng, không cần 'apt changelog' vốn phải tải
 // về từ server và hay hỏng khi thiếu kho source).
 function nginxChangelog(): { text: string; path: string } | undefined {
+  if (useDnf()) {
+    for (const pkg of ["nginx-core", "nginx"]) {
+      const text = rpmChangelog(pkg);
+      if (text) return { text, path: `rpm -q --changelog ${pkg}` };
+    }
+    return undefined;
+  }
   const candidates: string[] = [];
   for (const dir of ["nginx-common", "nginx-core", "nginx", "nginx-full", "nginx-light", "nginx-extras"]) {
     candidates.push(`/usr/share/doc/${dir}/changelog.Debian.gz`, `/usr/share/doc/${dir}/changelog.gz`, `/usr/share/doc/${dir}/changelog.Debian`);
@@ -128,10 +166,14 @@ export function nodeStatus(feed: NodeFeed): NodeStatus | undefined {
   if (res.code !== 0 || !version || !execPath) return undefined;
   // Chỉ tin gói dpkg/changelog khi node đang chạy ĐÚNG là binary của gói đó —
   // /usr/local/bin/node cài tay mà lấy changelog của gói nodejs sẽ báo "đã vá" nhầm.
-  const fromPkg = /^nodejs:/m.test(execCapture("dpkg-query", ["-S", execPath]).stdout);
-  const pkgVersion = fromPkg ? execCapture("dpkg-query", ["-W", "-f=${Version}", "nodejs"]).stdout.trim() || undefined : undefined;
+  const fromPkg = useDnf()
+    ? execCapture("rpm", ["-qf", "--qf", "%{NAME}", execPath]).stdout.trim() === "nodejs"
+    : /^nodejs:/m.test(execCapture("dpkg-query", ["-S", execPath]).stdout);
+  const pkgVersion = fromPkg ? installedPkgVersion("nodejs") : undefined;
   let changelog: string | undefined;
-  if (fromPkg) {
+  if (fromPkg && useDnf()) {
+    changelog = rpmChangelog("nodejs");
+  } else if (fromPkg) {
     for (const path of ["/usr/share/doc/nodejs/changelog.Debian.gz", "/usr/share/doc/nodejs/changelog.Debian"]) {
       if (!existsSync(path)) continue;
       try {
@@ -185,14 +227,13 @@ export interface SystemReport {
 export async function collectSystemReport(opts: DoctorSystemOptions): Promise<SystemReport> {
   if (opts.refresh) {
     if (process.getuid && process.getuid() !== 0) {
-      warn("Bỏ qua làm mới chỉ mục apt (cần quyền root) — kết quả dựa trên chỉ mục đã có sẵn, có thể cũ.");
+      warn(`Bỏ qua làm mới chỉ mục ${pmLabel()} (cần quyền root) — kết quả dựa trên chỉ mục đã có sẵn, có thể cũ.`);
     } else {
-      info("Đang làm mới chỉ mục gói (apt-get update)...");
-      aptGet(["update", "-qq"], { silentFail: true });
+      sysRefreshIndex({ silentFail: true });
     }
   }
 
-  const pending = pendingUpdates();
+  const pending = sysPendingUpdates();
   const security = pending.filter((p) => p.security);
   const other = pending.filter((p) => !p.security);
 
@@ -207,31 +248,31 @@ export async function collectSystemReport(opts: DoctorSystemOptions): Promise<Sy
   const { feed, warnings } = await loadNodeFeed({ online: opts.refresh });
   for (const w of warnings) warn(w);
 
-  return { security, other, staleUnits, reboot: rebootRequired(), node: nodeStatus(feed) };
+  return { security, other, staleUnits, reboot: sysRebootRequired(), node: nodeStatus(feed) };
 }
 
 export async function cmdDoctorSystem(opts: DoctorSystemOptions): Promise<SystemReport | undefined> {
   section("Kiểm tra bản vá bảo mật của hệ thống");
 
-  if (!hasApt()) {
-    if (isRhel()) {
-      warn(
-        "Họ RHEL: phần kiểm tra bản vá của 'napp doctor' chưa hỗ trợ ở bản này (sẽ có ở bản sau). Tạm thời tự kiểm tra:\n" +
-          "  dnf updateinfo list --security        # bản vá bảo mật đang chờ\n" +
-          "  dnf needs-restarting -r               # có cần khởi động lại máy không"
-      );
-    } else warn("Không tìm thấy apt-get — phần kiểm tra bản vá chỉ hỗ trợ Ubuntu/Debian. Bỏ qua.");
+  if (!hasApt() && !hasDnf()) {
+    warn("Không tìm thấy apt-get hay dnf — phần kiểm tra bản vá chỉ hỗ trợ Ubuntu/Debian và họ RHEL. Bỏ qua.");
     return undefined;
   }
 
   const report = await collectSystemReport(opts);
 
-  // --- chỉ mục apt có mới không: quyết định độ tin cậy của cả phần này ---
-  const age = aptIndexAgeSeconds();
+  // --- chỉ mục gói có mới không: quyết định độ tin cậy của cả phần này ---
+  const age = sysIndexAgeSeconds();
   if (age !== undefined && age > 86_400 * 2) {
     warn(
       `Chỉ mục gói đã cũ ${Math.floor(age / 86_400)} ngày — danh sách bản vá dưới đây có thể THIẾU. ` +
-        `Chạy 'sudo napp doctor system' (tự làm mới) hoặc 'sudo apt-get update'.`
+        `Chạy 'sudo napp doctor system' (tự làm mới) hoặc 'sudo ${useDnf() ? "dnf makecache" : "apt-get update"}'.`
+    );
+  }
+  if (useDnf() && !distroHasErrata()) {
+    warn(
+      "CentOS Stream KHÔNG phát hành errata bảo mật — napp không phân biệt được bản vá bảo mật với bản cập nhật thường.\n" +
+        "  Trên Stream hãy cài MỌI bản cập nhật định kỳ: sudo napp doctor upgrade --all"
     );
   }
 
@@ -345,8 +386,11 @@ export async function cmdDoctorSystem(opts: DoctorSystemOptions): Promise<System
       } else {
         info(
           `Còn ${affected.length} CVE chưa chứng minh được là đã xử lý. Kiểm chứng thủ công:\n` +
-            (changelog ? `         zgrep -i '${affected[0]!.cve.cveIds[0]}' ${changelog.path}\n` : `         apt changelog nginx | head -40\n`) +
-            `         https://ubuntu.com/security/${affected[0]!.cve.cveIds[0]}   (tra bản phân phối đã vá ở phiên bản gói nào)`
+            (useDnf()
+              ? `         ${changelog?.path ?? "rpm -q --changelog nginx"} | grep -i '${affected[0]!.cve.cveIds[0]}'\n` +
+                `         https://access.redhat.com/security/cve/${affected[0]!.cve.cveIds[0]}   (tra RHEL đã vá ở phiên bản gói nào)`
+              : (changelog ? `         zgrep -i '${affected[0]!.cve.cveIds[0]}' ${changelog.path}\n` : `         apt changelog nginx | head -40\n`) +
+                `         https://ubuntu.com/security/${affected[0]!.cve.cveIds[0]}   (tra bản phân phối đã vá ở phiên bản gói nào)`)
         );
         info(
           "Nếu kho của bản phân phối KHÔNG còn phát hành bản vá cho nginx (bản Ubuntu/Debian đã hết hỗ trợ), hãy nâng cấp OS,\n" +
@@ -634,9 +678,16 @@ async function switchNodeMajor(major: number, yes: boolean, feed: NodeFeed): Pro
     info("Đã huỷ. Không thay đổi gì.");
     return false;
   }
-  runCmd("bash", ["-c", `curl -fsSL https://deb.nodesource.com/setup_${major}.x | bash -`]);
-  waitForAptLocks();
-  runCmd("env", ["DEBIAN_FRONTEND=noninteractive", "apt-get", "-y", "-o", `DPkg::Lock::Timeout=${APT_LOCK_TIMEOUT_S}`, "install", "nodejs"]);
+  if (useDnf()) {
+    // installNodeSource thay file kho NodeSource sang nhánh mới; distro-sync
+    // đưa gói nodejs về đúng bản của kho — kể cả khi phải HẠ major.
+    installNodeSource(major);
+    runCmd("dnf", ["-y", "distro-sync", "nodejs"]);
+  } else {
+    runCmd("bash", ["-c", `curl -fsSL https://deb.nodesource.com/setup_${major}.x | bash -`]);
+    waitForAptLocks();
+    runCmd("env", ["DEBIAN_FRONTEND=noninteractive", "apt-get", "-y", "-o", `DPkg::Lock::Timeout=${APT_LOCK_TIMEOUT_S}`, "install", "nodejs"]);
+  }
   const after = nodeStatus(feed);
   ok(`Node.js hiện tại: ${after?.version ?? "?"} (${after?.execPath ?? "?"})`);
   if (after && after.affected.length > 0) {
@@ -650,13 +701,7 @@ async function switchNodeMajor(major: number, yes: boolean, feed: NodeFeed): Pro
 
 export async function cmdDoctorUpgrade(opts: DoctorUpgradeOptions): Promise<void> {
   requireRoot();
-  if (!hasApt()) {
-    die(
-      isRhel()
-        ? "Họ RHEL: 'napp doctor upgrade' chưa hỗ trợ ở bản này. Cài bản vá bảo mật: sudo dnf upgrade --security -y, rồi: sudo dnf needs-restarting -s (dịch vụ cần restart)."
-        : "Không tìm thấy apt-get — lệnh này chỉ hỗ trợ Ubuntu/Debian."
-    );
-  }
+  if (!hasApt() && !hasDnf()) die("Không tìm thấy apt-get hay dnf — lệnh này chỉ hỗ trợ Ubuntu/Debian và họ RHEL.");
 
   section("Cài bản vá cho hệ thống");
 
@@ -668,18 +713,17 @@ export async function cmdDoctorUpgrade(opts: DoctorUpgradeOptions): Promise<void
     return;
   }
 
-  info("Đang làm mới chỉ mục gói (apt-get update)...");
-  aptGet(["update", "-qq"]);
+  sysRefreshIndex();
 
   // Gói nodejs của NodeSource KHÔNG nằm trong kho '-security' nên bộ lọc "chỉ
   // bản vá bảo mật" sẽ bỏ sót nó — đúng gói cần vá nhất. Coi nó là bản vá bảo
   // mật khi Node đang chạy dính CVE đã biết.
   const node = nodeStatus(feed);
   const nodeVulnerable = Boolean(node && node.affected.length > 0 && node.pkgVersion);
-  const pending = pendingUpdates().map((p) => (p.pkg === "nodejs" && nodeVulnerable ? { ...p, security: true } : p));
+  const pending = sysPendingUpdates().map((p) => (p.pkg === "nodejs" && nodeVulnerable ? { ...p, security: true } : p));
   if (node && node.affected.length > 0 && !pending.some((p) => p.pkg === "nodejs")) {
     console.log();
-    danger(`Node.js ${node.version} dính ${nodeAffectedLabel(node.affected)} nhưng kho apt KHÔNG có bản nodejs mới hơn.`);
+    danger(`Node.js ${node.version} dính ${nodeAffectedLabel(node.affected)} nhưng kho ${pmLabel()} KHÔNG có bản nodejs mới hơn.`);
     printNodeFixHint(node);
     console.log();
   }
@@ -704,6 +748,7 @@ export async function cmdDoctorUpgrade(opts: DoctorUpgradeOptions): Promise<void
     selected = pending.filter((p) => p.security);
     scopeLabel = "bản vá BẢO MẬT";
     if (selected.length === 0) {
+      if (useDnf() && !distroHasErrata()) warn("CentOS Stream không có errata bảo mật — dùng 'sudo napp doctor upgrade --all' để vá.");
       ok("Không có bản vá bảo mật nào đang chờ.");
       if (pending.length > 0) info(`Vẫn còn ${pending.length} bản cập nhật thường — cài bằng 'sudo napp doctor upgrade --all'.`);
       return;
@@ -725,20 +770,24 @@ export async function cmdDoctorUpgrade(opts: DoctorUpgradeOptions): Promise<void
   // --force-confold: GIỮ NGUYÊN file cấu hình hiện có khi gói mới mang bản
   // cấu hình khác. Bắt buộc phải có, nếu không dpkg sẽ dừng lại hỏi tương tác
   // (treo trong script) hoặc ghi đè cấu hình nginx đang chạy.
-  const aptArgs = [
-    "-y",
-    "-o",
-    `DPkg::Lock::Timeout=${APT_LOCK_TIMEOUT_S}`,
-    "-o",
-    "Dpkg::Options::=--force-confold",
-    "-o",
-    "Dpkg::Options::=--force-confdef",
-    "install",
-    "--only-upgrade",
-    ...selected.map((p) => p.pkg),
-  ];
-  waitForAptLocks();
-  runCmd("env", ["DEBIAN_FRONTEND=noninteractive", "apt-get", ...aptArgs]);
+  if (useDnf()) {
+    dnfUpgrade(selected.map((p) => p.pkg));
+  } else {
+    const aptArgs = [
+      "-y",
+      "-o",
+      `DPkg::Lock::Timeout=${APT_LOCK_TIMEOUT_S}`,
+      "-o",
+      "Dpkg::Options::=--force-confold",
+      "-o",
+      "Dpkg::Options::=--force-confdef",
+      "install",
+      "--only-upgrade",
+      ...selected.map((p) => p.pkg),
+    ];
+    waitForAptLocks();
+    runCmd("env", ["DEBIAN_FRONTEND=noninteractive", "apt-get", ...aptArgs]);
+  }
   ok(`Đã cài ${selected.length} gói.`);
 
   // --- kiểm tra cấu hình nginx trước khi restart ---
@@ -793,7 +842,7 @@ async function restartStaleUnits(opts: DoctorUpgradeOptions): Promise<void> {
     }
   }
 
-  const reboot = rebootRequired();
+  const reboot = sysRebootRequired();
   if (reboot.required) {
     console.log();
     warn(

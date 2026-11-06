@@ -663,7 +663,11 @@ export async function cmdCheck(opts: CheckOptions): Promise<void> {
       name: "redis",
       ok: false,
       message: "Redis đã cài nhưng chưa chạy.",
-      fix: () => runCmd("systemctl", ["enable", "--now", redisSystemUnit()]),
+      fix: () => {
+        // Sửa luôn quyền file cấu hình (napp 1.37.0 có thể đã đổi chủ valkey.conf thành root).
+        ensureRedisConfInclude();
+        runCmd("systemctl", ["enable", "--now", redisSystemUnit()]);
+      },
     });
   } else {
     findings.push({ name: "redis", ok: false, message: "Redis chưa cài (tuỳ chọn — bỏ qua nếu app không dùng cache/queue Redis).", fix: installRedis });

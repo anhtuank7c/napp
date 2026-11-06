@@ -6,7 +6,8 @@ import type { HardwareProfile } from "../hardware";
 import type { CreatedDb, DbDriver } from "./types";
 import { aptGet } from "../apt";
 import { randomPassword, anyUnitActive, processRunning, connectionUrl, preflightInstall } from "./common";
-import { pkgInstalled, pkgRemove, isRhel } from "../platform";
+import { pkgInstalled, pkgInstall, pkgRemove, isRhel, isFedora, osInfo } from "../platform";
+import { ensureMongoSelinux } from "../selinux";
 
 // MongoDB KHÁC hẳn ba engine còn lại ở bốn điểm, và mỗi điểm là một cái bẫy:
 //
@@ -27,6 +28,9 @@ const ADMIN_CREDS_PATH = "/etc/napp/mongo-admin.json";
 const TOOLS_CONF_PATH = "/etc/napp/mongo-tools.yaml";
 const KEYRING = `/usr/share/keyrings/mongodb-server-${MONGO_SERIES}.gpg`;
 const SOURCES_LIST = `/etc/apt/sources.list.d/mongodb-org-${MONGO_SERIES}.list`;
+const YUM_REPO = `/etc/yum.repos.d/mongodb-org-${MONGO_SERIES}.repo`;
+// Thư mục dữ liệu của gói: Ubuntu /var/lib/mongodb, rpm /var/lib/mongo.
+const dataDir = (): string => (isRhel() ? "/var/lib/mongo" : "/var/lib/mongodb");
 const ADMIN_USER = "napp_admin";
 const SYSTEM_DBS = new Set(["admin", "local", "config"]);
 
@@ -73,6 +77,42 @@ function repoLine(): string {
     `Kho MongoDB ${MONGO_SERIES} chưa hỗ trợ hệ điều hành này (${id || "?"} ${codename || "?"}). ` +
       "Hỗ trợ: Ubuntu 22.04 (jammy), 24.04 (noble), Debian 12 (bookworm)."
   );
+}
+
+/**
+ * Kho yum chính thức: redhat/<8|9|10>. Fedora KHÔNG được MongoDB hỗ trợ chính
+ * thức — dùng gói build cho RHEL 10 (cùng thế hệ OpenSSL 3/glibc), kèm cảnh báo.
+ */
+function yumRepo(): string {
+  const o = osInfo();
+  const arch = process.arch === "x64" ? "x86_64" : process.arch === "arm64" ? "aarch64" : "";
+  if (!arch) die(`MongoDB chỉ hỗ trợ x86_64/aarch64 (máy này: ${process.arch}).`);
+  let major: number;
+  if (isFedora()) {
+    warn("Fedora KHÔNG nằm trong danh sách MongoDB hỗ trợ chính thức — napp dùng gói build cho RHEL 10. Chạy production nên dùng Rocky/Alma/RHEL.");
+    major = 10;
+  } else if ([8, 9, 10].includes(o.major)) {
+    major = o.major;
+  } else {
+    die(`Kho MongoDB ${MONGO_SERIES} chưa hỗ trợ ${o.prettyName}. Hỗ trợ: họ RHEL 8, 9, 10.`);
+  }
+  return (
+    `[mongodb-org-${MONGO_SERIES}]\n` +
+    `name=MongoDB ${MONGO_SERIES} (napp)\n` +
+    `baseurl=https://repo.mongodb.org/yum/redhat/${major}/mongodb-org/${MONGO_SERIES}/${arch}/\n` +
+    `gpgcheck=1\nenabled=1\n` +
+    `gpgkey=https://pgp.mongodb.com/server-${MONGO_SERIES}.asc\n`
+  );
+}
+
+function installRhel(): void {
+  const repo = yumRepo();
+  preflightInstall("MongoDB", 27017, dataDir(), 2048);
+  info(`Đang thêm kho yum chính thức của MongoDB ${MONGO_SERIES}...`);
+  writeFile(YUM_REPO, repo, 0o644);
+  info("Đang cài đặt MongoDB server (mongodb-org)...");
+  pkgInstall(["mongodb-org"]);
+  ensureMongoSelinux();
 }
 
 function requireAvx(): void {
@@ -163,7 +203,8 @@ export function setMongoCacheSize(conf: string, gb: number): string | undefined 
 function bindIpIsLoopback(conf: string): boolean {
   const m = conf.match(/^\s+bindIp:\s*(.+)$/m);
   if (!m) return true; // mặc định của mongod là localhost
-  return m[1]!.split(",").every((ip) => ["127.0.0.1", "localhost", "::1"].includes(ip.trim()));
+  // Gói rpm để chú thích ngay cuối dòng: "bindIp: 127.0.0.1  # Enter 0.0.0.0,:: ..."
+  return m[1]!.replace(/\s+#.*$/, "").trim().split(",").every((ip) => ["127.0.0.1", "localhost", "::1"].includes(ip.trim()));
 }
 
 function cacheSizeGB(budgetMB: number): number {
@@ -230,23 +271,24 @@ export const mongoDriver: DbDriver = {
   },
 
   install() {
-    if (isRhel()) {
-      die("MongoDB trên họ RHEL chưa được napp hỗ trợ ở bản này (sẽ có ở bản sau). Dùng PostgreSQL hoặc MariaDB: sudo napp db engine create postgresql");
-    }
     requireAvx();
-    const line = repoLine();
-    preflightInstall("MongoDB", 27017, "/var/lib/mongodb", 2048);
-    info(`Đang thêm kho apt chính thức của MongoDB ${MONGO_SERIES}...`);
-    aptGet(["update"]);
-    aptGet(["install", "-y", "gnupg", "curl"]);
-    runCmd("bash", [
-      "-lc",
-      `set -o pipefail; curl -fsSL https://www.mongodb.org/static/pgp/server-${MONGO_SERIES}.asc | gpg --dearmor --yes -o ${KEYRING}`,
-    ]);
-    writeFile(SOURCES_LIST, line + "\n", 0o644);
-    info("Đang cài đặt MongoDB server (mongodb-org)...");
-    aptGet(["update"]);
-    aptGet(["install", "-y", "mongodb-org"]);
+    if (isRhel()) {
+      installRhel();
+    } else {
+      const line = repoLine();
+      preflightInstall("MongoDB", 27017, dataDir(), 2048);
+      info(`Đang thêm kho apt chính thức của MongoDB ${MONGO_SERIES}...`);
+      aptGet(["update"]);
+      aptGet(["install", "-y", "gnupg", "curl"]);
+      runCmd("bash", [
+        "-lc",
+        `set -o pipefail; curl -fsSL https://www.mongodb.org/static/pgp/server-${MONGO_SERIES}.asc | gpg --dearmor --yes -o ${KEYRING}`,
+      ]);
+      writeFile(SOURCES_LIST, line + "\n", 0o644);
+      info("Đang cài đặt MongoDB server (mongodb-org)...");
+      aptGet(["update"]);
+      aptGet(["install", "-y", "mongodb-org"]);
+    }
     runCmd("systemctl", ["enable", "--now", "mongod"]);
     if (execState.dryRun) {
       dryRunNotice("Sẽ tạo tài khoản quản trị MongoDB và bật security.authorization");
@@ -276,7 +318,7 @@ export const mongoDriver: DbDriver = {
       purge
     );
     if (purge) {
-      runCmd("rm", ["-rf", "/var/lib/mongodb", "/var/log/mongodb", ADMIN_CREDS_PATH, TOOLS_CONF_PATH, SOURCES_LIST, KEYRING], { silentFail: true });
+      runCmd("rm", ["-rf", dataDir(), "/var/log/mongodb", ADMIN_CREDS_PATH, TOOLS_CONF_PATH, SOURCES_LIST, KEYRING, YUM_REPO], { silentFail: true });
     }
   },
 

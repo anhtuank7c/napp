@@ -108,6 +108,33 @@ export function ensureRedisInstanceSelinux(dirs: { conf: string; data: string; r
   }
 }
 
+// --- 4. MongoDB ------------------------------------------------------------
+
+function mongoPolicyInstalled(): boolean {
+  return /^mongodb\b/m.test(execCapture("semodule", ["-l"]).stdout);
+}
+
+/**
+ * MongoDB không kèm policy SELinux trong gói rpm; policy mặc định của distro
+ * chặn mongod đọc /sys/fs/cgroup (FTDC, giới hạn bộ nhớ) và có thể làm nó
+ * không khởi động được. Cách MongoDB khuyến nghị: build + cài module
+ * mongodb-selinux. Lỗi ở đây chỉ cảnh báo — không chặn việc cài MongoDB.
+ */
+export function ensureMongoSelinux(): void {
+  if (!selinuxActive() || execState.dryRun || mongoPolicyInstalled()) return;
+  info("SELinux: cài policy chính thức của MongoDB (mongodb-selinux)...");
+  pkgInstall(["git", "make", "checkpolicy", "policycoreutils", "selinux-policy-devel"]);
+  const dir = execCapture("mktemp", ["-d", "/tmp/napp-mongo-selinux.XXXXXX"]).stdout.trim();
+  const res = runCmd(
+    "bash",
+    ["-c", `set -e; git clone -q --depth 1 https://github.com/mongodb/mongodb-selinux "${dir}/src" && cd "${dir}/src" && make && make install`],
+    { silentFail: true }
+  );
+  runCmd("rm", ["-rf", dir], { silentFail: true });
+  if (res.code === 0 && mongoPolicyInstalled()) ok("SELinux: đã cài policy mongodb-selinux.");
+  else warn("SELinux: KHÔNG cài được policy mongodb-selinux — nếu mongod không khởi động, xem: ausearch -m avc -c mongod --start recent");
+}
+
 /** Một dòng tóm tắt cho 'napp check'. */
 export function selinuxFindings(): { ok: boolean; message: string; fix?: () => void }[] {
   if (!isRhel()) return [];

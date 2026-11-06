@@ -215,6 +215,13 @@ export function loadState(): NappState {
     cache.usedRedisDb ??= [];
     return cache;
   } catch (e) {
+    // Không phải root: /etc/napp là 0711 (để Redis riêng mở được cấu hình của
+    // nó) nên thấy file nhưng không đọc được — coi như chưa có registry, đúng
+    // như khi thư mục còn 0750. Lệnh cần registry thật đều đòi sudo trước.
+    if ((e as NodeJS.ErrnoException).code === "EACCES") {
+      cache = emptyState();
+      return cache;
+    }
     die(`Không đọc được ${STATE_PATH} (file registry bị hỏng?): ${(e as Error).message}`);
   }
 }

@@ -2,6 +2,21 @@
 
 Tất cả thay đổi đáng chú ý của `napp` được ghi lại ở đây.
 
+## 1.38.0
+
+Họ RHEL **đợt 2**: mọi tính năng của napp giờ đã chạy trên RHEL/Rocky/Alma/Oracle/CentOS Stream 9–10 và Fedora. Đã kiểm thử thật trên AlmaLinux 9.8, AlmaLinux 10, Fedora 42 (dnf5) và Ubuntu 24.04.
+
+- **`napp doctor system` / `doctor upgrade` trên dnf:** đọc bản cập nhật đang chờ bằng `dnf check-update`, nhận ra bản vá **bảo mật** qua errata của distro (`dnf updateinfo --security`: RHSA/ALSA/RLSA/FEDORA-…), chạy được cả dnf4 (EL9/EL10) và dnf5 (Fedora). Cần reboot hay không: `dnf needs-restarting -r` (không có plugin thì so kernel đang chạy với kernel mới nhất). Đối chiếu CVE nginx và Node.js bằng `rpm -q --changelog`. `doctor upgrade` cài đúng các gói đã chọn bằng `dnf upgrade` (rpm giữ cấu hình đã sửa, bản mới thành `*.rpmnew`), rồi restart dịch vụ còn nạp thư viện cũ như trên Ubuntu. `--node-major` đổi nhánh Node qua NodeSource rpm (`distro-sync`, hạ major cũng được). CentOS Stream không phát hành errata → napp nói rõ và gợi ý `--all`.
+- **MySQL trên họ RHEL:** EL9 cài `mysql-server` (8.0), EL10/Fedora cài `mysql8.4-server` (8.4 LTS), unit `mysqld`. Gói gốc nghe **mọi địa chỉ** (cả X Protocol 33060) và root `@localhost` **không có mật khẩu** (mọi user trên máy gõ `mysql -uroot` là thành quản trị) → napp ghim `bind-address` + `mysqlx-bind-address` về 127.0.0.1 và chuyển root sang `auth_socket` (như Ubuntu). Gỡ (`db engine delete`) đúng tên gói thật.
+- **MongoDB trên họ RHEL:** kho yum chính thức `repo.mongodb.org/yum/redhat/<8|9|10>` (khoá GPG kiểm tra bởi dnf), dữ liệu ở `/var/lib/mongo`. SELinux đang bật: cài policy chính thức `mongodb-selinux`. Fedora không được MongoDB hỗ trợ chính thức → dùng gói của RHEL 10 kèm cảnh báo.
+- **`napp tune` trên họ RHEL:** MariaDB ghi slow log vào `/var/log/mariadb` (thư mục có sẵn của gói). PostgreSQL tuning qua `conf.d` trong `/var/lib/pgsql/data`.
+- **Sửa: `tune apply` làm valkey không khởi động lại được trên họ RHEL.** Khi thêm dòng `include conf.d/*.conf`, napp ghi lại `valkey.conf` thành `root:root` trong khi gói để `valkey:root` → valkey "Permission denied" với cấu hình của chính nó. Nay giữ nguyên chủ + nhóm; máy đã dính được `napp check --fix` sửa (`rpm --setugids`).
+- **Sửa: `tune apply` báo lỗi cú pháp nginx trên họ RHEL** ("keepalive_timeout directive is duplicate"): `nginx.conf` của RHEL đặt sẵn `keepalive_timeout`, và **tắt gzip**. File tuning giờ bỏ qua chỉ thị `nginx.conf` đã đặt và tự `gzip on` khi `nginx.conf` chưa bật.
+- **Sửa (mọi distro): lệnh không sudo chết với "EACCES … state.json"** (vd `napp doctor system` bằng user thường) sau khi 1.37.0 đổi `/etc/napp` sang `0711`. Nay coi như chưa có registry, đúng như trước.
+- **Sửa: `napp nginx harden` thất bại trên Debian 13** ("server_tokens directive is duplicate" rồi hoàn tác): `nginx.conf` của Debian 13 đã đặt sẵn `server_tokens off;`. Nay không khai báo lại; cảnh báo nếu `nginx.conf` đặt giá trị khác `off`.
+- Kiểm thử e2e trong Docker trên Debian 12, Debian 13, Ubuntu 24.04, AlmaLinux 9, Rocky Linux 9, AlmaLinux 10, Fedora 42: cài đặt, `check --fix`, app với MariaDB/MySQL/PostgreSQL/MongoDB + Redis riêng, deploy từ git, `sync`, tường lửa, fail2ban, `nginx harden`, `tune`, `doctor`, gỡ app.
+- `napp check` / `doctor`: cảnh báo MongoDB "lắng nghe ra ngoài" nhầm vì đọc cả chú thích cuối dòng `bindIp` của gói rpm — đã sửa.
+
 ## 1.37.0
 
 Chạy trên **họ RHEL**: RHEL, Rocky Linux, AlmaLinux, Oracle Linux, CentOS Stream **9 và 10**, và **Fedora** 40+ (đợt 1). Đã kiểm thử thật trên AlmaLinux 9.8, AlmaLinux 10, Fedora 42 và Ubuntu 24.04 (chạy lại để chắc không hỏng gì).

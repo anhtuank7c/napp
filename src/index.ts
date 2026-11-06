@@ -216,7 +216,7 @@ program
 const doctor = program
   .command("doctor")
   .description("soi rủi ro bảo mật: bản vá hệ thống đang chờ, CVE Node.js/nginx, lỗ hổng + mã độc trong dependencies")
-  .option("--no-refresh", "không chạy 'apt-get update' trước khi kiểm tra")
+  .option("--no-refresh", "không làm mới chỉ mục gói (apt-get update / dnf makecache) trước khi kiểm tra")
   .option("--no-audit", "bỏ qua tra lỗ hổng + mã độc đã biết (OSV.dev / audit của package manager) — không cần mạng")
   .option("--deep", "tra thêm tuổi bản phát hành của dependency trực tiếp trên registry npm (cần mạng)")
   .action(async (opts) => cmdDoctor({ refresh: opts.refresh !== false, audit: opts.audit !== false, deep: Boolean(opts.deep) }));
@@ -224,7 +224,7 @@ const doctor = program
 doctor
   .command("system")
   .description("kiểm tra bản vá bảo mật đang chờ, dịch vụ còn nạp thư viện cũ, database lộ ra mạng, CVE nginx, CVE + vòng đời Node.js")
-  .option("--no-refresh", "không chạy 'apt-get update' trước khi kiểm tra")
+  .option("--no-refresh", "không làm mới chỉ mục gói (apt-get update / dnf makecache) trước khi kiểm tra")
   .action(async (opts) => {
     await cmdDoctorSystem({ refresh: opts.refresh !== false });
   });
