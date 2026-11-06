@@ -22,6 +22,7 @@ import { cmdNotifyDeliver } from "./lib/notify";
 import {
   cmdAppCreate,
   cmdAppDeploy,
+  cmdAppDeployKey,
   cmdAppRemove,
   cmdAppList,
   cmdAppRestart,
@@ -38,6 +39,7 @@ import {
 import {
   cmdServiceCreate,
   cmdServiceDeploy,
+  cmdServiceDeployKey,
   cmdServiceRemove,
   cmdServiceList,
   cmdServiceRestart,
@@ -51,6 +53,7 @@ import {
   cmdServiceSet,
   cmdServiceShow,
 } from "./commands/service";
+import { cmdSync } from "./commands/sync";
 import { cmdDomainAdd, cmdDomainRemove, cmdDomainList } from "./commands/domain";
 import { cmdCertIssue, cmdCertRenew, cmdCertRevoke, cmdCertList, cmdCertStatus } from "./commands/cert";
 import { cmdDbCreate, cmdDbDrop, cmdDbList, cmdDbBackup, cmdDbPassword } from "./commands/db";
@@ -113,7 +116,14 @@ Bắt đầu nhanh:
                                  (database mặc định MariaDB; chọn khác: --db postgresql
                                   | mysql | mongodb | none, nhiều engine: --db mariadb,mongodb)
   sudo napp app create <domain> --repo <url> --db --redis
+                                 repo SSH (git@github.com:o/r.git): napp tự sinh deploy
+                                 key riêng cho app, chỉ việc dán public key vào repo
   sudo napp cert create <domain> --email <email>
+
+Cập nhật mã nguồn từ git:
+  sudo napp app deploy <domain>  fetch + chỉ cài/build/restart khi cần (--check: chỉ xem)
+  sudo napp sync                 kiểm tra MỌI app/service, deploy cái có commit mới
+  sudo napp app deploy-key <domain>   xem lại / sinh mới (--regenerate) deploy key
   sudo napp tune apply           tối ưu theo phần cứng (chạy lại khi nâng cấp server)
 
 Sau khi cập nhật napp (bản cũ để lại cấu hình đã hỏng, không tự sửa):
@@ -184,7 +194,7 @@ Chi tiết từng lệnh: napp <lệnh> --help · lịch sử thay đổi: napp 
 //   set / unset       ghi / xoá giá trị, không tác dụng phụ (env, lựa chọn engine)
 //   enable / disable  MỌI công tắc bật/tắt (lịch chạy, hardening, guard)
 //   apply             đưa hệ thống về đúng cấu hình napp mong muốn
-//   hành động riêng   deploy start stop restart logs · renew · flush · snapshot sample · unban
+//   hành động riêng   deploy deploy-key sync start stop restart logs · renew · flush · snapshot sample · unban
 //
 // Mỗi lệnh được dựng bằng MỘT hàm (options + action) rồi đăng ký dưới tên mới,
 // và — nếu từng có tên khác — dưới tên cũ dạng lệnh ẩn (lib/cli.ts `legacy`).
@@ -304,7 +314,7 @@ app
   .option("--branch <branch>", "branch git", "main")
   .option("--allow-insecure-repo", "cho phép repo http:// hoặc git:// (KHÔNG mã hoá — chỉ dùng trong mạng nội bộ tin cậy)")
   .option("--token <token>", "Personal Access Token để clone repo PRIVATE qua HTTPS (không hỏi mật khẩu)")
-  .option("--ssh-key <path>", "deploy key để clone repo PRIVATE qua SSH — đường dẫn file HOẶC nội dung key")
+  .option("--ssh-key <path>", "dùng deploy key CÓ SẴN (đường dẫn file HOẶC nội dung key). Bỏ trống với repo SSH -> napp tự sinh key riêng + hướng dẫn thêm vào repo")
   .addOption(new Option("--runtime <runtime>", "runtime chạy app").choices(["node", "bun"]).default("node"))
   .addOption(new Option("--package-manager <pm>", "trình quản lý gói phụ thuộc (mặc định: bun nếu runtime bun, còn lại npm)").choices(["npm", "pnpm", "yarn", "bun"]))
   .option("--install-cmd <cmd>", "lệnh cài dependencies (mặc định theo package manager; có build thì cài cả devDependencies rồi gỡ sau build)")
@@ -447,7 +457,18 @@ const appDelete = (c: Command) =>
 appDelete(app.command("delete <domain>"));
 legacy(app, "remove <domain>", "app delete <domain>", appDelete);
 
-app.command("deploy <domain>").description("git pull + cài dependencies + build + restart").action(async (domain) => cmdAppDeploy(domain));
+app
+  .command("deploy <domain>")
+  .description("đồng bộ mã nguồn từ git và deploy bản mới — chỉ cài/build/restart khi có thay đổi cần thiết")
+  .option("--check", "chỉ fetch và xem có commit mới không, KHÔNG đụng vào mã nguồn đang chạy")
+  .option("--force", "chạy đủ cài dependencies + build + restart dù không có commit mới")
+  .option("--no-restart", "cập nhật + build nhưng chưa restart (restart sau bằng lệnh restart)")
+  .action(async (domain, opts) => cmdAppDeploy(domain, { check: Boolean(opts.check), force: Boolean(opts.force), restart: opts.restart !== false }));
+app
+  .command("deploy-key <domain>")
+  .description("xem public deploy key (SSH) + hướng dẫn thêm vào repo + kiểm tra truy cập; chưa có thì sinh key riêng")
+  .option("--regenerate", "sinh key MỚI (key cũ chỉ bị thay sau khi key mới đọc được repo)")
+  .action(async (domain, opts) => cmdAppDeployKey(domain, { regenerate: Boolean(opts.regenerate) }));
 app.command("start <domain>").description("khởi động app").action((domain) => cmdAppStart(domain));
 app.command("stop <domain>").description("dừng app").action((domain) => cmdAppStop(domain));
 app.command("restart <domain>").description("khởi động lại app (nhiều instance: cuốn chiếu, không downtime)").action((domain) => cmdAppRestart(domain));
@@ -516,7 +537,7 @@ service
   .option("--branch <branch>", "branch git", "main")
   .option("--allow-insecure-repo", "cho phép repo http:// hoặc git:// (KHÔNG mã hoá — chỉ dùng trong mạng nội bộ tin cậy)")
   .option("--token <token>", "Personal Access Token để clone repo PRIVATE qua HTTPS (không hỏi mật khẩu)")
-  .option("--ssh-key <path>", "deploy key để clone repo PRIVATE qua SSH — đường dẫn file HOẶC nội dung key")
+  .option("--ssh-key <path>", "dùng deploy key CÓ SẴN (đường dẫn file HOẶC nội dung key). Bỏ trống với repo SSH -> napp tự sinh key riêng + hướng dẫn thêm vào repo")
   .addOption(new Option("--runtime <runtime>", "runtime chạy service").choices(["node", "bun"]).default("node"))
   .addOption(new Option("--package-manager <pm>", "trình quản lý gói phụ thuộc (mặc định: bun nếu runtime bun, còn lại npm)").choices(["npm", "pnpm", "yarn", "bun"]))
   .option("--install-cmd <cmd>", "lệnh cài dependencies (mặc định theo package manager; có build thì cài cả devDependencies rồi gỡ sau build)")
@@ -605,7 +626,18 @@ const serviceDelete = (c: Command) =>
 serviceDelete(service.command("delete <name>"));
 legacy(service, "remove <name>", "service delete <name>", serviceDelete);
 
-service.command("deploy <name>").description("git pull + cài dependencies + build + restart").action(async (name) => cmdServiceDeploy(name));
+service
+  .command("deploy <name>")
+  .description("đồng bộ mã nguồn từ git và deploy bản mới — chỉ cài/build/restart khi có thay đổi cần thiết")
+  .option("--check", "chỉ fetch và xem có commit mới không, KHÔNG đụng vào mã nguồn đang chạy")
+  .option("--force", "chạy đủ cài dependencies + build + restart dù không có commit mới")
+  .option("--no-restart", "cập nhật + build nhưng chưa restart (restart sau bằng lệnh restart)")
+  .action(async (name, opts) => cmdServiceDeploy(name, { check: Boolean(opts.check), force: Boolean(opts.force), restart: opts.restart !== false }));
+service
+  .command("deploy-key <name>")
+  .description("xem public deploy key (SSH) + hướng dẫn thêm vào repo + kiểm tra truy cập; chưa có thì sinh key riêng")
+  .option("--regenerate", "sinh key MỚI (key cũ chỉ bị thay sau khi key mới đọc được repo)")
+  .action(async (name, opts) => cmdServiceDeployKey(name, { regenerate: Boolean(opts.regenerate) }));
 service.command("start <name>").description("khởi động service").action((name) => cmdServiceStart(name));
 service.command("stop <name>").description("dừng service").action((name) => cmdServiceStop(name));
 service.command("restart <name>").description("khởi động lại service (nhiều instance: cuốn chiếu)").action((name) => cmdServiceRestart(name));
@@ -636,6 +668,15 @@ serviceEnv
   .action((name, keys) => cmdServiceEnvUnset(name, keys));
 
 // ----------------------------------------------------------------- cert ---
+// ------------------------------------------------------------------ sync ---
+program
+  .command("sync")
+  .description("đồng bộ MỌI app/service có repo git: kiểm tra commit mới rồi deploy những cái có thay đổi (restart cuốn chiếu, chỉ khi cần)")
+  .option("--check", "chỉ liệt kê đơn vị có bản mới, không deploy")
+  .option("-y, --yes", "không hỏi xác nhận (bắt buộc khi chạy từ script/cron)")
+  .option("--no-restart", "cập nhật + build nhưng chưa restart")
+  .action(async (opts) => cmdSync({ check: Boolean(opts.check), yes: Boolean(opts.yes), restart: opts.restart !== false }));
+
 const cert = program.command("cert").description("chứng chỉ SSL miễn phí qua Let's Encrypt (certbot)");
 cert.command("list").description("liệt kê mọi chứng chỉ + hạn dùng").action(() => cmdCertList());
 cert

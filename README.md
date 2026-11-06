@@ -98,7 +98,7 @@ mỗi bước.
 ```
  1. Kiểm tra & sửa môi trường        trạng thái từng database engine · xem · tự cài/sửa · chọn engine cần có
  2. App web (N)                       Tạo app mới · <domain> ›
-      <domain> ›                      xem · deploy · restart · dừng/khởi động · log
+      <domain> ›                      xem · kiểm tra bản mới · deploy · deploy key · restart · dừng/khởi động · log
                                       biến môi trường › · domain phụ › · SSL › · nginx ›
                                       [BẬT/TẮT] leak guard · chụp heap · xoá
  3. Background service (N)            Tạo service mới · <tên> ›
@@ -174,7 +174,9 @@ cặp `--x` / `--no-x` · cờ lặp lại được viết số ít và lặp l�
 | ↳ `[--allow-insecure-repo]` | Cho phép repo `http://`/`git://` (mặc định từ chối — dễ bị tráo mã giữa đường) |
 | `sudo napp app update <domain> [--auto-static] [--static-root …] [--upload-dir …] [--[no-]hotlink-protect] [--max-body …] [--[no-]scan-block]` | **Đổi cấu hình nginx của app ĐÃ TẠO** — chỉ đổi đúng cờ được truyền |
 | `sudo napp app delete <domain> [-y] [--source] [--database] [--all] [--keep-nginx] [--keep-ssl]` | Gỡ app — mặc định xoá nginx + SSL, **GIỮ** mã nguồn + database |
-| `sudo napp app deploy\|start\|stop\|restart <domain>` · `napp app logs <domain> [-f] [-n 200]` | Triển khai / điều khiển / xem log (nhiều instance: restart **cuốn chiếu**, không downtime) |
+| `sudo napp app deploy <domain> [--check] [--force] [--no-restart]` | Đồng bộ từ git và deploy — chỉ cài/build/restart khi cần |
+| `sudo napp app deploy-key <domain> [--regenerate]` | Xem public deploy key + hướng dẫn thêm vào repo + kiểm tra truy cập · sinh key mới |
+| `sudo napp app start\|stop\|restart <domain>` · `napp app logs <domain> [-f] [-n 200]` | Điều khiển / xem log (nhiều instance: restart **cuốn chiếu**, không downtime) |
 | `sudo napp app scale <domain> <số> [--sticky\|--no-sticky]` | Chạy **nhiều instance** (`napp-<slug>@<cổng>.service`), nginx chia tải — xem [Chạy nhiều instance](#-chạy-nhiều-instance-scale) |
 | `sudo napp app env list <domain> [--reveal]` | Xem `.env` (giá trị bí mật bị che) |
 | `sudo napp app env set <domain> KEY=VALUE...` · `unset <domain> KEY...` | Ghi / xoá biến trong `.env` (restart app để áp dụng) |
@@ -186,7 +188,9 @@ cặp `--x` / `--no-x` · cờ lặp lại được viết số ít và lặp l�
 | ↳ `[--run-as <domain>]` · `[--write-dir <path>]` · `[--app-dir apps/worker]` | Chạy bằng user app web · cấp thêm quyền ghi · monorepo |
 | `sudo napp service update <name> [--run-as <domain>\|--standalone] [--write-dir <path>\|--no-write-dir]` | Đổi **danh tính/quyền ghi** của service đã tạo |
 | `sudo napp service delete <name> [-y] [--source] [--database] [--all]` | Gỡ service — mặc định **GIỮ** mã nguồn + database |
-| `sudo napp service deploy\|start\|stop\|restart <name>` · `napp service logs <name> [-f]` | Triển khai / điều khiển / xem log |
+| `sudo napp service deploy <name> [--check] [--force] [--no-restart]` · `deploy-key <name> [--regenerate]` | Như `app deploy` / `app deploy-key` |
+| `sudo napp service start\|stop\|restart <name>` · `napp service logs <name> [-f]` | Điều khiển / xem log |
+| `sudo napp sync [--check] [-y] [--no-restart]` | Kiểm tra **mọi** app/service có repo, deploy những cái có commit mới |
 | `sudo napp service scale <name> <số>` | Chạy nhiều worker song song (`napp-svc-<slug>@1..N.service`) |
 | `sudo napp service env list\|set\|unset <name> …` | Như `app env` |
 | **`cert`** — SSL Let's Encrypt | |
@@ -358,16 +362,35 @@ phù hợp. Cờ truyền tay (`--install-cmd`, `--build-cmd`, `--start-cmd`) lu
   hardcode cổng 3000 (hay gặp với Fastify, Hono) thì napp cảnh báo kèm cách sửa,
   thay vì để nginx trả 502 mà không báo gì.
 
-**Repo private?** napp không hỏi mật khẩu tương tác (tránh treo) — truyền xác thực ngay khi tạo:
+**Repo private?** napp không hỏi mật khẩu tương tác (tránh treo). Hai cách:
 
 ```bash
-# HTTPS + Personal Access Token
+# SSH (khuyên dùng): napp TỰ SINH deploy key riêng cho app này
+sudo napp app create api.example.com --repo git@github.com:you/api.git
+```
+
+napp tạo cặp key `ed25519` trong home của user app (`~/.ssh/napp_deploy_<app>_<hash>`,
+quyền `600`), in **public key** cùng đường dẫn tới trang thêm key của repo
+(GitHub: *Settings → Deploy keys → Add deploy key*; GitLab, Bitbucket, Gitea
+tương tự), rồi chờ. Dán key vào repo (**không** tích *Allow write access*),
+nhấn Enter — napp kiểm tra bằng `git ls-remote`, đọc được repo thì clone tiếp.
+Chạy từ script (không có terminal) thì napp tự kiểm tra lại mỗi 10 giây, tối đa
+15 phút.
+
+- **Mỗi app/service một key**: GitHub/GitLab không cho một deploy key dùng cho
+  hai repo, và worker `--run-as` dùng chung user với app web cũng không giẫm key
+  của nhau. Private key không bao giờ rời server.
+- Đã có key sẵn: `--ssh-key <đường-dẫn-hoặc-nội-dung>` (napp cài nó thành key riêng của app).
+- Xem lại public key + kiểm tra truy cập: `sudo napp app deploy-key api.example.com`.
+- Xoay vòng key (lộ key, đổi người quản lý repo): `sudo napp app deploy-key api.example.com --regenerate`.
+  Key cũ **vẫn dùng** cho tới khi key mới đọc được repo; huỷ giữa chừng thì không mất gì.
+- App tạo bằng bản napp cũ (key chung trong `~/.ssh/config`) vẫn deploy như trước;
+  chạy `deploy-key` một lần để chuyển sang key riêng.
+
+```bash
+# HTTPS + Personal Access Token (fine-grained, chỉ quyền Contents: read)
 sudo napp app create api.example.com \
   --repo https://github.com/you/api.git --token ghp_xxx
-
-# SSH + deploy key
-sudo napp app create api.example.com \
-  --repo git@github.com:you/api.git --ssh-key /root/deploy_key
 ```
 
 Token/deploy key được lưu vào home của user app (quyền `600`) nên `napp app deploy` các lần sau cũng không hỏi lại.
@@ -387,8 +410,33 @@ sudo napp app logs api.example.com -f
 Deploy bản mới sau khi push code:
 
 ```bash
-sudo napp app deploy api.example.com
+sudo napp app deploy api.example.com            # fetch + chỉ làm phần cần thiết
+sudo napp app deploy api.example.com --check    # chỉ xem có commit mới không
+sudo napp app deploy api.example.com --force    # cài + build + restart dù không có gì mới
+sudo napp app deploy api.example.com --no-restart   # cập nhật + build, restart sau
+sudo napp sync                                  # mọi app/service: deploy cái có commit mới
+sudo napp sync --check                          # chỉ liệt kê cái có bản mới
 ```
+
+`deploy` so commit đang chạy với commit mới nhất trên branch rồi chỉ làm phần cần thiết:
+
+| Thay đổi | Cài dependencies | Build | Restart |
+|---|---|---|---|
+| Không có commit mới | – | – | – (không restart vô cớ) |
+| Chỉ README/CHANGELOG/LICENSE, `.github/`, `.gitlab-ci.yml`… | – | – | – |
+| Code, không đổi `package.json`/lockfile, không có build | – | – | có |
+| Code, có lệnh build | có* | có | có |
+| `package.json` / lockfile / `.npmrc` đổi | có | có (nếu có) | có |
+
+\* Lệnh build mặc định gỡ devDependencies sau khi build, nên lần build sau phải cài lại.
+
+- **Restart cuốn chiếu** khi chạy nhiều instance: không rớt request.
+- **Cài/build lỗi thì chưa restart**: tiến trình đang chạy vẫn là bản cũ. napp in
+  commit cũ kèm lệnh quay về.
+- `napp sync` kiểm tra mọi app/service có `--repo`. Đơn vị đã ở bản mới nhất thì
+  không bị đụng tới, một đơn vị lỗi không chặn các đơn vị khác. Chạy từ cron cần
+  `--yes`.
+- `napp app show` có thêm dòng **Bản đang chạy** (commit + thời điểm deploy) và **Deploy key**.
 
 ---
 
@@ -846,7 +894,7 @@ Lệnh này `chown` lại mã nguồn sang user mới, ghi lại unit và restar
 
 ```bash
 sudo napp service logs queue-email -f      # xem log
-sudo napp service deploy queue-email       # git pull + rebuild + restart
+sudo napp service deploy queue-email       # fetch + chỉ cài/build/restart khi cần (--check, --force, --no-restart)
 sudo napp service delete queue-email       # gỡ (mặc định giữ mã nguồn + database)
 ```
 

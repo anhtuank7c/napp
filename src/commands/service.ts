@@ -1,8 +1,8 @@
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, rmSync, readFileSync } from "node:fs";
 import { provisionRedis, redisEnvForUnit, rollbackRedis, describeUnitRedis, leaveRedisInstance, type RedisProvision } from "../lib/redis";
 import { ensureLogrotate } from "../lib/logrotate";
 import { ask } from "../lib/prompt";
-import { execCapture, runCmd, runAs, ensureDir, requireRoot, chmodNoFollow } from "../lib/exec";
+import { execCapture, runCmd, runAs, ensureDir, requireRoot, chmodNoFollow, writeFile } from "../lib/exec";
 import { info, ok, warn, die, section } from "../lib/log";
 import { validateServiceName, validatePort, validateRepoUrl, validateBranch, validateEnvKey, validateUnitCommand, validateWriteDir } from "../lib/validate";
 import {
@@ -32,7 +32,9 @@ import { mergeEnvFile, removeEnvKeys, printEnvFile } from "../lib/envfile";
 import { unitWorkDir, renderServiceSystemdService, execStartLine } from "../templates/systemd";
 import { detectHardware } from "../lib/hardware";
 import { serviceMemoryHighMB } from "../templates/tuning";
-import { GIT_NONINTERACTIVE_ENV, prepareRepoAuth, setupRepoAuth } from "../lib/repo";
+import { prepareRepoAuth, setupRepoAuth, cloneRepo, deployKeyPathFor, repoIsSsh, sshCommandFor, ensureUserSshDir } from "../lib/repo";
+import { provisionDeployKey, manageDeployKey, deployKeyRow, type DeployKeyOptions } from "../lib/deploykey";
+import { deployUnit, headCommit, type DeployOptions, type DeployTarget } from "../lib/deploy";
 import { defaultPackageManager, ensurePackageManager, ensureRuntime } from "../lib/provision";
 import { resolveUnitCommands, frameworkEnv } from "../lib/appprofile";
 import { applyNodeHeaps, writeServiceUnit, currentHeapPlan, unitMix, reportBalance, nodeOptionsFor } from "./app";
@@ -171,6 +173,7 @@ export async function cmdServiceCreate(name: string, opts: CreateServiceOptions)
   let rollbackActive = true;
   let dbCreatedName: string | undefined;
   let redisProv: RedisProvision = {}; // Redis riêng vừa tạo/tham gia -> rollback phải gỡ
+  let deployKey: string | undefined; // private key deploy riêng (repo SSH)
   const rollback = () => {
     if (!rollbackActive) return;
     warn("Tạo service thất bại — đang hoàn tác các thay đổi đã thực hiện...");
@@ -184,6 +187,11 @@ export async function cmdServiceCreate(name: string, opts: CreateServiceOptions)
       // app web chỉ vì worker tạo hỏng. Chỉ xoá user do chính lần này tạo ra.
       if (!borrowed && execCapture("id", [user]).code === 0) {
         runCmd("userdel", ["-r", user], { silentFail: true });
+      }
+      // User mượn thì home còn nguyên -> key vừa sinh cho service này phải tự dọn.
+      if (borrowed && deployKey) {
+        rmSync(deployKey, { force: true });
+        rmSync(`${deployKey}.pub`, { force: true });
       }
       rollbackRedis(redisProv, name, user);
       if (dbCreatedName) {
@@ -224,21 +232,12 @@ export async function cmdServiceCreate(name: string, opts: CreateServiceOptions)
     runCmd("chown", [`${user}:${user}`, workDir]);
 
     if (opts.repo) {
-      if (opts.token || opts.sshKey) setupRepoAuth(user, opts.repo, opts);
-      info(`Đang clone ${opts.repo} (branch ${opts.branch})...`);
-      const clone = runAs(user, "git", ["clone", "--branch", opts.branch, "--depth", "1", opts.repo, workDir], {
-        env: GIT_NONINTERACTIVE_ENV,
-        silentFail: true,
-      });
-      if (clone.code !== 0) {
-        const privateHint =
-          !opts.token && !opts.sshKey
-            ? `\n  Nếu đây là repo PRIVATE: napp KHÔNG hỏi mật khẩu tương tác (tránh treo). Hãy thêm:\n` +
-              `    - Repo HTTPS: --token <Personal-Access-Token>\n` +
-              `    - Repo SSH  : --ssh-key <đường-dẫn-deploy-key>`
-            : `\n  Kiểm tra lại token/deploy key có quyền đọc repo, và branch '${opts.branch}' tồn tại.`;
-        die(`Clone repo thất bại (mã ${clone.code}). Kiểm tra URL/branch, mạng, hoặc quyền truy cập.${privateHint}`);
-      }
+      // Repo SSH: key RIÊNG của service này. Có --ssh-key thì cài key đó; không có
+      // thì napp tự sinh key + hướng dẫn thêm vào Deploy keys của repo, chờ đọc được.
+      const keyPath = repoIsSsh(opts.repo) ? deployKeyPathFor(user, "service", name) : undefined;
+      if (opts.token || opts.sshKey) deployKey = setupRepoAuth(user, opts.repo, opts, keyPath);
+      else if (keyPath) deployKey = await provisionDeployKey({ user, kind: "service", id: name, repo: opts.repo, branch: opts.branch, keyPath });
+      cloneRepo(user, opts.repo, opts.branch, workDir, { keyPath: deployKey, hadAuth: Boolean(opts.token || opts.sshKey), kind: "service", id: name });
     } else {
       info("Không có --repo — tạo worker mẫu tối giản để bạn tự đưa mã nguồn lên sau...");
       runAs(user, "bash", [
@@ -352,6 +351,9 @@ EOF`,
       port,
       repoUrl: opts.repo,
       branch: opts.branch,
+      deployKey,
+      deployedCommit: opts.repo ? headCommit(user, workDir) : undefined,
+      deployedAt: opts.repo ? new Date().toISOString() : undefined,
       dbName: dbInfo?.name,
       dbUser: dbInfo?.user,
       dbEngine: dbInfo ? dbEngine : undefined,
@@ -422,7 +424,42 @@ EOF`,
   }
 }
 
-export async function cmdServiceDeploy(name: string): Promise<void> {
+// Chuyển deploy key sang home của user mới (service đổi --run-as/--standalone),
+// ghim lại core.sshCommand. Key đã mất thì giữ đường dẫn cũ — deploy sẽ báo
+// thiếu key kèm lệnh sinh key mới, thay vì âm thầm dùng key khác.
+function moveDeployKey(oldPath: string, user: string, name: string, workDir: string): string | undefined {
+  if (!existsSync(oldPath)) {
+    warn(`Không thấy deploy key ${oldPath} — sinh key mới: napp service deploy-key ${name} --regenerate`);
+    return oldPath;
+  }
+  const newPath = deployKeyPathFor(user, "service", name);
+  ensureUserSshDir(user);
+  writeFile(newPath, readFileSync(oldPath, "utf8"), 0o600, { owner: user });
+  if (existsSync(`${oldPath}.pub`)) writeFile(`${newPath}.pub`, readFileSync(`${oldPath}.pub`, "utf8"), 0o644, { owner: user });
+  rmSync(oldPath, { force: true });
+  rmSync(`${oldPath}.pub`, { force: true });
+  runAs(user, "git", ["config", "core.sshCommand", sshCommandFor(newPath)], { cwd: workDir, silentFail: true });
+  ok(`Đã chuyển deploy key sang ${newPath}.`);
+  return newPath;
+}
+
+export function serviceDeployTarget(svc: ServiceRecord): DeployTarget {
+  return {
+    kind: "service",
+    id: svc.name,
+    user: svc.user,
+    root: svc.workDir,
+    appDir: svc.appDir,
+    repoUrl: svc.repoUrl!,
+    branch: svc.branch,
+    deployKey: svc.deployKey,
+    installCmd: svc.installCmd,
+    buildCmd: svc.buildCmd,
+    packageManager: svc.packageManager,
+  };
+}
+
+export async function cmdServiceDeploy(name: string, opts: DeployOptions = {}): Promise<void> {
   requireRoot();
   validateServiceName(name);
   const svc = requireService(name);
@@ -430,29 +467,30 @@ export async function cmdServiceDeploy(name: string): Promise<void> {
 
   const release = acquireLock(name);
   try {
-    section(`Deploy service ${name}`);
-    info(`Đang git pull (${svc.branch})...`);
-    // Cùng env KHÔNG TƯƠNG TÁC như lúc clone: repo private dùng lại token/deploy key.
-    runAs(svc.user, "git", ["fetch", "origin", svc.branch], { cwd: svc.workDir, env: GIT_NONINTERACTIVE_ENV });
-    runAs(svc.user, "git", ["reset", "--hard", `origin/${svc.branch}`], { cwd: svc.workDir, env: GIT_NONINTERACTIVE_ENV });
-
-    if (svc.packageManager) ensurePackageManager(svc.packageManager);
-
-    info("Đang cài dependencies...");
-    runAs(svc.user, "bash", ["-lc", svc.installCmd], { cwd: svc.workDir });
-
-    if (svc.buildCmd) {
-      info("Đang build...");
-      runAs(svc.user, "bash", ["-lc", svc.buildCmd], { cwd: svc.workDir });
-    }
-
-    runCmd("chown", ["-hR", `${svc.user}:${svc.user}`, svc.workDir]);
-    chmodNoFollow(`${unitWorkDir(svc.workDir, svc.appDir)}/.env`, 0o600);
-
-    rollingRestart(serviceInstanceRefs(svc), name);
-    svc.updatedAt = new Date().toISOString();
+    section(opts.check ? `Kiểm tra bản mới: service ${name}` : `Deploy service ${name}`);
+    const plan = deployUnit(serviceDeployTarget(svc), opts, () => rollingRestart(serviceInstanceRefs(svc), name));
+    if (opts.check || (plan.upToDate && !opts.force)) return;
+    svc.deployedCommit = plan.target;
+    svc.deployedAt = svc.updatedAt = new Date().toISOString();
     upsertService(svc);
-    ok(`Deploy hoàn tất — đã khởi động lại ${serviceUnits(svc).join(", ")}`);
+    ok(plan.restart ? `Deploy hoàn tất — đã khởi động lại ${serviceUnits(svc).join(", ")}` : "Đã cập nhật mã nguồn.");
+  } finally {
+    release();
+  }
+}
+
+export async function cmdServiceDeployKey(name: string, opts: DeployKeyOptions): Promise<void> {
+  requireRoot();
+  validateServiceName(name);
+  const svc = requireService(name);
+  const release = acquireLock(name);
+  try {
+    const key = await manageDeployKey({ kind: "service", id: name, user: svc.user, root: svc.workDir, repo: svc.repoUrl, branch: svc.branch, current: svc.deployKey }, opts);
+    if (key && key !== svc.deployKey) {
+      svc.deployKey = key;
+      svc.updatedAt = new Date().toISOString();
+      upsertService(svc);
+    }
   } finally {
     release();
   }
@@ -532,6 +570,8 @@ export async function cmdServiceSet(name: string, opts: ServiceSetOptions): Prom
       runCmd("chown", ["-hR", `${svc.user}:${svc.user}`, svc.workDir]);
       chmodNoFollow(`${unitWorkDir(svc.workDir, svc.appDir)}/.env`, 0o600);
       ok(`Mã nguồn ${svc.workDir} đã chuyển sang user '${svc.user}'.`);
+      // Deploy key nằm trong home của user CŨ — user mới không đọc được.
+      if (svc.deployKey) svc.deployKey = moveDeployKey(svc.deployKey, svc.user, name, svc.workDir);
     }
 
     svc.updatedAt = new Date().toISOString();
@@ -632,6 +672,12 @@ export async function cmdServiceRemove(name: string, opts: ServiceRemoveOptions)
       const borrowers = servicesRunningAs(name, svc.user).filter((s) => s.name !== name);
       if (svc.runAsUnit) {
         info(`Giữ user hệ thống '${svc.user}' — user này thuộc về '${svc.runAsUnit}', service chỉ mượn để chạy.`);
+        // Home của user mượn còn nguyên -> deploy key RIÊNG của service này phải tự dọn.
+        if (svc.deployKey) {
+          rmSync(svc.deployKey, { force: true });
+          rmSync(`${svc.deployKey}.pub`, { force: true });
+          info(`Đã xoá deploy key của service (${svc.deployKey}) — nhớ xoá public key khỏi Deploy keys của repo.`);
+        }
       } else if (borrowers.length > 0) {
         warn(
           `GIỮ LẠI user hệ thống '${svc.user}' — ${borrowers.length} service khác đang chạy bằng user này (--run-as): ${borrowers.map((s) => s.name).join(", ")}.\n` +
@@ -791,6 +837,8 @@ export function cmdServiceShow(name: string): void {
     ["Instance", `${svc.instances?.length ?? 1} · đổi: napp service scale ${name} <số>`],
     ["Mã nguồn", svc.workDir + (svc.appDir ? ` (worker ở ${svc.appDir})` : "")],
     ["Repo", svc.repoUrl ? `${svc.repoUrl} @ ${svc.branch}` : "- (worker mẫu)"],
+    ["Bản đang chạy", svc.deployedCommit ? `${svc.deployedCommit.slice(0, 7)}${svc.deployedAt ? ` (deploy lúc ${svc.deployedAt})` : ""}` : undefined],
+    ["Deploy key", deployKeyRow("service", name, svc.repoUrl, svc.deployKey)],
     ["Chạy bằng", `${svc.user}${svc.runAsUnit ? ` (mượn của '${svc.runAsUnit}')` : ""} · systemd ${unit}`],
     ["Ghi thêm vào", svc.writePaths?.length ? svc.writePaths.join(", ") : "-"],
     ["Cổng nội bộ", svc.port !== undefined ? (svc.instances ? `127.0.0.1:${svc.instances.join(", :")}` : `127.0.0.1:${svc.port}`) : "-"],

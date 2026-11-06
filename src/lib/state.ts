@@ -42,6 +42,13 @@ export interface AppRecord {
   startCmd: string;
   repoUrl?: string;
   branch: string;
+  // Private key deploy RIÊNG của đơn vị (napp sinh ra hoặc từ --ssh-key), ghim
+  // vào git qua GIT_SSH_COMMAND/core.sshCommand. Bỏ trống = bản napp cũ (token
+  // hoặc ~/.ssh/config chung) — vẫn deploy được như trước.
+  deployKey?: string;
+  // Commit đang chạy sau lần deploy gần nhất (để 'napp sync' / 'show' hiển thị).
+  deployedCommit?: string;
+  deployedAt?: string;
   dbName?: string;
   dbUser?: string;
   // Engine của database trên. Bỏ trống = MariaDB (bản ghi từ trước khi có lựa chọn engine).
@@ -122,6 +129,13 @@ export interface ServiceRecord {
   port?: number; // chỉ có khi tạo với --port (service tự bind); không public qua nginx
   repoUrl?: string;
   branch: string;
+  // Private key deploy RIÊNG của đơn vị (napp sinh ra hoặc từ --ssh-key), ghim
+  // vào git qua GIT_SSH_COMMAND/core.sshCommand. Bỏ trống = bản napp cũ (token
+  // hoặc ~/.ssh/config chung) — vẫn deploy được như trước.
+  deployKey?: string;
+  // Commit đang chạy sau lần deploy gần nhất (để 'napp sync' / 'show' hiển thị).
+  deployedCommit?: string;
+  deployedAt?: string;
   dbName?: string;
   dbUser?: string;
   // Engine của database trên. Bỏ trống = MariaDB (bản ghi từ trước khi có lựa chọn engine).

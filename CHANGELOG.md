@@ -2,6 +2,20 @@
 
 Tất cả thay đổi đáng chú ý của `napp` được ghi lại ở đây.
 
+## 1.36.0
+
+**Deploy key riêng cho từng dự án** và **deploy thông minh từ git**.
+
+- **Tự sinh deploy key:** `app create` / `service create` với repo SSH (`git@github.com:owner/repo.git`) mà không có `--ssh-key` thì napp sinh cặp key `ed25519` riêng cho app/service đó, trong home của user chạy (quyền `600`). napp in public key, fingerprint, đường dẫn tới trang thêm key (GitHub, GitLab, Bitbucket, Gitea/Forgejo) và các bước làm, rồi chờ. Có terminal: nhấn Enter để kiểm tra, `q` để huỷ. Không có terminal: tự kiểm tra mỗi 10 giây, tối đa 15 phút. napp kiểm tra bằng `git ls-remote`, nên phân biệt được key chưa được thêm với sai branch.
+- **Mỗi đơn vị một key**, ghim qua `GIT_SSH_COMMAND` + `core.sshCommand`, không ghi `~/.ssh/config` chung nữa. Hai lỗi cũ hết theo: GitHub từ chối dùng một deploy key cho repo thứ hai, và worker `--run-as` ghi đè key của app web dùng chung user. `--ssh-key` có sẵn cũng được cài thành key riêng của đơn vị.
+- **`napp app|service deploy-key <id> [--regenerate]`:** xem public key, hướng dẫn và kết quả kiểm tra truy cập. Đơn vị tạo bằng bản cũ thì lệnh này sinh key riêng. `--regenerate` xoay vòng an toàn: key mới chỉ thay key cũ sau khi đọc được repo. `service update --run-as/--standalone` chuyển key sang home của user mới. Gỡ service mượn user thì xoá luôn key của nó.
+- **`deploy` chỉ làm phần cần thiết:** napp fetch rồi so commit đang chạy với commit mới nhất. Không có commit mới thì không làm gì (không restart vô cớ). Chỉ đổi README/LICENSE/`.github/`… thì cập nhật mã nguồn, không build/restart. `package.json`/lockfile không đổi và không có bước build thì bỏ qua bước cài. napp in danh sách commit mới và kế hoạch (cài/build/restart) trước khi chạy.
+- Cờ mới cho `app deploy` / `service deploy`: `--check` (chỉ xem có bản mới), `--force` (cài + build + restart dù không có gì mới), `--no-restart`.
+- **Cài/build lỗi thì chưa restart:** tiến trình đang chạy vẫn là bản cũ. napp in commit cũ kèm lệnh quay về. Fetch lỗi do xác thực thì gợi ý `deploy-key`.
+- **`napp sync [--check] [-y] [--no-restart]`:** kiểm tra mọi app/service có `--repo` và deploy những đơn vị có commit mới (restart cuốn chiếu). Một đơn vị lỗi không chặn các đơn vị khác. Menu chính có thêm mục **Đồng bộ mã nguồn từ git**. Menu của từng app/service có thêm: kiểm tra bản mới, deploy, deploy đầy đủ, deploy key.
+- `app show` / `service show` có thêm dòng **Bản đang chạy** (commit + thời điểm deploy) và **Deploy key** (đường dẫn + fingerprint).
+- **Tương thích ngược:** app/service tạo bằng bản cũ (token, hoặc key chung trong `~/.ssh/config`) vẫn deploy như trước. `state.json` thêm các trường tuỳ chọn `deployKey`, `deployedCommit`, `deployedAt`.
+
 ## 1.35.0
 
 Hỗ trợ các framework Node.js phổ biến: **NestJS, Express, Fastify, Hono, Elysia, Koa, hapi, AdonisJS**, cùng Next.js, Nuxt, SvelteKit, Astro, Remix/React Router.

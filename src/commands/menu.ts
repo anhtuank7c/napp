@@ -9,6 +9,7 @@ import { loadNotifyConfig } from "../lib/notify";
 import {
   cmdAppCreate,
   cmdAppDeploy,
+  cmdAppDeployKey,
   cmdAppRemove,
   cmdAppRestart,
   cmdAppStop,
@@ -25,6 +26,7 @@ import {
 import {
   cmdServiceCreate,
   cmdServiceDeploy,
+  cmdServiceDeployKey,
   cmdServiceRemove,
   cmdServiceRestart,
   cmdServiceStop,
@@ -42,6 +44,7 @@ import type { Runtime, PackageManager } from "../lib/state";
 import { getAcmeEmail, findUnit, getApp, getService, loadState } from "../lib/state";
 import { anyActive, appInstanceRefs, serviceInstanceRefs, MAX_INSTANCES } from "../lib/instances";
 import { cmdDomainAdd, cmdDomainRemove, cmdDomainList } from "./domain";
+import { cmdSync } from "./sync";
 import { cmdCertIssue, cmdCertRenew, cmdCertList, cmdCertRevoke, cmdCertStatus } from "./cert";
 import { cmdDbCreate, cmdDbList, cmdDbBackup, cmdDbDrop, cmdDbPassword } from "./db";
 import { cmdRedisAllocations, cmdRedisInfo, cmdRedisFlush, cmdRedisList, cmdRedisShow, cmdRedisMigrate } from "./redis";
@@ -114,6 +117,23 @@ async function askSshKey(): Promise<string | undefined> {
   if (!first) return undefined;
   if (!/^-----BEGIN /.test(first)) return first; // 1 dòng, không phải header key -> coi là đường dẫn
   return lines.join("\n");
+}
+
+// Xác thực repo lúc tạo app/service:
+//  - Repo SSH: mặc định napp TỰ SINH deploy key riêng (in public key + hướng dẫn
+//    thêm vào repo, chờ tới khi đọc được) — chỉ hỏi nếu muốn dùng key có sẵn.
+//  - Repo HTTPS private: Personal Access Token.
+async function askRepoAuth(repo: string): Promise<{ token?: string; sshKey?: string }> {
+  if (!repo) return {};
+  if (!/^https?:\/\//i.test(repo)) {
+    console.log(colorText("dim", "  Repo SSH: napp sẽ tự sinh deploy key RIÊNG cho đơn vị này và hướng dẫn bạn thêm public key vào repo."));
+    if (await askYesNo("Dùng deploy key CÓ SẴN thay vì để napp sinh key mới?")) return { sshKey: await askSshKey() };
+    return {};
+  }
+  if (await askYesNo("Repo này có PRIVATE (cần xác thực) không?")) {
+    return { token: (await ask("Personal Access Token (HTTPS): ")) || undefined };
+  }
+  return {};
 }
 
 // Chọn 1 giá trị trong danh sách: ↑/↓ + Enter (terminal) hoặc gõ số (pipe).
@@ -525,10 +545,7 @@ async function createAppFlow(): Promise<void> {
   // username/password (HTTPS) hoặc yes/no host-key (SSH). Hỏi ngay tại đây.
   let token: string | undefined;
   let sshKey: string | undefined;
-  if (repo && (await askYesNo("Repo này có PRIVATE (cần xác thực) không?"))) {
-    if (/^https?:\/\//i.test(repo)) token = (await ask("Personal Access Token (HTTPS): ")) || undefined;
-    else sshKey = await askSshKey();
-  }
+  ({ token, sshKey } = await askRepoAuth(repo));
   const runtime = await askChoice<Runtime>("Runtime engine", ["node", "bun"], "node");
   const pmDefault: PackageManager = runtime === "bun" ? "bun" : "npm";
   const packageManager = await askChoice<PackageManager>("Trình quản lý gói phụ thuộc", ["npm", "pnpm", "yarn", "bun"], pmDefault);
@@ -589,7 +606,16 @@ async function appContext(domain: string): Promise<void> {
       ],
       items: [
         { label: "Xem chi tiết", run: () => (cli(`app show ${domain}`), cmdAppShow(domain)) },
-        { label: "Deploy (git pull + build + restart)", run: () => (cli(`app deploy ${domain}`), cmdAppDeploy(domain)) },
+        ...(app.repoUrl
+          ? [
+              { label: "Kiểm tra bản mới trên git (chỉ xem)", run: () => (cli(`app deploy ${domain} --check`), cmdAppDeploy(domain, { check: true })) },
+              { label: "Deploy bản mới (chỉ cài/build/restart khi cần)", run: () => (cli(`app deploy ${domain}`), cmdAppDeploy(domain)) },
+              { label: "Deploy lại đầy đủ (cài + build + restart dù không có gì mới)", run: () => (cli(`app deploy ${domain} --force`), cmdAppDeploy(domain, { force: true })) },
+              ...(!/^https?:\/\//i.test(app.repoUrl)
+                ? [{ label: "Deploy key (SSH): xem / kiểm tra / sinh mới", run: () => deployKeyFlow("app", domain) }]
+                : []),
+            ]
+          : []),
         { label: "Khởi động lại", run: () => (cli(`app restart ${domain}`), cmdAppRestart(domain)) },
         up
           ? { label: "Dừng app", run: () => (cli(`app stop ${domain}`), cmdAppStop(domain)) }
@@ -816,6 +842,18 @@ async function appNginxMenu(domain: string): Promise<void> {
   });
 }
 
+async function deployKeyFlow(kind: "app" | "service", id: string): Promise<void> {
+  const action = await pickOrCancel("Deploy key", [
+    { label: "Xem public key + hướng dẫn thêm vào repo + kiểm tra truy cập", value: "show" as const },
+    { label: "Sinh key MỚI (key cũ chỉ bị thay khi key mới đọc được repo)", value: "regenerate" as const },
+  ]);
+  if (!action) return;
+  const regenerate = action === "regenerate";
+  cli(`${kind} deploy-key ${id}${regenerate ? " --regenerate" : ""}`);
+  if (kind === "app") await cmdAppDeployKey(id, { regenerate });
+  else await cmdServiceDeployKey(id, { regenerate });
+}
+
 // -------------------------------------------------------------- 3. Service
 async function createServiceFlow(): Promise<void> {
   const name = await ask("Tên service (vd: worker-telegram, queue-email): ");
@@ -823,10 +861,7 @@ async function createServiceFlow(): Promise<void> {
   const repo = await ask("Git repo URL (bỏ trống nếu chưa có): ");
   let token: string | undefined;
   let sshKey: string | undefined;
-  if (repo && (await askYesNo("Repo này có PRIVATE (cần xác thực) không?"))) {
-    if (/^https?:\/\//i.test(repo)) token = (await ask("Personal Access Token (HTTPS): ")) || undefined;
-    else sshKey = await askSshKey();
-  }
+  ({ token, sshKey } = await askRepoAuth(repo));
   const startCmd = (await ask("Lệnh khởi động (Enter = tự chọn theo framework/package.json; vd: node worker.js): ")) || undefined;
   const runtime = await askChoice<Runtime>("Runtime engine", ["node", "bun"], "node");
   const pmDefault: PackageManager = runtime === "bun" ? "bun" : "npm";
@@ -910,7 +945,16 @@ async function serviceContext(name: string): Promise<void> {
       ],
       items: [
         { label: "Xem chi tiết", run: () => (cli(`service show ${name}`), cmdServiceShow(name)) },
-        { label: "Deploy (git pull + build + restart)", run: () => (cli(`service deploy ${name}`), cmdServiceDeploy(name)) },
+        ...(svc.repoUrl
+          ? [
+              { label: "Kiểm tra bản mới trên git (chỉ xem)", run: () => (cli(`service deploy ${name} --check`), cmdServiceDeploy(name, { check: true })) },
+              { label: "Deploy bản mới (chỉ cài/build/restart khi cần)", run: () => (cli(`service deploy ${name}`), cmdServiceDeploy(name)) },
+              { label: "Deploy lại đầy đủ (cài + build + restart dù không có gì mới)", run: () => (cli(`service deploy ${name} --force`), cmdServiceDeploy(name, { force: true })) },
+              ...(!/^https?:\/\//i.test(svc.repoUrl)
+                ? [{ label: "Deploy key (SSH): xem / kiểm tra / sinh mới", run: () => deployKeyFlow("service", name) }]
+                : []),
+            ]
+          : []),
         { label: "Khởi động lại", run: () => (cli(`service restart ${name}`), cmdServiceRestart(name)) },
         up
           ? { label: "Dừng service", run: () => (cli(`service stop ${name}`), cmdServiceStop(name)) }
@@ -1440,6 +1484,18 @@ async function menuMem(): Promise<void> {
   }));
 }
 
+// ------------------------------------------------------------- Đồng bộ git
+async function menuSync(): Promise<void> {
+  await menuLoop(() => ({
+    title: "Đồng bộ mã nguồn từ git",
+    header: [colorText("dim", "Chỉ đơn vị có commit mới mới bị deploy; cài/build/restart chỉ khi thay đổi cần tới. Nhiều instance: restart cuốn chiếu.")],
+    items: [
+      { label: "Kiểm tra app/service nào có bản mới (chỉ xem)", run: () => (cli("sync --check"), cmdSync({ check: true })) },
+      { label: "Deploy mọi app/service có bản mới", run: () => (cli("sync"), cmdSync({})) },
+    ],
+  }));
+}
+
 // ------------------------------------------------------------------ 11. napp
 async function menuNapp(): Promise<void> {
   await menuLoop(() => ({
@@ -1464,6 +1520,7 @@ function topItems(): Item[] {
     { label: "Kiểm tra & sửa môi trường", run: menuCheck, open: true },
     { label: `App web (${apps})`, run: menuApps, open: true },
     { label: `Background service (${services})`, run: menuServices, open: true },
+    { label: "Đồng bộ mã nguồn từ git (mọi app/service)", run: menuSync, open: true },
     { label: "SSL", run: menuCert, open: true },
     { label: "Database", run: menuDb, open: true },
     { label: "Redis", run: menuRedis, open: true },

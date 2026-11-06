@@ -52,6 +52,7 @@ export function isStateChanging(path: string[], args: string[]): boolean {
   if (path[0] === "check") return args.includes("--fix") || args.some((a) => a.startsWith("--db"));
   if (path[0] === "doctor") return path.includes("upgrade");
   if (path[0] === "tune" && verb === "show") return false;
+  if ((verb === "deploy" || verb === "sync") && args.includes("--check")) return false; // chỉ fetch + xem
   return true;
 }
 

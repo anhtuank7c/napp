@@ -42,7 +42,9 @@ import { writeManagedUnit, patchUnitHeap, patchUnitPriority, type UnitWriteResul
 import { detectHardware, detectResourceControl } from "../lib/hardware";
 import { nodeHeapPlan, serviceMemoryHighMB, CPU_WEIGHT_WEB, CPU_WEIGHT_SERVICE, IO_WEIGHT_WEB, IO_WEIGHT_SERVICE, type NodeHeapPlan, type UnitMix } from "../templates/tuning";
 import { ipv6Available } from "../lib/network";
-import { GIT_NONINTERACTIVE_ENV, prepareRepoAuth, setupRepoAuth } from "../lib/repo";
+import { prepareRepoAuth, setupRepoAuth, cloneRepo, deployKeyPathFor, repoIsSsh } from "../lib/repo";
+import { provisionDeployKey, manageDeployKey, deployKeyRow, type DeployKeyOptions } from "../lib/deploykey";
+import { deployUnit, headCommit, type DeployOptions, type DeployTarget } from "../lib/deploy";
 import { detectStaticLayout, detectUploadDir, parseStaticAlias, staticSetCommand, type StaticAlias, type StaticSuggestion } from "../lib/framework";
 import { appServePaths, ensureNginxCanServe } from "../lib/staticaccess";
 import { defaultPackageManager, ensurePackageManager, ensureRuntime } from "../lib/provision";
@@ -449,6 +451,7 @@ export async function cmdAppCreate(domain: string, opts: CreateAppOptions): Prom
   let rollbackActive = true;
   let dbCreatedName: string | undefined; // set ngay sau khi createDatabase() thành công, để rollback biết cần xoá
   let redisProv: RedisProvision = {}; // Redis riêng vừa tạo/tham gia -> rollback phải gỡ
+  let deployKey: string | undefined; // private key deploy riêng (repo SSH)
   const rollback = () => {
     if (!rollbackActive) return;
     warn("Tạo app thất bại — đang hoàn tác các thay đổi đã thực hiện...");
@@ -490,21 +493,12 @@ export async function cmdAppCreate(domain: string, opts: CreateAppOptions): Prom
     runCmd("chown", [`${user}:${user}`, webRoot]);
 
     if (opts.repo) {
-      if (opts.token || opts.sshKey) setupRepoAuth(user, opts.repo, opts);
-      info(`Đang clone ${opts.repo} (branch ${opts.branch})...`);
-      const clone = runAs(user, "git", ["clone", "--branch", opts.branch, "--depth", "1", opts.repo, webRoot], {
-        env: GIT_NONINTERACTIVE_ENV,
-        silentFail: true,
-      });
-      if (clone.code !== 0) {
-        const privateHint =
-          !opts.token && !opts.sshKey
-            ? `\n  Nếu đây là repo PRIVATE: napp KHÔNG hỏi mật khẩu tương tác (tránh treo). Hãy thêm:\n` +
-              `    - Repo HTTPS: --token <Personal-Access-Token>\n` +
-              `    - Repo SSH  : --ssh-key <đường-dẫn-deploy-key>`
-            : `\n  Kiểm tra lại token/deploy key có quyền đọc repo, và branch '${opts.branch}' tồn tại.`;
-        die(`Clone repo thất bại (mã ${clone.code}). Kiểm tra URL/branch, mạng, hoặc quyền truy cập.${privateHint}`);
-      }
+      // Repo SSH: key RIÊNG của app này. Có --ssh-key thì cài key đó; không có
+      // thì napp tự sinh key + hướng dẫn thêm vào Deploy keys của repo, chờ đọc được.
+      const keyPath = repoIsSsh(opts.repo) ? deployKeyPathFor(user, "app", domain) : undefined;
+      if (opts.token || opts.sshKey) deployKey = setupRepoAuth(user, opts.repo, opts, keyPath);
+      else if (keyPath) deployKey = await provisionDeployKey({ user, kind: "app", id: domain, repo: opts.repo, branch: opts.branch, keyPath });
+      cloneRepo(user, opts.repo, opts.branch, webRoot, { keyPath: deployKey, hadAuth: Boolean(opts.token || opts.sshKey), kind: "app", id: domain });
     } else {
       info("Không có --repo — tạo app mẫu tối giản để bạn tự đưa mã nguồn lên sau...");
       runAs(user, "bash", [
@@ -763,6 +757,9 @@ EOF`,
       startCmd,
       repoUrl: opts.repo,
       branch: opts.branch,
+      deployKey,
+      deployedCommit: opts.repo ? headCommit(user, webRoot) : undefined,
+      deployedAt: opts.repo ? new Date().toISOString() : undefined,
       dbName: dbInfo?.name,
       dbUser: dbInfo?.user,
       dbEngine: dbInfo ? dbEngine : undefined,
@@ -887,7 +884,23 @@ EOF`,
   }
 }
 
-export async function cmdAppDeploy(domain: string): Promise<void> {
+export function appDeployTarget(app: AppRecord): DeployTarget {
+  return {
+    kind: "app",
+    id: app.domain,
+    user: app.user,
+    root: app.webRoot,
+    appDir: app.appDir,
+    repoUrl: app.repoUrl!,
+    branch: app.branch,
+    deployKey: app.deployKey,
+    installCmd: app.installCmd,
+    buildCmd: app.buildCmd,
+    packageManager: app.packageManager,
+  };
+}
+
+export async function cmdAppDeploy(domain: string, opts: DeployOptions = {}): Promise<void> {
   requireRoot();
   validateDomain(domain);
   const app = requireApp(domain);
@@ -895,33 +908,31 @@ export async function cmdAppDeploy(domain: string): Promise<void> {
 
   const release = acquireLock(domain);
   try {
-    section(`Deploy ${domain}`);
-    info(`Đang git pull (${app.branch})...`);
-    // Cùng env KHÔNG TƯƠNG TÁC như lúc clone: repo private dùng lại token/deploy
-    // key đã lưu trong home của user app; nếu hỏng thì fail rõ ràng, không treo.
-    runAs(app.user, "git", ["fetch", "origin", app.branch], { cwd: app.webRoot, env: GIT_NONINTERACTIVE_ENV });
-    runAs(app.user, "git", ["reset", "--hard", `origin/${app.branch}`], { cwd: app.webRoot, env: GIT_NONINTERACTIVE_ENV });
-
-    // Đảm bảo trình quản lý gói của app dùng được ở mức hệ thống (tự cài pnpm/yarn
-    // nếu thiếu) — tránh 'command not found' khi chạy installCmd dưới app user.
-    if (app.packageManager) ensurePackageManager(app.packageManager);
-
-    info("Đang cài dependencies...");
-    runAs(app.user, "bash", ["-lc", app.installCmd], { cwd: app.webRoot });
-
-    if (app.buildCmd) {
-      info("Đang build...");
-      runAs(app.user, "bash", ["-lc", app.buildCmd], { cwd: app.webRoot });
-    }
-
-    runCmd("chown", ["-hR", `${app.user}:${app.user}`, app.webRoot]);
-    chmodNoFollow(`${unitWorkDir(app.webRoot, app.appDir)}/.env`, 0o600);
-
+    section(opts.check ? `Kiểm tra bản mới: ${domain}` : `Deploy ${domain}`);
     // Nhiều instance: cuốn chiếu, chờ từng instance nghe cổng — không downtime.
-    rollingRestart(appInstanceRefs(app), domain);
-    app.updatedAt = new Date().toISOString();
+    const plan = deployUnit(appDeployTarget(app), opts, () => rollingRestart(appInstanceRefs(app), domain));
+    if (opts.check || (plan.upToDate && !opts.force)) return;
+    app.deployedCommit = plan.target;
+    app.deployedAt = app.updatedAt = new Date().toISOString();
     upsertApp(app);
-    ok(`Deploy hoàn tất — đã khởi động lại ${appUnits(app).join(", ")}`);
+    ok(plan.restart ? `Deploy hoàn tất — đã khởi động lại ${appUnits(app).join(", ")}` : "Đã cập nhật mã nguồn.");
+  } finally {
+    release();
+  }
+}
+
+export async function cmdAppDeployKey(domain: string, opts: DeployKeyOptions): Promise<void> {
+  requireRoot();
+  validateDomain(domain);
+  const app = requireApp(domain);
+  const release = acquireLock(domain);
+  try {
+    const key = await manageDeployKey({ kind: "app", id: domain, user: app.user, root: app.webRoot, repo: app.repoUrl, branch: app.branch, current: app.deployKey }, opts);
+    if (key && key !== app.deployKey) {
+      app.deployKey = key;
+      app.updatedAt = new Date().toISOString();
+      upsertApp(app);
+    }
   } finally {
     release();
   }
@@ -1215,6 +1226,8 @@ export function cmdAppShow(domain: string): void {
     ["Domain phụ", app.aliasDomains.length > 0 ? app.aliasDomains.join(", ") : "-"],
     ["Mã nguồn", app.webRoot + (app.appDir ? ` (app ở ${app.appDir})` : "")],
     ["Repo", app.repoUrl ? `${app.repoUrl} @ ${app.branch}` : "- (app mẫu)"],
+    ["Bản đang chạy", app.deployedCommit ? `${app.deployedCommit.slice(0, 7)}${app.deployedAt ? ` (deploy lúc ${app.deployedAt})` : ""}` : undefined],
+    ["Deploy key", deployKeyRow("app", domain, app.repoUrl, app.deployKey)],
     ["Chạy bằng", `${app.user} · systemd ${unit}`],
     ["Cổng nội bộ", app.instances ? `127.0.0.1:${app.instances.join(", :")}` : `127.0.0.1:${app.port}`],
     ["Runtime", `${app.nodeRuntime} · ${app.packageManager ?? "npm"}`],
